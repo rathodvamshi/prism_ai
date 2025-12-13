@@ -1,0 +1,54 @@
+# Ignore Python virtual environments
+prism-backend/venv/
+prism-backend/.venv/
+venv/
+.venv/
+
+# Ignore Node.js dependencies and build outputs
+Frontend/node_modules/
+Frontend/.pnpm-store/
+Frontend/.turbo/
+Frontend/dist/
+Frontend/.cache/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+Frontend/npm-debug.log*
+Frontend/yarn-debug.log*
+Frontend/yarn-error.log*
+Frontend/pnpm-debug.log*
+
+# Node
+node_modules/
+bun.lockb
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+ENV/
+
+# Project-specific
+prism-backend/venv/
+prism-backend/.env
+
+# Build outputs
+dist/
+build/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.DS_Store

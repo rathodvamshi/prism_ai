@@ -1,0 +1,313 @@
+@import "@fontsource/plus-jakarta-sans/400.css";
+@import "@fontsource/plus-jakarta-sans/500.css";
+@import "@fontsource/plus-jakarta-sans/600.css";
+@import "@fontsource/plus-jakarta-sans/700.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 14% 97%;
+    --foreground: 0 0% 18%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 18%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 18%;
+
+    --primary: 160 83% 35%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 0 0% 18%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 160 83% 35%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 158 64% 40%;
+    --success-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 160 83% 35%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 0 0% 18%;
+    --sidebar-primary: 160 83% 35%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 96%;
+    --sidebar-accent-foreground: 0 0% 18%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 160 83% 35%;
+
+    /* Highlight colors */
+    --highlight-yellow: 48 100% 67%;
+    --highlight-green: 142 69% 58%;
+    --highlight-blue: 199 89% 70%;
+    --highlight-pink: 330 81% 75%;
+
+    /* Gradients */
+    --gradient-prism: linear-gradient(135deg, hsl(160 83% 35%) 0%, hsl(199 89% 48%) 50%, hsl(280 67% 52%) 100%);
+    --gradient-subtle: linear-gradient(180deg, hsl(220 14% 97%) 0%, hsl(0 0% 100%) 100%);
+
+    /* Shadows */
+    --shadow-soft: 0 2px 8px -2px hsl(0 0% 0% / 0.08);
+    --shadow-card: 0 4px 16px -4px hsl(0 0% 0% / 0.1);
+    --shadow-glow: 0 0 24px hsl(160 83% 35% / 0.2);
+  }
+
+  .dark {
+    --background: 220 13% 8%;
+    --foreground: 0 0% 95%;
+
+    --card: 220 13% 10%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 220 13% 10%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 160 83% 45%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 13% 15%;
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 9% 65%;
+
+    --accent: 160 83% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 20%;
+    --input: 220 13% 20%;
+    --ring: 160 83% 45%;
+
+    --sidebar-background: 220 13% 8%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 160 83% 45%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 13% 15%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 220 13% 20%;
+    --sidebar-ring: 160 83% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased max-w-full overflow-x-hidden;
+    /* Hide scrollbar for IE, Edge and Firefox */
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+    transition: background 0.3s ease, color 0.3s ease;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    font-size: clamp(0.9rem, 0.9rem + 0.25vw, 1.05rem);
+    line-height: 1.6;
+  }
+
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  body::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Fluid root sizing for rem-based spacing */
+  html {
+    font-size: clamp(14px, 1.2vw, 18px);
+  }
+
+  /* Containers are fluid by default */
+  .container,
+  .content,
+  main,
+  section,
+  article,
+  aside,
+  header,
+  footer,
+  nav {
+    max-width: 100%;
+    overflow: hidden;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/80 backdrop-blur-xl;
+  }
+
+  .prism-glow {
+    box-shadow: var(--shadow-glow);
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.4s ease-out forwards;
+  }
+
+  .animate-slide-right {
+    animation: slideRight 0.3s ease-out forwards;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.2s ease-out forwards;
+  }
+
+  .animate-pulse-soft {
+    animation: pulseSoft 2s ease-in-out infinite;
+  }
+
+  /* Hide scrollbars while preserving scroll behavior */
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none; /* Chrome, Safari, Opera */
+  }
+
+  /* Media helpers (responsive paddings/margins) */
+  .pad-responsive {
+    padding: clamp(0.75rem, 1rem + 0.5vw, 2rem);
+  }
+  .gap-responsive {
+    gap: clamp(0.5rem, 0.5rem + 0.5vw, 1.5rem);
+  }
+  .radius-responsive {
+    border-radius: clamp(0.5rem, 0.5rem + 0.5vw, 1rem);
+  }
+  .text-responsive {
+    font-size: clamp(0.85rem, 0.9rem + 0.25vw, 1.125rem);
+  }
+  .icon-responsive {
+    width: clamp(1rem, 1rem + 0.5vw, 1.5rem);
+    height: clamp(1rem, 1rem + 0.5vw, 1.5rem);
+  }
+  .btn-responsive {
+    padding-inline: clamp(0.75rem, 0.75rem + 0.5vw, 1.25rem);
+    padding-block: clamp(0.5rem, 0.5rem + 0.25vw, 0.75rem);
+  }
+  .input-responsive {
+    padding-inline: clamp(0.75rem, 0.75rem + 0.5vw, 1.25rem);
+    padding-block: clamp(0.5rem, 0.5rem + 0.25vw, 0.75rem);
+    min-height: clamp(2rem, 2.25rem + 0.5vw, 2.75rem);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pulseSoft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Hard override page-wide theme colors per request */
+body {
+  background-color: #ffffff !important;
+  color: #0f172a !important; /* readable dark text */
+}
+
+/* Support both patterns: html.dark body and body.dark */
+.dark body,
+body.dark {
+  background-color: #303030 !important;
+  color: #ffffff !important;
+}
+
+/* Images & media defaults */
+img, svg, video, canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+.media-cover {
+  object-fit: cover;
+}
+.media-contain {
+  object-fit: contain;
+}
+
+/* Horizontal Features Scrollbar Hide */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Performance optimizations for animations */
+.will-change-transform {
+  will-change: transform;
+}
+
+.backface-hidden {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* Smooth scroll snap */
+.snap-x {
+  scroll-snap-type: x mandatory;
+}
+
+.snap-center {
+  scroll-snap-align: center;
+}
+
+/* Hardware acceleration for smooth animations */
+@media (min-width: 768px) {
+  #features-section [class*="group"] {
+    transform: translateZ(0);
+    perspective: 1000px;
+  }
+}
+
+/* Smooth gradient animations */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}

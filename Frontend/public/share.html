@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PRISM Share</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:#0b0b0f; color:#e6e6e6; }
+    .wrap { max-width: 880px; margin: 24px auto; padding: 16px; }
+    .card { background:#121217; border:1px solid #24242a; border-radius:12px; padding:16px; }
+    .msg { display:flex; gap:10px; margin-bottom:12px; }
+    .avatar { width:28px; height:28px; border-radius:50%; background:#1e1e24; border:1px solid #2a2a31; display:flex; align-items:center; justify-content:center; }
+    .bubble { flex:1; border-radius:12px; padding:10px 12px; }
+    .bubble.ai { background:transparent; }
+    .bubble.user { background:#181820; border:1px solid #2a2a31; }
+    .hl { border-radius:3px; padding:0 2px; }
+    .faint { color:#a0a0a0; font-size:12px; }
+    .error { color:#ff7b7b; }
+    .controls { display:flex; gap:8px; margin:8px 0 16px; }
+    .btn { padding:6px 10px; border:1px solid #2a2a31; background:#16161c; color:#d0d0d0; border-radius:8px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 style="font-size:18px;margin:0 0 12px">Shared Conversation</h1>
+    <div id="status" class="faint">Loading…</div>
+    <div class="controls">
+      <button class="btn" id="copyLink">Copy Link</button>
+      <button class="btn" id="downloadJson">Download JSON</button>
+    </div>
+    <div id="content" class="card"></div>
+  </div>
+  <script>
+    function decodeHash() {
+      const hash = location.hash.startsWith('#') ? location.hash.slice(1) : '';
+      if (!hash) return null;
+      try {
+        const json = decodeURIComponent(escape(atob(hash)));
+        return JSON.parse(json);
+      } catch (e) {
+        console.error(e);
+        return null;
+      }
+    }
+
+    function applyHighlights(text, entries, msgId) {
+      const ranges = (entries || []).filter(e => e.msgId === msgId)
+        .map(e => ({ start: e.range[0], end: e.range[1], color: e.color }))
+        .filter(r => r.start >= 0 && r.end <= text.length && r.start < r.end)
+        .sort((a,b) => a.start - b.start);
+      if (ranges.length === 0) return document.createTextNode(text);
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const r of ranges) {
+        if (cursor < r.start) frag.appendChild(document.createTextNode(text.slice(cursor, r.start)));
+        const span = document.createElement('span');
+        span.className = 'hl';
+        span.style.background = r.color;
+        span.textContent = text.slice(r.start, r.end);
+        frag.appendChild(span);
+        cursor = r.end;
+      }
+      if (cursor < text.length) frag.appendChild(document.createTextNode(text.slice(cursor)));
+      return frag;
+    }
+
+    function render(data) {
+      const status = document.getElementById('status');
+      const content = document.getElementById('content');
+      content.innerHTML = '';
+      if (!data) {
+        status.textContent = 'Invalid or empty share link.';
+        status.className = 'error';
+        return;
+      }
+      status.textContent = 'Ready';
+      status.className = 'faint';
+
+      let highlights = [];
+      if (data.highlights) {
+        try {
+          const decoded = decodeURIComponent(escape(atob(data.highlights)));
+          highlights = JSON.parse(decoded);
+        } catch (e) { console.warn('Failed to decode highlights', e); }
+      }
+
+      const title = document.createElement('div');
+      title.className = 'faint';
+      title.textContent = 'Chat ID: ' + (data.chatId || 'unknown');
+      content.appendChild(title);
+
+      (data.messages || []).forEach(m => {
+        const row = document.createElement('div');
+        row.className = 'msg';
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.textContent = m.role === 'user' ? 'U' : 'A';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble ' + (m.role === 'user' ? 'user' : 'ai');
+        bubble.appendChild(applyHighlights(m.content || '', highlights, m.id));
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+        content.appendChild(row);
+      });
+    }
+
+    function init() {
+      const data = decodeHash();
+      render(data);
+      document.getElementById('copyLink').onclick = () => {
+        try { navigator.clipboard.writeText(location.href); } catch {}
+      };
+      document.getElementById('downloadJson').onclick = () => {
+        const data = decodeHash();
+        if (!data) return;
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'prism-share.json'; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+      window.addEventListener('hashchange', () => render(decodeHash()));
+    }
+    init();
+  </script>
+</body>
+</html>
