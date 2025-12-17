@@ -1,5 +1,0 @@
-{
-  "buildCommand": "ls -la && ls -la Frontend && cd Frontend && npm install && npm run build",
-  "outputDirectory": "Frontend/dist",
-  "installCommand": "ls -la && ls -la Frontend && cd Frontend && npm install"
-}
