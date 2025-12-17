@@ -1,12 +1,6 @@
-# Ignore Python backend - deploy only Frontend
+# Ignore Python backend files only
 prism-backend/
-*.py
-*.pyc
-__pycache__/
-.pytest_cache/
-requirements.txt
-Dockerfile
-docker-compose.yml
-
-# Keep Frontend files for deployment
-!Frontend/
+render*.yaml
+RENDER_MANUAL_SETUP.md
+COMMANDS.md
+.renderignore

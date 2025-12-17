@@ -1,9 +1,9 @@
 {
   "version": 2,
   "name": "prism-ai-studio",
-  "buildCommand": "cd Frontend && npm install && npm run build",
+  "buildCommand": "npm --prefix Frontend install && npm --prefix Frontend run build",
   "outputDirectory": "Frontend/dist",
-  "installCommand": "cd Frontend && npm install",
+  "installCommand": "npm --prefix Frontend install",
   "framework": "vite",
   "rewrites": [
     {
