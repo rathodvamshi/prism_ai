@@ -26,50 +26,124 @@ logger = logging.getLogger(__name__)
 
 # Initialize Driver with error handling
 def create_neo4j_driver():
-    """Create Neo4j driver with proper error handling"""
+    """Create Neo4j driver with proper error handling and optimized connection settings"""
     try:
         if not settings.NEO4J_URI or settings.NEO4J_URI == "neo4j://localhost:7687":
             logger.warning("Neo4j URI not configured, using None driver")
             return None
         
+        # Enhanced connection settings for Neo4j Aura
         return AsyncGraphDatabase.driver(
             settings.NEO4J_URI,
-            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+            max_connection_lifetime=3600,       # Keep connections alive for 1 hour
+            max_connection_pool_size=50,        # Increase pool size
+            connection_timeout=60,              # 60 second timeout for Neo4j Aura
+            connection_acquisition_timeout=60,  # 60s to acquire connection from pool
+            keep_alive=True,                    # Enable TCP keepalive
+            resolver=None                       # Use default DNS resolver
         )
     except Exception as e:
         logger.error(f"Failed to create Neo4j driver: {e}")
         logger.warning("Neo4j operations will be disabled")
+        logger.info("💡 Troubleshooting tips:")
+        logger.info("   1. Check if Neo4j Aura database is running")
+        logger.info("   2. Verify your IP is whitelisted in Neo4j Aura")
+        logger.info("   3. Test connection: python test_neo4j_connection.py")
         return None
 
 class Neo4jClient:
-    """Neo4j client wrapper with error handling"""
+    """
+    🔌 SINGLETON Neo4j client with connection pooling.
+    
+    ✅ MANDATORY PATTERNS:
+    - Only ONE driver instance exists (singleton)
+    - Reuses connections from pool (max 50)
+    - Sessions are created/closed per operation
+    
+    ❌ NEVER DO THIS:
+    ```python
+    # BAD - Creates new driver per request ❌
+    driver = GraphDatabase.driver(uri, auth=auth)
+    ```
+    
+    ✅ ALWAYS DO THIS:
+    ```python
+    # GOOD - Use global singleton ✅
+    from app.db.neo4j_client import neo4j_client
+    await neo4j_client.query(cypher)
+    ```
+    """
+    
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls):
+        """Enforce singleton pattern"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
     
     def __init__(self):
-        self._driver = create_neo4j_driver()
+        """Initialize Neo4j driver only once"""
+        if not self._initialized:
+            self._driver = create_neo4j_driver()
+            self._connection_verified = False
+            Neo4jClient._initialized = True
+            if self._driver:
+                logger.info("✅ Neo4j singleton driver initialized with connection pool")
+                logger.info("   Max pool size: 50 connections")
     
     @property
     def is_available(self) -> bool:
         """Check if Neo4j is available"""
         return self._driver is not None
     
+    async def verify_connectivity(self) -> bool:
+        """Verify Neo4j connection is working"""
+        if not self._driver:
+            logger.error("❌ Neo4j driver not initialized")
+            return False
+        
+        try:
+            await self._driver.verify_connectivity()
+            self._connection_verified = True
+            logger.info("✅ Neo4j connection verified successfully")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Neo4j connectivity verification failed: {e}")
+            logger.info("💡 Run: python test_neo4j_connection.py for detailed diagnostics")
+            return False
+    
     async def close(self):
         """Close Neo4j driver"""
         if self._driver:
             await self._driver.close()
     
-    async def query(self, query: str, parameters: dict = None):
-        """Execute Cypher query with error handling"""
+    async def query(self, query: str, parameters: dict = None, max_retries: int = 2):
+        """Execute Cypher query with silent retry logic for connection issues"""
         if not self._driver:
-            logger.warning("Neo4j not available, skipping query")
             return []
         
-        try:
-            async with self._driver.session() as session:
-                result = await session.run(query, parameters)
-                return [record.data() async for record in result]
-        except Exception as e:
-            logger.error(f"Neo4j query failed: {e}")
-            return []
+        import asyncio
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                async with self._driver.session() as session:
+                    result = await session.run(query, parameters)
+                    return [record.data() async for record in result]
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    # Quick retry with minimal backoff
+                    await asyncio.sleep(0.2 * (attempt + 1))
+                    continue
+        
+        # Only log once if all retries fail (reduces noise)
+        if last_error:
+            logger.debug(f"Neo4j query unavailable after {max_retries} attempts, using fallback")
+        return []
 
 # Global Neo4j client instance
 neo4j_client = Neo4jClient()
@@ -145,6 +219,13 @@ class GraphMemoryService:
         except Exception as e:
             print(f"❌ Error adding interest: {e}")
             return False
+
+    async def add_interest_relationship(self, user_id: str, interest: str, category: str = "interest") -> bool:
+        """
+        Backwards-compatible alias for adding an interest relationship.
+        Matches older callers expecting `add_interest_relationship`.
+        """
+        return await self.add_user_interest(user_id, interest, category)
     
     async def add_user_task(self, user_id: str, task_id: str, title: str, status: str = "pending") -> bool:
         """
@@ -295,6 +376,55 @@ class GraphMemoryService:
         except Exception as e:
             print(f"❌ Error getting user summary: {e}")
             return {}
+
+    async def update_user_name(self, user_id: str, name: str) -> bool:
+        """
+        Update or create the user's node and set the name property.
+        """
+        query = """
+        MERGE (u:User {id: $user_id})
+        SET u.name = $name,
+            u.updatedAt = $timestamp
+        RETURN u
+        """
+        try:
+            await query_graph(query, {
+                "user_id": user_id,
+                "name": name,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            print(f"✅ User name set for {user_id} -> {name}")
+            return True
+        except Exception as e:
+            print(f"❌ Error updating user name: {e}")
+            return False
+
+    async def add_user_property(self, user_id: str, key: str, value: Any) -> bool:
+        """
+        Add or update a primitive property directly on the User node.
+        Example: key="location", value="New York" sets u.location = "New York".
+        """
+        # Safely interpolate property key by restricting to alphanumeric and underscore
+        safe_key = "".join(ch for ch in key if ch.isalnum() or ch == "_")
+        if not safe_key:
+            return False
+        query = f"""
+        MERGE (u:User {{id: $user_id}})
+        SET u.{safe_key} = $value,
+            u.updatedAt = $timestamp
+        RETURN u
+        """
+        try:
+            await query_graph(query, {
+                "user_id": user_id,
+                "value": value,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            print(f"✅ User property set: {user_id}.{safe_key} -> {value}")
+            return True
+        except Exception as e:
+            print(f"❌ Error setting user property {safe_key}: {e}")
+            return False
     
     async def find_related_interests(self, user_id: str, limit: int = 5) -> List[str]:
         """
@@ -595,4 +725,60 @@ class AdvancedNeo4jClient:
             return True
         except Exception as e:
             print(f"Error removing weak relationships: {e}")
+            return False
+
+    async def add_interest_relationship(self, user_id: str, interest: str, category: str = "interest") -> bool:
+        """
+        Backwards-compatible alias for adding an interest relationship.
+        Matches older callers expecting `add_interest_relationship`.
+        """
+        return await self.add_user_interest(user_id, interest, category)
+
+    async def update_user_name(self, user_id: str, name: str) -> bool:
+        """
+        Update or create the user's node and set the name property.
+        """
+        query = """
+        MERGE (u:User {id: $user_id})
+        SET u.name = $name,
+            u.updatedAt = $timestamp
+        RETURN u
+        """
+        try:
+            await query_graph(query, {
+                "user_id": user_id,
+                "name": name,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            print(f"✅ User name set for {user_id} -> {name}")
+            return True
+        except Exception as e:
+            print(f"❌ Error updating user name: {e}")
+            return False
+
+    async def add_user_property(self, user_id: str, key: str, value: Any) -> bool:
+        """
+        Add or update a primitive property directly on the User node.
+        Example: key="location", value="New York" sets u.location = "New York".
+        """
+        # Safely interpolate property key by restricting to alphanumeric and underscore
+        safe_key = "".join(ch for ch in key if ch.isalnum() or ch == "_")
+        if not safe_key:
+            return False
+        query = f"""
+        MERGE (u:User {{id: $user_id}})
+        SET u.{safe_key} = $value,
+            u.updatedAt = $timestamp
+        RETURN u
+        """
+        try:
+            await query_graph(query, {
+                "user_id": user_id,
+                "value": value,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            print(f"✅ User property set: {user_id}.{safe_key} -> {value}")
+            return True
+        except Exception as e:
+            print(f"❌ Error setting user property {safe_key}: {e}")
             return False

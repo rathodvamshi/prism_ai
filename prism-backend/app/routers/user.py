@@ -26,7 +26,7 @@ from app.services.vector_memory_service import (
 from app.db.neo4j_client import (
     graph_memory, create_user_in_graph, add_interest_to_user, add_task_to_user
 )
-from app.utils.auth import get_current_user, get_verified_user, AuthUtils, SecurityUtils
+from app.utils.auth import get_current_user, get_verified_user, get_current_user_from_session, AuthUtils, SecurityUtils
 from app.services.user_memory_manager import get_user_memory_statistics, delete_all_user_memories
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, EmailStr
@@ -52,24 +52,31 @@ async def health_check():
 # 🔐 PROTECTED USER ENDPOINTS (JWT Required)
 
 @router.get("/profile")
-async def get_current_user_profile(current_user: dict = Depends(get_verified_user)):
+async def get_current_user_profile(current_user=Depends(get_current_user_from_session)):
     """Get current user's complete profile information from database"""
     try:
-        safe_user = AuthUtils.create_user_response(current_user)
+        # Reload full user document for richer profile information
+        from bson import ObjectId
+
+        user_doc = await users_collection.find_one({"_id": ObjectId(current_user.user_id)})
+        if not user_doc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        safe_user = AuthUtils.create_user_response(user_doc)
         
         # Get complete profile data
-        profile_data = current_user.get("profile", {})
+        profile_data = user_doc.get("profile", {})
         
         # Get task and session counts
-        user_id = str(current_user["_id"])
+        user_id = str(user_doc["_id"])
         task_count = await tasks_collection.count_documents({"userId": user_id})
         session_count = await sessions_collection.count_documents({"userId": user_id})
         
         return {
             "user": safe_user,
             "profile": {
-                "name": profile_data.get("name", current_user.get("name", "")),
-                "email": current_user.get("email", ""),
+                "name": profile_data.get("name", user_doc.get("name", "")),
+                "email": user_doc.get("email", ""),
                 "bio": profile_data.get("bio", ""),
                 "location": profile_data.get("location", ""),
                 "website": profile_data.get("website", ""),
@@ -78,9 +85,9 @@ async def get_current_user_profile(current_user: dict = Depends(get_verified_use
                 "hobbies": profile_data.get("hobbies", [])
             },
             "stats": {
-                "member_since": current_user.get("created_at"),
-                "last_login": current_user.get("last_login"),
-                "verified": current_user.get("verified", False),
+                "member_since": user_doc.get("created_at"),
+                "last_login": user_doc.get("last_login"),
+                "verified": user_doc.get("verified", False),
                 "total_tasks": task_count,
                 "total_sessions": session_count
             }
@@ -95,7 +102,7 @@ async def get_current_user_profile(current_user: dict = Depends(get_verified_use
 @router.put("/profile")
 async def update_user_profile(
     profile_data: dict,
-    current_user: dict = Depends(get_verified_user)
+    current_user=Depends(get_current_user_from_session)
 ):
     """Update current user's profile information and sync to global collection"""
     try:
@@ -110,8 +117,8 @@ async def update_user_profile(
                 if isinstance(value, list):
                     sanitized_data[key] = [SecurityUtils.sanitize_user_input(str(item), 100) for item in value[:10]]
         
-        user_id = str(current_user["_id"])
-        email = current_user.get("email")
+        user_id = current_user.user_id
+        email = current_user.email
         
         # Update user profile in main collection
         update_data = {
@@ -123,8 +130,9 @@ async def update_user_profile(
         if "name" in sanitized_data:
             update_data["name"] = sanitized_data["name"]
         
+        from bson import ObjectId
         result = await users_collection.update_one(
-            {"_id": current_user["_id"]},
+            {"_id": ObjectId(user_id)},
             {"$set": update_data}
         )
         
@@ -151,10 +159,12 @@ async def update_user_profile(
         )
 
 @router.get("/stats")
-async def get_user_stats(current_user: dict = Depends(get_verified_user)):
+async def get_user_stats(current_user=Depends(get_current_user_from_session)):
     """Get user statistics and usage information"""
     try:
-        user_id = str(current_user["_id"])
+        from bson import ObjectId
+
+        user_id = current_user.user_id
         
         # Get task count
         task_count = await tasks_collection.count_documents({"user_id": user_id})
@@ -172,12 +182,15 @@ async def get_user_stats(current_user: dict = Depends(get_verified_user)):
             except:
                 pass
         
+        # Load basic account timestamps from users collection
+        user_doc = await users_collection.find_one({"_id": ObjectId(user_id)})
+        
         return {
             "tasks": task_count,
             "memories": memory_count,
             "vector_memories": vector_stats,
-            "account_created": current_user.get("created_at"),
-            "last_login": current_user.get("last_login")
+            "account_created": user_doc.get("created_at") if user_doc else None,
+            "last_login": user_doc.get("last_login") if user_doc else None
         }
         
     except Exception as e:
@@ -832,6 +845,10 @@ class TaskItem(BaseModel):
     title: str
     description: str = ""
     status: str = "pending"  # "pending", "completed", "cancelled"
+    email_status: str | None = "queued"
+    email_retry_count: int | None = 0
+    email_last_error: str | None = None
+    email_sent_at: datetime | None = None
     createdAt: datetime
     dueDate: datetime | None = None
     completedAt: datetime | None = None

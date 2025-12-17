@@ -9,6 +9,7 @@ Using the exact architecture you specified:
 - Complete user separation guaranteed
 """
 
+import logging
 from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from fastapi.responses import StreamingResponse
 from app.models.chat_models import ChatRequest, ChatResponse
@@ -21,9 +22,16 @@ from app.db.mongo_client import db
 # Get highlights collection
 highlights_collection = db.message_highlights
 from app.services.advanced_memory_manager import memory_manager
+from app.services import router_service
+from app.services.cache_service import cache_service
 from app.utils.llm_client import get_llm_response as groq_llm_response, get_llm_response_stream
+from app.services.main_brain import generate_response as main_brain_generate_response
 from pydantic import BaseModel, EmailStr
-from app.routers.auth import get_current_user, User
+from app.routers.auth import User
+from app.utils.auth import get_current_user_from_session
+from app.utils.timeout_utils import tracked_timeout, TimeoutConfig
+logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # Helper function for memory-enhanced LLM calls
 async def get_llm_response(prompt: str) -> str:
@@ -34,6 +42,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import uuid
 import json
+import logging
 from bson import ObjectId
 
 # Create a router specifically for chat
@@ -52,7 +61,7 @@ class MessageRequest(BaseModel):
 @router.post("/new", status_code=201)
 async def create_new_chat(
     request: NewChatRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Creates a new chat session for the authenticated user.
@@ -109,7 +118,7 @@ async def create_new_chat(
         raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
 
 @router.get("/chats")
-async def get_user_chats(current_user: User = Depends(get_current_user)):
+async def get_user_chats(current_user: User = Depends(get_current_user_from_session)):
     """
     Retrieves all chat sessions for the authenticated user.
     🟢 MongoDB is the single source of truth - returns all metadata from database.
@@ -181,7 +190,10 @@ async def get_user_chats(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Failed to fetch chats: {str(e)}")
 
 @router.get("/{chat_id}/history")
-async def get_chat_history(chat_id: str, current_user: User = Depends(get_current_user)):
+async def get_chat_history(
+    chat_id: str,
+    current_user: User = Depends(get_current_user_from_session),
+):
     """
     Retrieves ALL message history for a specific chat session.
     🟢 Returns complete conversation - used when opening a session.
@@ -208,7 +220,7 @@ async def get_chat_history(chat_id: str, current_user: User = Depends(get_curren
     }
 
 @router.delete("/{chat_id}", status_code=200)
-async def delete_chat(chat_id: str, current_user: User = Depends(get_current_user)):
+async def delete_chat(chat_id: str, current_user: User = Depends(get_current_user_from_session)):
     """
     Deletes a chat session PERFECTLY for the authenticated user.
     🟢 Hard delete from MongoDB - session must NOT come back after refresh.
@@ -254,7 +266,7 @@ class SaveChatRequest(BaseModel):
 async def rename_chat(
     chat_id: str,
     request: RenameChatRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Renames a chat session.
@@ -286,7 +298,7 @@ async def rename_chat(
 async def pin_chat(
     chat_id: str,
     request: PinChatRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Pins or unpins a chat session.
@@ -318,7 +330,7 @@ async def pin_chat(
 async def save_chat(
     chat_id: str,
     request: SaveChatRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Saves or unsaves a chat session.
@@ -349,17 +361,23 @@ async def save_chat(
 @router.post("/message")
 async def send_message(
     request: MessageRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """Sends a message in a chat session and gets an AI response."""
     user_id = ObjectId(current_user.user_id)
     # Support both chat_id and sessionId field names
-    session = await sessions_collection.find_one({
-        "$and": [
-            {"$or": [{"chat_id": request.chatId}, {"sessionId": request.chatId}]},
-            {"$or": [{"user_id": user_id}, {"userId": user_id}]}
-        ]
-    })
+    # ⏱️ FAIL FAST: 300ms timeout for MongoDB session lookup
+    session = await tracked_timeout(
+        sessions_collection.find_one({
+            "$and": [
+                {"$or": [{"chat_id": request.chatId}, {"sessionId": request.chatId}]},
+                {"$or": [{"user_id": user_id}, {"userId": user_id}]}
+            ]
+        }),
+        timeout_ms=TimeoutConfig.MONGODB_FIND,
+        service_name="MongoDB FIND (session)",
+        fallback=None
+    )
 
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
@@ -372,16 +390,22 @@ async def send_message(
     }
 
     # Add user message to the session and update timestamp
+    # ⏱️ FAIL FAST: 300ms timeout for MongoDB update
     update_time = datetime.utcnow()
-    await sessions_collection.update_one(
-        {"_id": session["_id"]},
-        {
-            "$push": {"messages": user_message},
-            "$set": {
-                "updated_at": update_time,
-                "updatedAt": update_time  # Update both field names for compatibility
+    await tracked_timeout(
+        sessions_collection.update_one(
+            {"_id": session["_id"]},
+            {
+                "$push": {"messages": user_message},
+                "$set": {
+                    "updated_at": update_time,
+                    "updatedAt": update_time  # Update both field names for compatibility
+                }
             }
-        }
+        ),
+        timeout_ms=TimeoutConfig.MONGODB_UPDATE,
+        service_name="MongoDB UPDATE (user message)",
+        fallback=None
     )
 
     # Get AI response
@@ -395,16 +419,22 @@ async def send_message(
     }
 
     # Add AI message to the session and update timestamp
+    # ⏱️ FAIL FAST: 300ms timeout for MongoDB update
     update_time = datetime.utcnow()
-    await sessions_collection.update_one(
-        {"_id": session["_id"]},
-        {
-            "$push": {"messages": ai_message},
-            "$set": {
-                "updated_at": update_time,
-                "updatedAt": update_time  # Update both field names for compatibility
+    await tracked_timeout(
+        sessions_collection.update_one(
+            {"_id": session["_id"]},
+            {
+                "$push": {"messages": ai_message},
+                "$set": {
+                    "updated_at": update_time,
+                    "updatedAt": update_time  # Update both field names for compatibility
+                }
             }
-        }
+        ),
+        timeout_ms=TimeoutConfig.MONGODB_UPDATE,
+        service_name="MongoDB UPDATE (AI message)",
+        fallback=None
     )
 
     return {"response": ai_response_content, "message_id": ai_message["id"], "timestamp": ai_message["timestamp"]}
@@ -412,7 +442,7 @@ async def send_message(
 @router.post("/message/stream")
 async def send_message_stream(
     request: MessageRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     🌊 STREAMING CHAT ENDPOINT
@@ -423,20 +453,55 @@ async def send_message_stream(
     2. Stream AI response chunk-by-chunk to frontend
     3. Save complete AI response to database after streaming completes
     """
+    # #region agent log helper
+    import json as _json
+    import traceback
+    try:
+        log_data = {
+            "sessionId": "debug-session",
+            "runId": "run-debug-1",
+            "hypothesisId": "ENTRY",
+            "location": "chat.py:send_message_stream",
+            "message": "endpoint_called",
+            "data": {
+                "message": request.message[:100] if request.message else None,
+                "chatId": request.chatId if hasattr(request, 'chatId') else None,
+                "user_id": str(current_user.user_id) if current_user else None
+            },
+            "timestamp": int(datetime.utcnow().timestamp() * 1000),
+        }
+        with open(r"c:\Users\vamsh\Source\3_1\project_ps2\prism\prism-ai-studio\.cursor\debug.log", "a", encoding="utf-8") as f:
+            f.write(_json.dumps(log_data) + "\n")
+    except Exception as e:
+        # Log to stderr so we can see if logging itself fails
+        import sys
+        print(f"DEBUG LOG ERROR: {e}", file=sys.stderr)
+        print(f"TRACEBACK: {traceback.format_exc()}", file=sys.stderr)
+    # #endregion
+    
     user_id = ObjectId(current_user.user_id)
     
     # Find session
-    session = await sessions_collection.find_one({
-        "$and": [
-            {"$or": [{"chat_id": request.chatId}, {"sessionId": request.chatId}]},
-            {"$or": [{"user_id": user_id}, {"userId": user_id}]}
-        ]
-    })
+    # ⏱️ FAIL FAST: 300ms timeout for MongoDB session lookup
+    session = await tracked_timeout(
+        sessions_collection.find_one({
+            "$and": [
+                {"$or": [{"chat_id": request.chatId}, {"sessionId": request.chatId}]},
+                {"$or": [{"user_id": user_id}, {"userId": user_id}]}
+            ]
+        }),
+        timeout_ms=TimeoutConfig.MONGODB_FIND,
+        service_name="MongoDB FIND (session stream)",
+        fallback=None
+    )
 
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
-    # Create and save user message immediately
+    # ✅ STEP 1: Save user message to database
+    logger.info(f"✅ [Step] User message received for user: {user_id}")
+    logger.info(f"✅ [Step] Raw user input: {request.message[:100]}...")
+    
     user_message = {
         "id": str(uuid.uuid4()),
         "role": "user",
@@ -444,17 +509,143 @@ async def send_message_stream(
         "timestamp": datetime.utcnow(),
     }
 
+    # ⏱️ FAIL FAST: 300ms timeout for MongoDB update
     update_time = datetime.utcnow()
-    await sessions_collection.update_one(
-        {"_id": session["_id"]},
-        {
-            "$push": {"messages": user_message},
-            "$set": {
-                "updated_at": update_time,
-                "updatedAt": update_time
+    await tracked_timeout(
+        sessions_collection.update_one(
+            {"_id": session["_id"]},
+            {
+                "$push": {"messages": user_message},
+                "$set": {
+                    "updated_at": update_time,
+                    "updatedAt": update_time
+                }
             }
-        }
+        ),
+        timeout_ms=TimeoutConfig.MONGODB_UPDATE,
+        service_name="MongoDB UPDATE (user message stream)",
+        fallback=None
     )
+    logger.info(f"✅ [Step] User message persisted to MongoDB")
+    
+    # ✅ STEP 1.5: Save user message to Redis history for recall (CRITICAL)
+    try:
+        from app.db.redis_client import add_message_to_history
+        await add_message_to_history(str(user_id), "user", request.message)
+        logger.info(f"✅ [Step] User message saved to Redis history")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to save user message to Redis history: {e}")
+
+    # ✅ STEP 2: DETECT INTENT - Load only required services
+    logger.info(f"✅ [Step] Intent detection started")
+    from app.services.intent_detector import load_services_for_message, ServiceIntent
+    services = await load_services_for_message(request.message)
+    detected_intent = services["intent"]
+    
+    print(f"⚡ Intent detected: {detected_intent.value}")
+    print(f"⚡ Services loaded: {[k for k in services.keys() if k != 'intent']}")
+    logger.info(f"✅ [Step] Intent detected: {detected_intent.value}")
+    logger.info(f"✅ [Step] Services loaded: {[k for k in services.keys() if k != 'intent']}")
+    
+    # Look at recent history so short follow-ups like "At 5 PM" can reuse context
+    previous_ai_message = None
+    try:
+        history = session.get("messages", [])
+        for msg in reversed(history):
+            role = (msg.get("role") or "").lower()
+            if role in ("assistant", "system", "ai"):
+                previous_ai_message = (
+                    msg.get("content")
+                    or msg.get("message")
+                    or msg.get("text")
+                )
+                if previous_ai_message:
+                    break
+    except Exception:
+        previous_ai_message = None
+
+    # Route the request before streaming any tokens
+    # ⚡ OPTIMIZATION: Skip heavy processing for casual chat
+    # ⚠️ CRITICAL: Recall questions MUST bypass fast path and use main brain
+    msg_lower = (request.message or "").lower().strip()
+    # Normalize common abbreviations and variations
+    msg_normalized = msg_lower.replace(" u ", " you ").replace(" u,", " you,").replace(" u.", " you.")
+    msg_normalized = msg_normalized.replace("what do u", "what do you").replace("what u", "what you")
+    msg_normalized = msg_normalized.replace("what'd", "what did").replace("what's", "what is")
+    msg_normalized = msg_normalized.replace(" u know", " you know").replace(" u remember", " you remember")
+    
+    # Comprehensive recall question patterns
+    recall_patterns = [
+        "what did we", "what we have", "what we discussed", "what we talked", "what we disscuddes",
+        "which movies", "what movies", "what do you know", "what do you remember",
+        "what did i just tell", "what did i just say", "what i just told", "what i just said",
+        "what do you remember about", "what are my preferences", "tell me about myself",
+        "what do you know about me", "what do you know about my", "what you know about me",
+        "what do you remember about me", "what do you remember about my",
+        "what did i tell you", "what did i say to you", "what i told you", "what i said to you",
+        "what have i told", "what have i said", "what i've told", "what i've said",
+        "what do u know", "what u know", "what do u know about me", "what u know about me",
+        "what do u remember", "what u remember", "what do u remember about me",
+        "tell me what you know", "tell me what you remember", "tell me about me",
+        "what information do you have", "what info do you have", "what data do you have",
+        "what can you tell me about", "what can you recall about", "what can you remember about"
+    ]
+    
+    # Check patterns in both normalized and original message
+    pattern_match = any(kw in msg_normalized for kw in recall_patterns) or any(kw in msg_lower for kw in recall_patterns)
+    
+    # Additional pattern matching for "what do you know about me" variations
+    know_about_pattern = (
+        "what" in msg_lower and 
+        ("know" in msg_lower or "remember" in msg_lower) and 
+        ("about" in msg_lower or "me" in msg_lower or "my" in msg_lower) and
+        not any(exclude in msg_lower for exclude in ["how to", "how do", "how can", "how should"])
+    )
+    
+    is_recall_question = (
+        pattern_match or
+        "recall" in msg_lower or
+        know_about_pattern
+    )
+    
+    if is_recall_question:
+        logger.info(f"✅ [Step] Recall question detected: '{request.message[:50]}...' - bypassing fast path")
+        logger.info(f"✅ [Step] Pattern match: {pattern_match}, Know about pattern: {know_about_pattern}")
+    
+    if detected_intent == ServiceIntent.CASUAL_CHAT and not is_recall_question:
+        # Fast path for casual chat - minimal context (but NOT for recall questions)
+        print("⚡ Fast path: Casual chat (Redis only)")
+        router_result = {
+            "intent": "casual_chat",
+            "context": "",
+            "action_payload": None,
+            "direct_reply": None
+        }
+    else:
+        # Full routing for complex intents OR recall questions
+        if is_recall_question:
+            logger.info(f"✅ [Step] Recall question detected - bypassing fast path")
+        router_result = await router_service.process_request(
+            message=request.message,
+            user_id=str(user_id),
+            user_email=current_user.email,
+            previous_ai_message=previous_ai_message,
+            session_id=request.chatId,
+        )
+
+    # Prepare context and action payload for downstream use
+    context_for_prompt = router_result.get("context") or ""
+    action_payload = router_result.get("action_payload")
+    direct_reply = router_result.get("direct_reply")
+    intent = router_result.get("intent", "general_chat")
+    
+    # ⚠️ CRITICAL: Force recall questions to use main brain, override intent if needed
+    if is_recall_question and intent == "casual_chat":
+        logger.info(f"✅ [Step] Overriding intent from 'casual_chat' to 'recall_memory' for recall question")
+        intent = "recall_memory"
+    # Keep context bounded to avoid overly large prompts
+    if len(context_for_prompt) > 4000:
+        context_for_prompt = context_for_prompt[:4000]
 
     # Generate message ID for AI response
     ai_message_id = str(uuid.uuid4())
@@ -463,29 +654,99 @@ async def send_message_stream(
     # Stream generator function
     async def generate_stream():
         """Generates SSE-formatted stream of AI response chunks"""
+        nonlocal intent  # Allow modification of outer scope variable
         full_response = ""
         
         try:
-            # Send initial metadata
+            # Send initial metadata (SSE event: start)
             import json
-            yield f"data: {json.dumps({'type': 'start', 'message_id': ai_message_id, 'timestamp': ai_timestamp.isoformat()})}\n\n"
+            start_payload = {
+                "message_id": ai_message_id,
+                "timestamp": ai_timestamp.isoformat(),
+                "intent": intent,
+            }
+            yield f"event: start\ndata: {json.dumps(start_payload)}\n\n"
+
+            # Emit explicit action event for frontend rich rendering
+            if action_payload:
+                yield (
+                    "event: action\n"
+                    f"data: {json.dumps(action_payload)}\n\n"
+                )
+
+            # For long-running intents, send intermediate status updates
+            if intent == "deep_research":
+                # Step 1: indicate web search is starting
+                status_search = {"step": "searching_web", "message": "Browsing the web..."}
+                yield f"event: status\ndata: {json.dumps(status_search)}\n\n"
+                # Step 2: indicate review/analysis phase
+                status_reviews = {"step": "reading_reviews", "message": "Reading reviews..."}
+                yield f"event: status\ndata: {json.dumps(status_reviews)}\n\n"
+
+            # If the router already produced a direct reply (e.g., task or email), stream that and exit
+            if direct_reply is not None:
+                full_response = str(direct_reply)
+                yield f"data: {json.dumps({'type': 'chunk', 'content': full_response})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            else:
+                # GENERAL CHAT: always route through the Main Brain so PRISM sees Redis + Neo4j + deep memory
+                # ✅ STEP 3: Generate response (with memory context for recall questions)
+                # Force recall questions to use main brain even if intent is casual_chat
+                if intent == "general_chat" or intent == "recall_memory" or is_recall_question:
+                    if is_recall_question:
+                        logger.info(f"✅ [Step] Recall question - forcing Main Brain (bypassing fast path)")
+                        intent = "recall_memory"  # Override intent for proper handling
+                    logger.info(f"✅ [Step] Generating response via Main Brain (intent: {intent})")
+                    logger.info(f"✅ [Step] Memory-aware pipeline active for recall questions")
+                    # Pass session_id to main_brain for conversation history fetching
+                    session_id_for_brain = str(session.get("_id")) if session else request.chatId
+                    full_response = await main_brain_generate_response(
+                        user_id=str(user_id),
+                        message=request.message,
+                        search_results=context_for_prompt or None,
+                        image_url=None,
+                        session_id=session_id_for_brain,
+                    )
+                    logger.info(f"✅ [Step] Response generated (length: {len(full_response)})")
+                    # Stream the full response as a single logical token
+                    yield f"event: token\ndata: {full_response}\n\n"
+                    usage = {
+                        "prompt": len(request.message or ""),
+                        "completion": len(full_response),
+                    }
+                    yield f"event: done\ndata: {json.dumps({'usage': usage})}\n\n"
+                else:
+                    # TOOL-ENHANCED FLOWS: use lightweight context + raw streaming
+                    system_prompt = (
+                        "You are a helpful AI assistant. Provide clear, concise responses. "
+                        "Use the provided context (if any) before answering."
+                    )
+                    if context_for_prompt:
+                        system_prompt += f"\n\nContext:\n{context_for_prompt}"
+
+                    async for chunk in get_llm_response_stream(request.message, system_prompt):
+                        full_response += chunk
+                        # Send token as SSE (raw text chunk)
+                        yield f"event: token\ndata: {chunk}\n\n"
+
+                    # Send completion signal with basic usage info
+                    usage = {
+                        "prompt": len(request.message or ""),
+                        "completion": len(full_response),
+                    }
+                    yield f"event: done\ndata: {json.dumps({'usage': usage})}\n\n"
             
-            # Stream AI response chunks
-            system_prompt = "You are a helpful AI assistant. Provide clear, concise, and helpful responses."
-            async for chunk in get_llm_response_stream(request.message, system_prompt):
-                full_response += chunk
-                # Send chunk as SSE
-                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
-            
-            # Send completion signal
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            
-            # Save complete AI message to database after streaming
+            # ✅ STEP 4: Save complete AI message to database after streaming/direct reply
+            logger.info(f"✅ [Step] Saving AI response to database")
             ai_message = {
                 "id": ai_message_id,
                 "role": "assistant",
                 "content": full_response,
                 "timestamp": ai_timestamp,
+                "metadata": {
+                    "intent": intent,
+                    "action_payload": action_payload,
+                }
             }
             
             update_time = datetime.utcnow()
@@ -499,10 +760,81 @@ async def send_message_stream(
                     }
                 }
             )
+            logger.info(f"✅ [Step] AI response persisted to MongoDB")
+            
+            # ✅ STEP 4.5: Save to Redis history for recall (CRITICAL for conversation history)
+            try:
+                from app.db.redis_client import add_message_to_history
+                await add_message_to_history(str(user_id), "user", request.message)
+                await add_message_to_history(str(user_id), "assistant", full_response)
+                logger.info(f"✅ [Step] Messages saved to Redis history for recall")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to save to Redis history: {e}")
+            
+            # ✅ STEP 5: Extract and save user details (background task - raw-only extraction)
+            # This runs in parallel after streaming completes - doesn't block response
+            logger.info(f"✅ [Step] Starting background extraction task (raw user input only)")
+            import asyncio
+            from app.services.user_detail_extractor import extract_and_save_user_details_async
+            from app.services.cache_service import cache_service
+            
+            # Create a task that will check atomic save result for acknowledgement
+            from app.services.user_detail_extractor import user_detail_extractor
+            async def extraction_with_acknowledgement():
+                try:
+                    # Extract details from RAW user message ONLY
+                    extracted = await user_detail_extractor.extract_user_details(
+                        str(user_id),
+                        request.message,
+                        None  # STRICT: pass only raw user input
+                    )
+                    
+                    # ✅ STEP 6: Save if extraction successful; acknowledge only if atomic save succeeds
+                    if extracted.get("extracted"):
+                        logger.info(f"✅ [Step] Extraction successful - starting atomic save")
+                        save_results = await user_detail_extractor.save_extracted_details(
+                            str(user_id),
+                            extracted,
+                            request.message
+                        )
+                        
+                        # ✅ MEMORY ACKNOWLEDGEMENT GUARD: Only acknowledge if all stores succeed
+                        if save_results.get("atomic_saved"):
+                            logger.info(f"✅ [Ack] Memory stored atomically for user: {user_id}")
+                            logger.info(f"✅ [Step] Memory acknowledgement: APPROVED (MongoDB + Neo4j + Vector all succeeded)")
+                            logger.info(f"✅ [Step] Save results: MongoDB={save_results.get('mongodb')}, Neo4j={save_results.get('neo4j')}, Vector={save_results.get('vector')}")
+                        else:
+                            logger.warning(f"⚠️ [Ack] Memory NOT stored atomically for user: {user_id}")
+                            logger.warning(f"❌ [Step] Memory acknowledgement: DENIED (atomic save failed)")
+                            logger.warning(f"❌ [Step] Save results: MongoDB={save_results.get('mongodb')}, Neo4j={save_results.get('neo4j')}, Vector={save_results.get('vector')}")
+                    else:
+                        logger.info(f"✅ [Step] No extractable details found - no memory save needed")
+                except Exception as e:
+                    logger.error(f"❌ [Step] Extraction task error: {e}")
+            
+            # Fire and forget - runs in background
+            asyncio.create_task(extraction_with_acknowledgement())
+            print(f"🚀 Background task started: User detail extraction for user {user_id}")
+
+            # ✅ STEP 7: Cache invalidation after user message + potential memory updates
+            logger.info(f"✅ [Step] Invalidating cache after message persistence")
+            try:
+                session_id = str(session.get("_id")) if session else request.chatId
+                if session_id:
+                    await cache_service.invalidate_keys([
+                        f"highlights:{session_id}",
+                        f"miniagents:{session_id}",
+                        f"history:{session_id}"
+                    ])
+                    logger.info("[Flow] Cache invalidated for session updates")
+                    logger.info(f"✅ [Step] Cache invalidated for session: {session_id}")
+            except Exception as e:
+                logger.warning(f"[Cache] Invalidation error: {e}")
+                logger.warning(f"❌ [Step] Cache invalidation failed: {e}")
             
         except Exception as e:
             print(f"❌ Streaming error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
     
     # Return streaming response with SSE headers
     return StreamingResponse(
@@ -565,19 +897,22 @@ class ShareRequest(BaseModel):
 async def perfect_chat_endpoint(request: ChatRequest):
     """
     🧱 PERFECT CHAT PIPELINE IMPLEMENTATION
+    ⚡ WITH INTENT-BASED SERVICE LOADING
     
     Follows exact specification:
     1. Backend receives message
     2. Identify userId 
-    3. Fetch: Mongo user data, Pinecone vector memory, Neo4j graph memory
-    4. Build combined context
-    5. Send to AI model
-    6. Save: Conversation in Mongo, Embedded memory in Pinecone, Relationship updates in Neo4j
-    7. Return reply to frontend
+    3. ⚡ DETECT INTENT - load ONLY required services
+    4. Fetch from required services only (Redis → Neo4j → Pinecone cascade)
+    5. Build combined context
+    6. Send to AI model
+    7. Save: Conversation in Mongo, Embedded memory in Pinecone, Relationship updates in Neo4j
+    8. Return reply to frontend
     
     🟢 Complete user separation guaranteed
     🟢 No duplicates allowed
     🟢 Multi-database coordination
+    ⚡ OPTIMIZED: Only loads services based on intent
     """
     try:
         # Step 1: Backend receives message & identify user
@@ -592,10 +927,35 @@ async def perfect_chat_endpoint(request: ChatRequest):
         
         print(f"🚀 Processing chat for user: {request.user_email} (ID: {user_id})")
         
-        # 🧠 Use memory-enhanced processing
-        # Load user memory for context
-        user_memory = await memory_manager.load_user_memory(user_id)
-        memory_context = memory_manager.build_context_for_model(user_memory)
+        # ⚡ STEP 2: DETECT INTENT - Load only required services
+        from app.services.intent_detector import load_services_for_message, get_cached_or_query
+        services = await load_services_for_message(request.message)
+        intent = services["intent"]
+        
+        print(f"🎯 Intent: {intent.value}, Loading: {list(services.keys())}")
+        
+        # ⚡ STEP 3: CASCADE QUERY - Check cache first, stop if found
+        memory_context = ""
+        user_memory = None
+        
+        # Try Redis cache first (fastest)
+        cache_key = f"chat_context:{user_id}"
+        cached_context = await get_cached_or_query(
+            user_id=user_id,
+            query_type="personal",
+            redis_key=cache_key
+        )
+        
+        if cached_context:
+            # ✅ Found in cache - STOP, don't query other services
+            print("✅ Using cached context (no Neo4j/Pinecone query)")
+            user_memory = cached_context
+            memory_context = memory_manager.build_context_for_model(cached_context)
+        elif "neo4j" in services:
+            # Only load Neo4j if intent requires it
+            print("🔵 Loading from Neo4j (intent requires personal memory)")
+            user_memory = await memory_manager.load_user_memory(user_id)
+            memory_context = memory_manager.build_context_for_model(user_memory)
         
         # Enhanced prompt with memory
         enhanced_prompt = f"""
@@ -611,10 +971,31 @@ Provide a helpful, personalized response based on the user's memory and context.
         # Get AI response
         ai_response = await get_llm_response(enhanced_prompt)
         
-        # Save conversation
-        await memory_manager.save_conversation(user_id, request.message, ai_response)
+        # 🚀 PARALLEL PROCESSING: Run these in background (non-blocking)
+        # 1. Save conversation (fast, can run in parallel)
+        # 2. Extract and save user details (runs in background, doesn't block)
+        import asyncio
         
-        # Format response for frontend
+        # Create background tasks
+        background_tasks = []
+        
+        # Task 1: Save conversation
+        background_tasks.append(
+            memory_manager.save_conversation(user_id, request.message, ai_response)
+        )
+        
+        # Task 2: Extract and save user details (runs in parallel, non-blocking)
+        from app.services.user_detail_extractor import extract_and_save_user_details_async
+        background_tasks.append(
+            extract_and_save_user_details_async(user_id, request.message, ai_response)
+        )
+        
+        # Execute all background tasks in parallel (fire and forget)
+        # Don't await - let them run in background
+        asyncio.create_task(asyncio.gather(*background_tasks, return_exceptions=True))
+        print(f"🚀 Background tasks started: conversation save + user detail extraction")
+        
+        # Format response for frontend (immediate return, doesn't wait for background tasks)
         response = ChatResponse(
             reply=ai_response,
             intent="memory_enhanced",
@@ -624,7 +1005,8 @@ Provide a helpful, personalized response based on the user's memory and context.
             debug_info={
                 "memory_context_loaded": len(memory_context) > 0,
                 "user_memory_available": bool(user_memory),
-                "processing_success": True
+                "processing_success": True,
+                "background_tasks": "extraction_and_memory_update_started"
             }
         )
         
@@ -714,8 +1096,33 @@ Respond naturally:
             update_results = await memory_manager.process_memory_update_instructions(user_id, memory_updates)
             print(f"✅ Memory update results: {update_results}")
         
-        # 🟩 Step 7: Save conversation to MongoDB
-        await memory_manager.save_conversation(user_id, user_message, ai_response, memory_updates)
+        # 🟩 Step 7: Save conversation to MongoDB (parallel with extraction)
+        # 🚀 PARALLEL PROCESSING: Run memory save and user extraction in background
+        import asyncio
+        
+        # Create background tasks for parallel execution
+        background_tasks = []
+        
+        # Task 1: Save conversation
+        background_tasks.append(
+            memory_manager.save_conversation(user_id, user_message, ai_response, memory_updates)
+        )
+        
+        # Task 2: Extract and save user details (runs in parallel, non-blocking)
+        from app.services.user_detail_extractor import extract_and_save_user_details_async
+        background_tasks.append(
+            extract_and_save_user_details_async(user_id, user_message, ai_response)
+        )
+        
+        # Task 3: Process memory updates in background if present
+        if memory_updates:
+            background_tasks.append(
+                memory_manager.process_memory_update_instructions(user_id, memory_updates)
+            )
+        
+        # Execute all background tasks in parallel (fire and forget - don't block response)
+        asyncio.create_task(asyncio.gather(*background_tasks, return_exceptions=True))
+        print(f"🚀 Background tasks started: conversation save + user detail extraction + memory updates")
         
         return {
             "success": True,
@@ -724,7 +1131,8 @@ Respond naturally:
             "debug": {
                 "user_memory_loaded": bool(user_memory),
                 "memory_update_instructions": memory_updates,
-                "context_length": len(memory_context)
+                "context_length": len(memory_context),
+                "background_tasks": "extraction_and_memory_update_started"
             }
         }
         
@@ -886,14 +1294,26 @@ async def get_user_sessions(user_id: str, limit: int = 20):
     """
     Get all chat sessions for a user.
     🟢 Rule: Only return sessions for the specified userId
+    ✨ OPTIMIZED: Uses projections for smaller payloads (Part 9)
     """
     try:
         if not ObjectId.is_valid(user_id):
             raise HTTPException(status_code=400, detail="Invalid user ID format")
         
+        # 🚀 Part 9: Projection - fetch only needed fields
+        projection = {
+            "sessionId": 1,
+            "updatedAt": 1,
+            "createdAt": 1,
+            "messages": {"$slice": -5},  # Only last 5 messages for preview
+            # Exclude heavy fields
+            "_id": 0,
+            "userId": 0
+        }
+        
         sessions = await sessions_collection.find(
             {"userId": ObjectId(user_id)},
-            {"messages": {"$slice": -5}}  # Only last 5 messages for preview
+            projection
         ).sort("updatedAt", -1).limit(limit).to_list(length=limit)
         
         # Format sessions for frontend
@@ -1074,7 +1494,10 @@ async def get_user_sessions(user_id: str, limit: int = 20):
 
 @router.get("/sessions/{session_id}")
 async def get_session_detail(session_id: str, user_id: str, limit: int = 50):
-    """Get detailed session with messages"""
+    """
+    Get detailed session with messages, highlights, and mini agents in ONE request.
+    ✨ OPTIMIZED: Batch loading with caching for maximum performance.
+    """
     session = await sessions_collection.find_one({
         "sessionId": session_id,
         "user_id": user_id
@@ -1092,15 +1515,91 @@ async def get_session_detail(session_id: str, user_id: str, limit: int = 50):
     
     session["messages"] = messages
     
-    # Get highlights for this session
-    highlights = await highlights_collection.find(
-        {"sessionId": session_id}
-    ).to_list(length=None)
-    
-    for highlight in highlights:
-        highlight["_id"] = str(highlight["_id"])
+    # 🚀 OPTIMIZED: Try to get highlights from cache first
+    # ⏱️ FAIL FAST: 100ms timeout for Redis cache check
+    highlights = await tracked_timeout(
+        cache_service.get_highlights(session_id),
+        timeout_ms=TimeoutConfig.REDIS_GET,
+        service_name="Redis GET (highlights)",
+        fallback=None
+    )
+    if highlights is None:
+        # Cache miss - fetch from database
+        # ⏱️ FAIL FAST: 300ms timeout for MongoDB query
+        print(f"💾 Fetching highlights from database")
+        highlights = await tracked_timeout(
+            highlights_collection.find(
+                {"sessionId": session_id}
+            ).to_list(length=None),
+            timeout_ms=TimeoutConfig.MONGODB_FIND,
+            service_name="MongoDB FIND (highlights)",
+            fallback=[]
+        )
+        
+        for highlight in highlights:
+            highlight["_id"] = str(highlight["_id"])
+        
+        # Cache for future requests
+        # ⏱️ FAIL FAST: 100ms timeout for Redis cache set
+        await tracked_timeout(
+            cache_service.set_highlights(session_id, highlights),
+            timeout_ms=TimeoutConfig.REDIS_SET,
+            service_name="Redis SET (highlights)",
+            fallback=False
+        )
     
     session["highlights"] = highlights
+    
+    # 🚀 OPTIMIZED: Try to get mini agents from cache first
+    # ⏱️ FAIL FAST: 100ms timeout for Redis cache check
+    mini_agents = await tracked_timeout(
+        cache_service.get_mini_agents(session_id),
+        timeout_ms=TimeoutConfig.REDIS_GET,
+        service_name="Redis GET (mini agents)",
+        fallback=None
+    )
+    if mini_agents is None:
+        # Cache miss - fetch from database
+        # ⏱️ FAIL FAST: 300ms timeout for MongoDB query
+        print(f"💾 Fetching mini agents from database")
+        agents = await tracked_timeout(
+            mini_agents_collection.find(
+                {"sessionId": session_id}
+            ).to_list(length=None),
+            timeout_ms=TimeoutConfig.MONGODB_FIND,
+            service_name="MongoDB FIND (mini agents)",
+            fallback=[]
+        )
+        
+        # Serialize mini agents
+        mini_agents = []
+        for agent in agents:
+            serialized_messages = []
+            for msg in agent.get("messages", []):
+                serialized_msg = {
+                    "id": msg.get("id"),
+                    "role": msg.get("role"),
+                    "content": msg.get("content"),
+                    "timestamp": msg.get("timestamp").isoformat() if isinstance(msg.get("timestamp"), datetime) else msg.get("timestamp")
+                }
+                serialized_messages.append(serialized_msg)
+            
+            mini_agents.append({
+                "agentId": agent["agentId"],
+                "messageId": agent["messageId"],
+                "selectedText": agent["selectedText"],
+                "messages": serialized_messages,
+                "hasConversation": agent.get("hasConversation", len(agent.get("messages", [])) > 0),
+                "createdAt": agent["createdAt"].isoformat() if isinstance(agent["createdAt"], datetime) else agent["createdAt"],
+                "updatedAt": agent["updatedAt"].isoformat() if isinstance(agent["updatedAt"], datetime) else agent["updatedAt"],
+            })
+        
+        # Cache for future requests
+        await cache_service.set_mini_agents(session_id, mini_agents)
+    
+    session["miniAgents"] = mini_agents
+    
+    print(f"✅ Session loaded with {len(highlights)} highlights and {len(mini_agents)} mini agents")
     
     return session
 
@@ -1121,11 +1620,12 @@ async def delete_session(session_id: str, user_id: str):
 @router.post("/highlights", status_code=201)
 async def create_highlight(
     request: HighlightRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Create a new highlight with exact character positions.
     Stores startIndex and endIndex for accurate persistence.
+    ✨ OPTIMIZED: Invalidates cache after creation for data consistency.
     """
     try:
         user_id = ObjectId(current_user.user_id)
@@ -1165,6 +1665,10 @@ async def create_highlight(
         
         await highlights_collection.insert_one(highlight)
         
+        # 🗑️ Invalidate cache after creating highlight
+        await cache_service.invalidate_highlights(request.sessionId)
+        print(f"🔄 Cache invalidated for session: {request.sessionId}")
+        
         return {
             "status": "created",
             "highlightId": highlight["highlightId"],
@@ -1184,17 +1688,27 @@ async def create_highlight(
 @router.get("/highlights/{session_id}")
 async def get_session_highlights(
     session_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Get all highlights for a session.
     Returns highlights with exact startIndex and endIndex for rendering.
-    ✨ OPTIMIZED: Uses projection and indexing for fast retrieval.
+    ✨ OPTIMIZED: Uses Redis caching + compound indexes for lightning-fast retrieval.
     """
     try:
         user_id = ObjectId(current_user.user_id)
         
+        # 🚀 STEP 1: Check cache first
+        cached_highlights = await cache_service.get_highlights(session_id)
+        if cached_highlights is not None:
+            print(f"⚡ Cache HIT - returning {len(cached_highlights)} highlights")
+            return {"highlights": cached_highlights}
+        
+        # 🔍 STEP 2: Cache miss - fetch from database
+        print(f"💾 Cache MISS - fetching from database")
+        
         # Use projection to fetch only needed fields (reduces data transfer)
+        # Use compound index: sessionId + user_id for optimal performance
         highlights = await highlights_collection.find(
             {
                 "sessionId": session_id,
@@ -1213,7 +1727,10 @@ async def get_session_highlights(
             }
         ).to_list(length=None)
         
-        # No need for transformation - return directly with projection
+        # 📦 STEP 3: Cache the results for future requests
+        await cache_service.set_highlights(session_id, highlights)
+        
+        print(f"✅ Fetched and cached {len(highlights)} highlights")
         return {"highlights": highlights}
     except Exception as e:
         print(f"❌ Error fetching highlights: {e}")
@@ -1222,11 +1739,22 @@ async def get_session_highlights(
 @router.delete("/highlights/{highlight_id}")
 async def delete_highlight(
     highlight_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
-    """Delete a highlight by ID"""
+    """Delete a highlight by ID and invalidate cache"""
     try:
         user_id = ObjectId(current_user.user_id)
+        
+        # Fetch highlight first to get session_id for cache invalidation
+        highlight = await highlights_collection.find_one({
+            "highlightId": highlight_id,
+            "$or": [{"userId": user_id}, {"user_id": user_id}]
+        })
+        
+        if not highlight:
+            raise HTTPException(status_code=404, detail="Highlight not found")
+        
+        session_id = highlight.get("sessionId")
         
         result = await highlights_collection.delete_one({
             "highlightId": highlight_id,
@@ -1235,6 +1763,11 @@ async def delete_highlight(
         
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Highlight not found")
+        
+        # 🗑️ Invalidate cache after deletion
+        if session_id:
+            await cache_service.invalidate_highlights(session_id)
+            print(f"🔄 Cache invalidated for session: {session_id}")
         
         return {"status": "deleted", "deleted": True}
     except HTTPException:
@@ -1247,7 +1780,7 @@ async def delete_highlight(
 async def update_highlight_note(
     highlight_id: str,
     request: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """Update or delete a note for a highlight"""
     try:
@@ -1289,7 +1822,7 @@ class MiniAgentMessageRequest(BaseModel):
 @router.post("/mini-agent/create", status_code=201)
 async def create_mini_agent(
     request: CreateMiniAgentRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Create a new Mini Agent conversation thread.
@@ -1402,6 +1935,10 @@ async def create_mini_agent(
         if not result.inserted_id:
             raise HTTPException(status_code=500, detail="Failed to create mini-agent in database")
         
+        # 🗑️ Invalidate cache after creating mini agent
+        await cache_service.invalidate_mini_agents(session_id)
+        print(f"🔄 Cache invalidated for session: {session_id}")
+        
         print(f"✅ Mini Agent {agent_id} created and stored in MongoDB")
         
         return {
@@ -1423,7 +1960,7 @@ async def create_mini_agent(
 @router.get("/mini-agent/{agent_id}")
 async def get_mini_agent(
     agent_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Get Mini Agent conversation thread.
@@ -1474,7 +2011,7 @@ async def get_mini_agent(
 async def send_mini_agent_message(
     agent_id: str,
     request: MiniAgentMessageRequest,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Send a message to Mini Agent and get AI response.
@@ -1545,6 +2082,13 @@ async def send_mini_agent_message(
             }
         )
         
+        # 🗑️ Invalidate both mini agents cache and single agent cache
+        session_id = agent.get("sessionId")
+        if session_id:
+            await cache_service.invalidate_mini_agents(session_id)
+        await cache_service.invalidate_single_mini_agent(agent_id)
+        print(f"🔄 Cache invalidated for agent: {agent_id}")
+        
         print(f"✅ Mini Agent response generated and stored")
         
         # Optional: Generate learning metadata for Main Agent (background)
@@ -1591,7 +2135,7 @@ async def send_mini_agent_message(
 @router.delete("/mini-agent/{agent_id}", status_code=200)
 async def delete_mini_agent(
     agent_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Delete Mini Agent conversation.
@@ -1614,6 +2158,7 @@ async def delete_mini_agent(
             raise HTTPException(status_code=404, detail="Mini-agent not found")
         
         message_id = agent.get("messageId")
+        session_id = agent.get("sessionId")
         
         # Delete from MongoDB
         result = await mini_agents_collection.delete_one({
@@ -1623,6 +2168,12 @@ async def delete_mini_agent(
         
         if result.deleted_count == 0:
             raise HTTPException(status_code=500, detail="Failed to delete from database")
+        
+        # 🗑️ Invalidate caches after deletion
+        if session_id:
+            await cache_service.invalidate_mini_agents(session_id)
+        await cache_service.invalidate_single_mini_agent(agent_id)
+        print(f"🔄 Cache invalidated for agent: {agent_id}")
         
         print(f"✅ Mini Agent {agent_id} deleted from database")
         
@@ -1646,7 +2197,7 @@ async def delete_mini_agent(
 async def update_mini_agent_snippet(
     agent_id: str,
     request: dict,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Update Mini Agent's selected text snippet.
@@ -1696,7 +2247,7 @@ async def update_mini_agent_snippet(
 @router.get("/mini-agents/session/{session_id}")
 async def get_session_mini_agents(
     session_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_from_session)
 ):
     """
     Get all Mini Agents for a specific chat session.
@@ -1704,13 +2255,21 @@ async def get_session_mini_agents(
     🟢 Returns all Mini Agent threads organized by message ID
     🔒 Each Mini Agent is isolated and tied to ONE message_id
     🔄 Enables multiple Mini Agents to coexist independently
+    ✨ OPTIMIZED: Uses Redis caching for instant retrieval
     """
     try:
         user_id = ObjectId(current_user.user_id)
         
-        print(f"📋 Fetching Mini Agents for session: {session_id}")
+        # 🚀 STEP 1: Check cache first
+        cached_agents = await cache_service.get_mini_agents(session_id)
+        if cached_agents is not None:
+            print(f"⚡ Cache HIT - returning {len(cached_agents)} mini agents")
+            return {"miniAgents": cached_agents}
         
-        # Find all Mini Agents for this session
+        # 🔍 STEP 2: Cache miss - fetch from database
+        print(f"💾 Cache MISS - fetching mini agents from database for session: {session_id}")
+        
+        # Find all Mini Agents for this session using compound index
         agents = await mini_agents_collection.find({
             "sessionId": session_id,
             "$or": [{"userId": user_id}, {"user_id": user_id}]
@@ -1740,7 +2299,10 @@ async def get_session_mini_agents(
                 "updatedAt": agent["updatedAt"].isoformat() if isinstance(agent["updatedAt"], datetime) else agent["updatedAt"],
             })
         
-        print(f"✅ Found {len(mini_agents)} Mini Agents for session {session_id}")
+        # 📦 STEP 3: Cache the results for future requests
+        await cache_service.set_mini_agents(session_id, mini_agents)
+        
+        print(f"✅ Fetched and cached {len(mini_agents)} Mini Agents for session {session_id}")
         
         return {"miniAgents": mini_agents}
         

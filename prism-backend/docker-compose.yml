@@ -1,16 +1,61 @@
 version: '3.8'
 
 services:
-  prism-backend:
+  # ☁️ FastAPI Application (Web Service)
+  # For Render: Use gunicorn with uvicorn workers
+  prism-api:
     build: .
+    command: gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 2
     ports:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      - PORT=8000
     depends_on:
       - redis
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # ☁️ Celery Worker (Background Worker)
+  # For Render: Run as separate Background Worker service
+  prism-celery:
+    build: .
+    command: celery -A app.core.celery_app worker --loglevel=info --queues=email,default --concurrency=4
+    env_file:
+      - .env
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-${REDIS_URL}}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-${REDIS_URL}}
+    depends_on:
+      - redis
+      - prism-api
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.core.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis (Broker & Backend for Celery)
+  # ☁️ For Production: Use external Redis (Upstash, Render Redis, AWS ElastiCache)
+  # Set CELERY_BROKER_URL=rediss://... in environment variables
   redis:
     image: "redis:alpine"
     ports:
       - "6379:6379"
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

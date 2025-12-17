@@ -41,49 +41,116 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from app.config import settings
 
+# --------------------------------------------------
+# Email Queue Key Definitions (Dual-Lane Architecture)
+# --------------------------------------------------
+EMAIL_HIGH_PRIORITY_QUEUE = "queue:email:high_priority"  # OTP/Auth lane (List)
+EMAIL_SCHEDULED_QUEUE = "queue:email:scheduled"  # Task reminders lane (Sorted Set)
+EMAIL_DAILY_LIMIT_KEY_TEMPLATE = "limit:email:{user_id}:{date}"  # Per-user/day counter
+EMAIL_LOCK_KEY_TEMPLATE = "lock:email:{task_id}"  # Idempotency lock per task
+EMAIL_DLQ = "queue:email:dlq"  # Dead-letter queue for failed sends
+
 logger = logging.getLogger(__name__)
 
 # Create the connection pool with error handling
 def create_redis_client():
-    """Create Redis client with proper error handling"""
+    """
+    Create Redis client with connection pooling.
+    
+    ⚡ CONNECTION POOLING:
+    - max_connections=50: Reuse up to 50 connections
+    - socket_keepalive=True: Keep connections alive
+    - retry_on_timeout=True: Auto-retry on timeout
+    
+    ❌ NEVER create Redis clients per request - use singleton!
+    """
     try:
         if not settings.REDIS_URL or settings.REDIS_URL == "redis://localhost:6379/0":
             logger.warning("Using default local Redis configuration")
-            return redis.Redis(
+            # Create connection pool for local Redis
+            pool = redis.ConnectionPool(
                 host="localhost",
                 port=6379,
                 db=0,
+                max_connections=50,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                socket_keepalive=True,
+                retry_on_timeout=True,
                 encoding="utf-8",
                 decode_responses=True
             )
+            return redis.Redis(connection_pool=pool)
         else:
+            # Create connection pool from URL
             return redis.from_url(
-                settings.REDIS_URL, 
-                encoding="utf-8", 
+                settings.REDIS_URL,
+                max_connections=50,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                socket_keepalive=True,
+                retry_on_timeout=True,
+                encoding="utf-8",
                 decode_responses=True
             )
     except Exception as e:
         logger.error(f"Failed to create Redis client: {e}")
-        logger.warning("Falling back to local Redis")
-        return redis.Redis(
+        logger.warning("Falling back to local Redis with connection pool")
+        pool = redis.ConnectionPool(
             host="localhost",
             port=6379,
             db=0,
+            max_connections=50,
             encoding="utf-8",
             decode_responses=True
         )
+        return redis.Redis(connection_pool=pool)
 
 class RedisClient:
-    """Redis client wrapper with connection error handling"""
+    """
+    🔌 SINGLETON Redis client with connection pooling.
+    
+    ✅ MANDATORY PATTERNS:
+    - Only ONE instance exists (singleton)
+    - Reuses connections from pool
+    - Never creates clients per request
+    
+    ❌ NEVER DO THIS:
+    ```python
+    # BAD - Creates new client per request ❌
+    client = RedisClient()
+    ```
+    
+    ✅ ALWAYS DO THIS:
+    ```python
+    # GOOD - Use global singleton ✅
+    from app.db.redis_client import redis_client
+    await redis_client.get(key)
+    ```
+    """
+    
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls):
+        """Enforce singleton pattern"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
     
     def __init__(self):
-        self._client = None
-        self._initialize_client()
+        """Initialize Redis client only once"""
+        if not self._initialized:
+            self._client = None
+            self._initialize_client()
+            RedisClient._initialized = True
     
     def _initialize_client(self):
-        """Initialize Redis client"""
+        """Initialize Redis client with connection pool"""
         try:
             self._client = create_redis_client()
+            logger.info("✅ Redis singleton client initialized with connection pool")
+            logger.info("   Max connections: 50 (pooled)")
         except Exception as e:
             logger.error(f"Failed to initialize Redis client: {e}")
             self._client = None
@@ -107,14 +174,28 @@ class RedisClient:
             logger.error(f"Redis GET failed for key {key}: {e}")
         return None
     
-    async def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: str, ex: Optional[int] = None, nx: bool = False) -> bool:
         """Set value in Redis with error handling"""
         try:
             if self._client:
-                await self._client.set(key, value, ex=ex)
-                return True
+                result = await self._client.set(key, value, ex=ex, nx=nx)
+                # When nx=True, returns True if key was set, None if key already exists
+                return result if nx else True
         except Exception as e:
             logger.error(f"Redis SET failed for key {key}: {e}")
+        return False
+    
+    async def setex(self, key: str, seconds: int, value: str) -> bool:
+        """
+        Set value with TTL (seconds) in Redis with error handling.
+        This mirrors the low-level setex, but uses SET with ex= for compatibility.
+        """
+        try:
+            if self._client:
+                await self._client.set(key, value, ex=seconds)
+                return True
+        except Exception as e:
+            logger.error(f"Redis SETEX failed for key {key}: {e}")
         return False
     
     async def delete(self, key: str) -> bool:
@@ -175,6 +256,24 @@ class RedisClient:
             logger.error(f"Redis RPUSH failed for key {key}: {e}")
         return False
     
+    async def lpop(self, key: str) -> Optional[str]:
+        """Left pop from Redis list with error handling"""
+        try:
+            if self._client:
+                return await self._client.lpop(key)
+        except Exception as e:
+            logger.error(f"Redis LPOP failed for key {key}: {e}")
+        return None
+    
+    async def rpop(self, key: str) -> Optional[str]:
+        """Right pop from Redis list with error handling"""
+        try:
+            if self._client:
+                return await self._client.rpop(key)
+        except Exception as e:
+            logger.error(f"Redis RPOP failed for key {key}: {e}")
+        return None
+    
     async def ltrim(self, key: str, start: int, end: int) -> bool:
         """Trim Redis list with error handling"""
         try:
@@ -185,6 +284,44 @@ class RedisClient:
             logger.error(f"Redis LTRIM failed for key {key}: {e}")
         return False
     
+    async def zadd(self, key: str, mapping: dict, **kwargs) -> bool:
+        """Add to sorted set with error handling"""
+        try:
+            if self._client:
+                await self._client.zadd(key, mapping, **kwargs)
+                return True
+        except Exception as e:
+            logger.error(f"Redis ZADD failed for key {key}: {e}")
+        return False
+    
+    async def zrangebyscore(self, key: str, min_score: str, max_score: str, start: int = 0, num: int = -1) -> list:
+        """Get sorted set members by score range with error handling"""
+        try:
+            if self._client:
+                return await self._client.zrangebyscore(key, min_score, max_score, start=start, num=num)
+        except Exception as e:
+            logger.error(f"Redis ZRANGEBYSCORE failed for key {key}: {e}")
+        return []
+    
+    async def zrem(self, key: str, *members) -> bool:
+        """Remove from sorted set with error handling"""
+        try:
+            if self._client:
+                await self._client.zrem(key, *members)
+                return True
+        except Exception as e:
+            logger.error(f"Redis ZREM failed for key {key}: {e}")
+        return False
+    
+    async def zcard(self, key: str) -> int:
+        """Get sorted set size with error handling"""
+        try:
+            if self._client:
+                return await self._client.zcard(key)
+        except Exception as e:
+            logger.error(f"Redis ZCARD failed for key {key}: {e}")
+        return 0
+    
     async def keys(self, pattern: str) -> list:
         """Get keys matching pattern with error handling"""
         try:
@@ -193,6 +330,24 @@ class RedisClient:
         except Exception as e:
             logger.error(f"Redis KEYS failed for pattern {pattern}: {e}")
         return []
+    
+    async def info(self) -> Dict[str, Any]:
+        """Get Redis INFO with error handling"""
+        try:
+            if self._client:
+                return await self._client.info()
+        except Exception as e:
+            logger.error(f"Redis INFO failed: {e}")
+        return {}
+    
+    async def dbsize(self) -> int:
+        """Get Redis DB size with error handling"""
+        try:
+            if self._client:
+                return await self._client.dbsize()
+        except Exception as e:
+            logger.error(f"Redis DBSIZE failed: {e}")
+        return 0
 
 # Global Redis client instance
 redis_client = RedisClient()

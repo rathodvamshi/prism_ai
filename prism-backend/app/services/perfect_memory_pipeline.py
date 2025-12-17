@@ -42,15 +42,22 @@ from app.db.redis_client import (
     track_user_activity
 )
 from app.services.vector_memory_service import (
-    vector_memory, process_user_message_for_memory,
-    get_ai_context_for_user
+    vector_memory,
+    process_user_message_for_memory,
+    get_ai_context_for_user,
 )
 from app.db.neo4j_client import (
     graph_memory, get_user_context_summary
 )
 from app.models.perfect_models import (
-    UserModel, SessionModel, TaskModel, MemoryModel, MessageModel, MemoryFact
+    UserModel,
+    SessionModel,
+    TaskModel,
+    MemoryModel,
+    MessageModel,
+    MemoryFact,
 )
+from app.services.pending_memory_service import save_draft_memory
 
 class PerfectMemoryPipeline:
     """
@@ -411,8 +418,20 @@ class PerfectMemoryPipeline:
                     if interest_words:
                         interest = " ".join(interest_words).strip(".,!?")
                         if len(interest) > 2:  # Minimum length check
-                            await graph_memory.add_user_interest(user_id, interest, category)
-                            print(f"✅ Added {category}: {interest}")
+                            try:
+                                await graph_memory.add_user_interest(user_id, interest, category)
+                                print(f"✅ Added {category}: {interest}")
+                            except Exception as neo_err:
+                                # If Neo4j is down or slow, never drop the memory.
+                                # Store as pending draft for later background sync.
+                                print(f"❌ Neo4j interest save failed, storing draft instead: {neo_err}")
+                                await save_draft_memory(
+                                    user_id=user_id,
+                                    memory_type="USER_INTEREST",
+                                    value=interest,
+                                    source="chat_message",
+                                    targets=["neo4j"],
+                                )
                             break
             
         except Exception as e:

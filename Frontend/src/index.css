@@ -8,6 +8,23 @@
 @tailwind utilities;
 
 @layer base {
+  * {
+    @apply border-border;
+  }
+  
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', sans-serif;
+    letter-spacing: -0.01em;
+    line-height: 1.6;
+    @apply bg-background text-foreground;
+  }
+  
   :root {
     --background: 220 14% 97%;
     --foreground: 0 0% 18%;
@@ -309,5 +326,203 @@ img, svg, video, canvas {
   }
   100% {
     transform: translateX(100%);
+  }
+}
+
+/* Premium UI Utilities */
+@layer utilities {
+  /* Message bubble shadows */
+  .shadow-message {
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  
+  .shadow-message-hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  }
+  
+  /* Smooth transitions for all interactive elements */
+  .transition-smooth {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  /* Premium gradients */
+  .gradient-primary {
+    background: linear-gradient(135deg, hsl(160 83% 35%) 0%, hsl(199 89% 48%) 100%);
+  }
+  
+  .gradient-subtle {
+    background: linear-gradient(180deg, hsl(220 14% 97%) 0%, hsl(0 0% 100%) 100%);
+  }
+  
+  /* Text optimization */
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  /* Glass morphism effect */
+  .glass {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  
+  .glass-dark {
+    background: rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+  
+  /* Micro-interactions */
+  .hover-lift {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  
+  .hover-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.1);
+  }
+  
+  .hover-scale {
+    transition: transform 0.15s ease;
+  }
+  
+  .hover-scale:hover {
+    transform: scale(1.02);
+  }
+  
+  /* Focus ring enhancement */
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background;
+  }
+}
+
+/* Enhanced Markdown Styling */
+@layer components {
+  /* Code block container */
+  .markdown-content pre {
+    @apply rounded-lg overflow-hidden my-4;
+  }
+  
+  /* Inline code */
+  .markdown-content code:not(pre code) {
+    @apply px-1.5 py-0.5 rounded bg-muted text-sm font-mono;
+  }
+  
+  /* Tables */
+  .markdown-content table {
+    @apply w-full border-collapse my-4;
+  }
+  
+  .markdown-content th,
+  .markdown-content td {
+    @apply border border-border px-4 py-2;
+  }
+  
+  .markdown-content th {
+    @apply bg-muted font-semibold;
+  }
+  
+  /* Blockquotes */
+  .markdown-content blockquote {
+    @apply border-l-4 border-primary/40 pl-4 py-2 my-3 bg-muted/30 rounded-r-md italic;
+  }
+  
+  /* Lists */
+  .markdown-content ul,
+  .markdown-content ol {
+    @apply my-3 ml-6 space-y-2;
+  }
+  
+  .markdown-content li {
+    @apply leading-7;
+  }
+  
+  /* Headings */
+  .markdown-content h1 {
+    @apply text-3xl font-bold mb-4 mt-8;
+  }
+  
+  .markdown-content h2 {
+    @apply text-2xl font-bold mb-3 mt-6;
+  }
+  
+  .markdown-content h3 {
+    @apply text-xl font-semibold mb-3 mt-5;
+  }
+  
+  .markdown-content h4 {
+    @apply text-lg font-semibold mb-2 mt-4;
+  }
+  
+  /* Links */
+  .markdown-content a {
+    @apply text-primary hover:underline font-medium;
+  }
+  
+  /* Horizontal rule */
+  .markdown-content hr {
+    @apply my-6 border-border;
+  }
+  
+  /* Premium Inline Code Highlighting */
+  .markdown-content p code,
+  .markdown-content li code,
+  .markdown-content td code {
+    @apply px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-sm font-mono;
+    color: #DC2626;
+    font-size: 0.9em;
+  }
+  
+  .dark .markdown-content p code,
+  .dark .markdown-content li code,
+  .dark .markdown-content td code {
+    color: #FCA5A5;
+  }
+  
+  /* Paragraph Formatting */
+  .markdown-content p {
+    @apply mb-3 leading-7;
+    font-size: 15px;
+    line-height: 1.7;
+  }
+  
+  /* Mark/Highlight important text */
+  .markdown-content mark {
+    @apply bg-yellow-200 dark:bg-yellow-900/50 px-1 py-0.5 rounded;
+  }
+  
+  /* Better spacing for readability */
+  .markdown-content {
+    max-width: 740px;
+  }
+  
+  /* List improvements */
+  .markdown-content ul li,
+  .markdown-content ol li {
+    @apply mb-2 leading-7;
+  }
+  
+  /* Code block improvements */
+  .markdown-content pre {
+    @apply my-4 rounded-lg;
+  }
+  
+  /* Blockquote premium styling */
+  .markdown-content blockquote {
+    @apply border-l-4 border-primary/40 pl-4 py-2 my-4 bg-muted/30 rounded-r-md italic;
+    font-size: 15px;
+  }
+  
+  /* Table cell padding */
+  .markdown-content td,
+  .markdown-content th {
+    @apply px-4 py-3;
+  }
+  
+  /* Smooth text rendering */
+  .markdown-content {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
 }

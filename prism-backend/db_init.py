@@ -3,4 +3,137 @@ Database initialization script for PRISM AI Studio
 Creates indexes for optimal performance across all collections
 """
 
-import asyncio\nimport logging\nfrom app.db.mongo_client import db\n\nlogging.basicConfig(level=logging.INFO)\nlogger = logging.getLogger(__name__)\n\nasync def create_indexes():\n    \"\"\"Create all necessary indexes for optimal database performance\"\"\"\n    \n    try:\n        # Users Collection Indexes\n        users_collection = db.users\n        await users_collection.create_index(\"email\", unique=True)\n        await users_collection.create_index(\"user_id\")\n        await users_collection.create_index(\"verified\")\n        await users_collection.create_index(\"isFirstLoginCompleted\")\n        logger.info(\"✅ Created indexes for users collection\")\n        \n        # Chat Sessions Collection Indexes  \n        sessions_collection = db.chat_sessions\n        await sessions_collection.create_index(\"sessionId\", unique=True)\n        await sessions_collection.create_index(\"user_id\")\n        await sessions_collection.create_index([(\"user_id\", 1), (\"updatedAt\", -1)])\n        await sessions_collection.create_index(\"isActive\")\n        await sessions_collection.create_index(\"updatedAt\")\n        logger.info(\"✅ Created indexes for chat_sessions collection\")\n        \n        # User Tasks Collection Indexes\n        tasks_collection = db.user_tasks\n        await tasks_collection.create_index(\"taskId\", unique=True)\n        await tasks_collection.create_index(\"user_id\")\n        await tasks_collection.create_index([(\"user_id\", 1), (\"status\", 1)])\n        await tasks_collection.create_index([(\"user_id\", 1), (\"createdAt\", -1)])\n        await tasks_collection.create_index(\"status\")\n        await tasks_collection.create_index(\"dueDate\")\n        logger.info(\"✅ Created indexes for user_tasks collection\")\n        \n        # User Memory Collection Indexes\n        memory_collection = db.user_memory\n        await memory_collection.create_index(\"id\", unique=True)\n        await memory_collection.create_index(\"user_id\")\n        await memory_collection.create_index([(\"user_id\", 1), (\"importance\", -1), (\"timestamp\", -1)])\n        await memory_collection.create_index(\"type\")\n        await memory_collection.create_index(\"importance\")\n        await memory_collection.create_index(\"timestamp\")\n        logger.info(\"✅ Created indexes for user_memory collection\")\n        \n        # Message Highlights Collection Indexes\n        highlights_collection = db.message_highlights\n        await highlights_collection.create_index(\"highlightId\", unique=True)\n        await highlights_collection.create_index(\"uniqueKey\", unique=True)\n        await highlights_collection.create_index(\"sessionId\")\n        await highlights_collection.create_index(\"messageId\")\n        await highlights_collection.create_index([(\"sessionId\", 1), (\"user_id\", 1)])\n        await highlights_collection.create_index(\"user_id\")\n        logger.info(\"✅ Created indexes for message_highlights collection\")\n        \n        # Mini-Agent Threads Collection Indexes\n        miniagent_collection = db.miniagent_threads\n        await miniagent_collection.create_index(\"threadId\", unique=True)\n        await miniagent_collection.create_index(\"messageId\")\n        await miniagent_collection.create_index(\"sessionId\")\n        await miniagent_collection.create_index(\"user_id\")\n        await miniagent_collection.create_index([(\"user_id\", 1), (\"updatedAt\", -1)])\n        await miniagent_collection.create_index(\"updatedAt\")\n        logger.info(\"✅ Created indexes for miniagent_threads collection\")\n        \n        # Shared Conversations Collection Indexes\n        shares_collection = db.shared_conversations\n        await shares_collection.create_index(\"shareId\", unique=True)\n        await shares_collection.create_index(\"user_id\")\n        await shares_collection.create_index(\"createdAt\")\n        await shares_collection.create_index(\"accessCount\")\n        logger.info(\"✅ Created indexes for shared_conversations collection\")\n        \n        logger.info(\"🎉 All database indexes created successfully!\")\n        \n    except Exception as e:\n        logger.error(f\"❌ Error creating indexes: {str(e)}\")\n        raise\n\nasync def verify_indexes():\n    \"\"\"Verify all indexes were created correctly\"\"\"\n    \n    collections = [\n        \"users\",\n        \"chat_sessions\", \n        \"user_tasks\",\n        \"user_memory\",\n        \"message_highlights\",\n        \"miniagent_threads\",\n        \"shared_conversations\"\n    ]\n    \n    for collection_name in collections:\n        collection = db[collection_name]\n        indexes = await collection.list_indexes().to_list(length=None)\n        \n        logger.info(f\"📊 {collection_name} has {len(indexes)} indexes:\")\n        for index in indexes:\n            logger.info(f\"   - {index['name']}: {index.get('key', 'N/A')}\")\n    \n    logger.info(\"✅ Index verification complete\")\n\nasync def main():\n    \"\"\"Main initialization function\"\"\"\n    logger.info(\"🚀 Starting database initialization...\")\n    \n    await create_indexes()\n    await verify_indexes()\n    \n    logger.info(\"✨ Database initialization completed successfully!\")\n\nif __name__ == \"__main__\":\n    asyncio.run(main())
+import asyncio
+import logging
+from app.db.mongo_client import db
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+async def create_indexes():
+    """Create all necessary indexes for optimal database performance"""
+    
+    try:
+        # Users Collection Indexes
+        users_collection = db.users
+        await users_collection.create_index("email", unique=True)
+        await users_collection.create_index("user_id")
+        await users_collection.create_index("verified")
+        await users_collection.create_index("isFirstLoginCompleted")
+        logger.info("✅ Created indexes for users collection")
+        
+        # Chat Sessions Collection Indexes  
+        sessions_collection = db.chat_sessions
+        await sessions_collection.create_index("sessionId", unique=True)
+        await sessions_collection.create_index("user_id")
+        await sessions_collection.create_index([("user_id", 1), ("updatedAt", -1)])
+        await sessions_collection.create_index("isActive")
+        await sessions_collection.create_index("updatedAt")
+        logger.info("✅ Created indexes for chat_sessions collection")
+        
+        # User Tasks Collection Indexes
+        tasks_collection = db.user_tasks
+        await tasks_collection.create_index("taskId", unique=True)
+        await tasks_collection.create_index("user_id")
+        await tasks_collection.create_index([("user_id", 1), ("status", 1)])
+        await tasks_collection.create_index([("user_id", 1), ("createdAt", -1)])
+        await tasks_collection.create_index("status")
+        await tasks_collection.create_index("dueDate")
+        logger.info("✅ Created indexes for user_tasks collection")
+        
+        # User Memory Collection Indexes
+        memory_collection = db.user_memory
+        await memory_collection.create_index("id", unique=True)
+        await memory_collection.create_index("user_id")
+        await memory_collection.create_index([("user_id", 1), ("importance", -1), ("timestamp", -1)])
+        await memory_collection.create_index("type")
+        await memory_collection.create_index("importance")
+        await memory_collection.create_index("timestamp")
+        logger.info("✅ Created indexes for user_memory collection")
+        
+        # Message Highlights Collection Indexes
+        highlights_collection = db.message_highlights
+        await highlights_collection.create_index("highlightId", unique=True)
+        await highlights_collection.create_index("uniqueKey", unique=True)
+        await highlights_collection.create_index("sessionId")
+        await highlights_collection.create_index("messageId")
+        # Compound indexes for faster queries
+        await highlights_collection.create_index([("sessionId", 1), ("user_id", 1)])
+        await highlights_collection.create_index([("sessionId", 1), ("userId", 1)])  # Alternative field name
+        await highlights_collection.create_index([("messageId", 1), ("sessionId", 1)])
+        await highlights_collection.create_index("user_id")
+        await highlights_collection.create_index("userId")
+        logger.info("✅ Created indexes for message_highlights collection")
+        
+        # Mini-Agent Threads Collection Indexes
+        miniagent_collection = db.miniagent_threads
+        # Using mini_agents collection which is the actual collection name
+        mini_agents_collection = db.mini_agents
+        await mini_agents_collection.create_index("agentId", unique=True)
+        await mini_agents_collection.create_index("messageId")
+        await mini_agents_collection.create_index("sessionId")
+        # Compound indexes for fastest query performance
+        await mini_agents_collection.create_index([("sessionId", 1), ("user_id", 1)])
+        await mini_agents_collection.create_index([("sessionId", 1), ("userId", 1)])  # Alternative field name
+        await mini_agents_collection.create_index([("messageId", 1), ("sessionId", 1)])
+        await mini_agents_collection.create_index([("agentId", 1), ("user_id", 1)])
+        await mini_agents_collection.create_index([("agentId", 1), ("userId", 1)])
+        await mini_agents_collection.create_index("user_id")
+        await mini_agents_collection.create_index("userId")
+        await mini_agents_collection.create_index([("user_id", 1), ("updatedAt", -1)])
+        await mini_agents_collection.create_index([("userId", 1), ("updatedAt", -1)])
+        await mini_agents_collection.create_index("updatedAt")
+        logger.info("✅ Created indexes for mini_agents collection")
+        
+        # Shared Conversations Collection Indexes
+        shares_collection = db.shared_conversations
+        await shares_collection.create_index("shareId", unique=True)
+        await shares_collection.create_index("user_id")
+        await shares_collection.create_index("createdAt")
+        await shares_collection.create_index("accessCount")
+        logger.info("✅ Created indexes for shared_conversations collection")
+        
+        logger.info("🎉 All database indexes created successfully!")
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating indexes: {str(e)}")
+        raise
+
+
+async def verify_indexes():
+    """Verify all indexes were created correctly"""
+    
+    collections = [
+        "users",
+        "chat_sessions", 
+        "user_tasks",
+        "user_memory",
+        "message_highlights",
+        "miniagent_threads",
+        "shared_conversations"
+    ]
+    
+    for collection_name in collections:
+        collection = db[collection_name]
+        indexes = await collection.list_indexes().to_list(length=None)
+        
+        logger.info(f"📊 {collection_name} has {len(indexes)} indexes:")
+        for index in indexes:
+            logger.info(f"   - {index['name']}: {index.get('key', 'N/A')}")
+    
+    logger.info("✅ Index verification complete")
+
+
+async def main():
+    """Main initialization function"""
+    logger.info("🚀 Starting database initialization...")
+    
+    await create_indexes()
+    await verify_indexes()
+    
+    logger.info("✨ Database initialization completed successfully!")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

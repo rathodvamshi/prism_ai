@@ -9,6 +9,12 @@ export const API_CONFIG = {
   TIMEOUT: 30000,
 } as const;
 
+// Production check - warn if localhost is being used in production
+if (import.meta.env.PROD && API_CONFIG.BASE_URL.includes('localhost')) {
+  console.error('❌ PRODUCTION ERROR: API URL still pointing to localhost!');
+  console.error('Set VITE_API_URL environment variable to your backend URL');
+}
+
 // Debug: Log configuration
 console.log('API Configuration:', {
   VITE_API_URL: import.meta.env.VITE_API_URL,
@@ -105,18 +111,12 @@ class ApiClient {
     options: RequestInit = {}
   ): Promise<ApiResponse<T>> {
     const url = `${this.baseURL}${endpoint}`;
-    const token = TokenManager.getToken();
 
     // Default headers
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
       ...options.headers,
     };
-
-    // Add auth header if token exists
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
 
     try {
       const controller = new AbortController();
@@ -126,6 +126,7 @@ class ApiClient {
         ...options,
         headers,
         signal: controller.signal,
+        credentials: 'include', // Always send cookies for session-based auth
       });
 
       clearTimeout(timeoutId);
@@ -199,12 +200,6 @@ export class AuthAPI {
   // Login user
   async login(credentials: LoginRequest): Promise<ApiResponse<AuthResponse>> {
     const response = await this.api.post<AuthResponse>('/auth/login', credentials);
-    
-    if (response.data && response.status === 200) {
-      TokenManager.setToken(response.data.access_token);
-      TokenManager.setUser(response.data.user);
-    }
-    
     return response;
   }
 
@@ -219,12 +214,6 @@ export class AuthAPI {
   // Verify OTP
   async verifyOTP(data: OTPVerifyRequest): Promise<ApiResponse<AuthResponse>> {
     const response = await this.api.post<AuthResponse>('/auth/verify-otp', data);
-    
-    if (response.data && response.status === 200) {
-      TokenManager.setToken(response.data.access_token);
-      TokenManager.setUser(response.data.user);
-    }
-    
     return response;
   }
 
@@ -240,22 +229,28 @@ export class AuthAPI {
 
   // Logout
   async logout(): Promise<void> {
-    TokenManager.removeToken();
+    await this.api.post('/auth/logout');
   }
 
   // Get current user
   getCurrentUser() {
-    return TokenManager.getUser();
+    return null;
   }
 
   // Check if user is authenticated
   isAuthenticated(): boolean {
-    return !!TokenManager.getToken();
+    return false;
   }
 
   // Refresh token if needed
   async refreshToken(): Promise<ApiResponse<AuthResponse>> {
-    return this.api.post<AuthResponse>('/auth/refresh');
+    // With session-based auth, refresh is handled server-side via session expiry.
+    return { status: 200 };
+  }
+
+  // Session-based "me" endpoint
+  async me(): Promise<ApiResponse<any>> {
+    return this.api.get('/auth/me');
   }
 }
 
@@ -265,8 +260,8 @@ export class ChatAPI {
 
   // Helper method to get auth headers
   private getAuthHeaders(): HeadersInit {
-    const token = TokenManager.getToken();
-    return token ? { 'Authorization': `Bearer ${token}` } : {};
+    // Session-based auth uses HTTP-only cookies; no Authorization header needed.
+    return {};
   }
 
   // Send message with comprehensive response handling
@@ -296,18 +291,19 @@ export class ChatAPI {
     message: string,
     onChunk: (chunk: string) => void,
     onComplete: (messageId: string) => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    onAction?: (action: any) => void,
+    onStatus?: (status: string) => void,
   ): Promise<void> {
     const url = `${API_CONFIG.BASE_URL}/chat/message/stream`;
-    const token = TokenManager.getToken();
 
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
+        credentials: 'include',
         body: JSON.stringify({ chatId, message }),
       });
 
@@ -336,28 +332,54 @@ export class ChatAPI {
         // Decode the chunk
         buffer += decoder.decode(value, { stream: true });
         
-        // Process complete SSE messages (lines ending with \n\n)
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
-              
-              if (data.type === 'start') {
-                messageId = data.message_id;
-              } else if (data.type === 'chunk') {
-                onChunk(data.content);
-              } else if (data.type === 'done') {
-                onComplete(messageId);
-                return;
-              } else if (data.type === 'error') {
-                throw new Error(data.message);
-              }
-            } catch (parseError) {
-              console.error('Failed to parse SSE data:', parseError);
+        // Process complete SSE events (blocks ending with \n\n)
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || ''; // Keep incomplete block in buffer
+
+        for (const eventBlock of events) {
+          const lines = eventBlock.split('\n').filter(Boolean);
+          let eventType = 'token';
+          let dataRaw = '';
+
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              // Accumulate data lines (strip "data:" prefix)
+              dataRaw += (dataRaw ? '\n' : '') + line.slice(5).trim();
             }
+          }
+
+          try {
+            if (eventType === 'start') {
+              const data = JSON.parse(dataRaw || '{}');
+              messageId = data.message_id || messageId;
+            } else if (eventType === 'action') {
+              if (onAction && dataRaw) {
+                const actionData = JSON.parse(dataRaw);
+                onAction(actionData);
+              }
+            } else if (eventType === 'status') {
+              if (onStatus && dataRaw) {
+                const statusData = JSON.parse(dataRaw);
+                const step = typeof statusData.step === 'string' ? statusData.step : undefined;
+                onStatus(step || '');
+              }
+            } else if (eventType === 'token') {
+              // Raw token text
+              if (dataRaw) {
+                onChunk(dataRaw);
+              }
+            } else if (eventType === 'done') {
+              // Done event can include usage, but frontend only needs completion
+              onComplete(messageId);
+              return;
+            } else if (eventType === 'error') {
+              const data = dataRaw ? JSON.parse(dataRaw) : {};
+              throw new Error(data.message || 'Streaming error');
+            }
+          } catch (parseError) {
+            console.error('Failed to parse SSE event:', parseError, eventBlock);
           }
         }
       }
@@ -387,6 +409,19 @@ export class ChatAPI {
     return this.api.get('/chat/chats');
   }
 
+  // Tasks API
+  async confirmTask(description: string, dueDate?: string): Promise<ApiResponse<any>> {
+    return this.api.post('/tasks/confirm', {
+      description,
+      due_date: dueDate || null,
+    });
+  }
+
+  async getTasks(status?: 'pending' | 'completed'): Promise<ApiResponse<any>> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.api.get(`/tasks${qs}`);
+  }
+
   // Create new chat session
   // Mini Agent API Methods
   async createMiniAgent(
@@ -402,6 +437,7 @@ export class ChatAPI {
           'Content-Type': 'application/json',
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
         body: JSON.stringify({
           messageId,
           sessionId,
@@ -430,6 +466,7 @@ export class ChatAPI {
         headers: {
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
       });
 
       const data = await response.json();
@@ -456,6 +493,7 @@ export class ChatAPI {
           'Content-Type': 'application/json',
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
         body: JSON.stringify({ content }),
       });
 
@@ -479,6 +517,7 @@ export class ChatAPI {
         headers: {
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
       });
 
       const data = await response.json();
@@ -502,6 +541,7 @@ export class ChatAPI {
           ...this.getAuthHeaders(),
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ selectedText }),
       });
 
@@ -525,6 +565,7 @@ export class ChatAPI {
         headers: {
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
       });
 
       const data = await response.json();
@@ -591,6 +632,7 @@ export class ChatAPI {
           'Content-Type': 'application/json',
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
         body: JSON.stringify({
           sessionId,
           messageId,
@@ -622,6 +664,7 @@ export class ChatAPI {
         headers: {
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
       });
 
       const data = await response.json();
@@ -644,6 +687,7 @@ export class ChatAPI {
         headers: {
           ...this.getAuthHeaders(),
         },
+        credentials: 'include',
       });
 
       const data = await response.json();
@@ -667,6 +711,7 @@ export class ChatAPI {
           ...this.getAuthHeaders(),
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ note }),
       });
 
@@ -679,6 +724,30 @@ export class ChatAPI {
       return {
         status: 500,
         error: error.message || 'Failed to update highlight note',
+      };
+    }
+  }
+
+  // Batch load session data (messages + highlights + mini agents)
+  async loadSessionData(sessionId: string): Promise<ApiResponse<any>> {
+    try {
+      const response = await fetch(`${API_CONFIG.BASE_URL}/chat/sessions/${sessionId}`, {
+        method: 'GET',
+        headers: {
+          ...this.getAuthHeaders(),
+        },
+        credentials: 'include',
+      });
+
+      const data = await response.json();
+      return {
+        status: response.status,
+        data,
+      };
+    } catch (error: any) {
+      return {
+        status: 500,
+        error: error.message || 'Failed to load session data',
       };
     }
   }

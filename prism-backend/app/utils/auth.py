@@ -5,12 +5,12 @@ Handles JWT token creation, validation, and user authentication
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
-from fastapi import HTTPException, Depends, status
+from fastapi import HTTPException, Depends, status, Cookie, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.config import settings
-from app.db.mongo_client import users_collection
+from app.db.mongo_client import users_collection, auth_sessions_collection
 from app.models.user_models import User
 import logging
 import hashlib
@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# JWT Configuration
+# JWT Configuration (still available for internal tools)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = getattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES', 30 * 24 * 60)  # 30 days
 REFRESH_TOKEN_EXPIRE_DAYS = getattr(settings, 'REFRESH_TOKEN_EXPIRE_DAYS', 90)  # 90 days
 SECRET_KEY = getattr(settings, 'JWT_SECRET_KEY', 'your-super-secret-jwt-key-change-this-in-production')
 
-# Security scheme for FastAPI
+# Security scheme for FastAPI (Bearer tokens – legacy/internal)
 security = HTTPBearer()
 
 class AuthUtils:
@@ -34,48 +34,64 @@ class AuthUtils:
 
     @staticmethod
     def hash_password(password: str) -> str:
-        """Hash a password using bcrypt with bulletproof byte handling"""
-        # Ultra-conservative approach: use only first 40 characters to ensure safety
-        safe_password = password[:40] if len(password) > 40 else password
-        logger.info(f"Password truncated from {len(password)} to {len(safe_password)} characters")
+        """Hash a password using bcrypt with proper 72-byte limit handling"""
+        # ☁️ CRITICAL: bcrypt has a 72-byte limit, not character limit
+        # Encode to bytes first, then truncate to 72 bytes
+        password_bytes = password.encode('utf-8')
+        
+        if len(password_bytes) > 72:
+            # Truncate to 72 bytes (not characters)
+            safe_password_bytes = password_bytes[:72]
+            safe_password = safe_password_bytes.decode('utf-8', errors='ignore')
+            logger.warning(f"Password truncated from {len(password)} chars ({len(password_bytes)} bytes) to {len(safe_password)} chars (72 bytes) for bcrypt")
+        else:
+            safe_password = password
         
         try:
-            # First attempt: use bcrypt with very safe truncation
-            return pwd_context.hash(safe_password)
+            # Use bcrypt with properly truncated password
+            hashed = pwd_context.hash(safe_password)
+            logger.info(f"✅ Password hashed successfully using bcrypt")
+            return hashed
         except Exception as e:
-            logger.error(f"Bcrypt failed: {e}, trying alternative hashing")
-            try:
-                # Fallback: use even shorter password
-                ultra_safe = password[:20] if len(password) > 20 else password
-                return pwd_context.hash(ultra_safe)
-            except Exception as e2:
-                logger.error(f"All bcrypt attempts failed: {e2}, using SHA256 fallback")
-                # Last resort: use SHA256 (not ideal but works)
-                import hashlib
-                return hashlib.sha256(safe_password.encode()).hexdigest()
+            logger.error(f"❌ Bcrypt hashing failed: {e}")
+            # Last resort: use SHA256 with salt (not ideal but works)
+            import hashlib
+            import secrets
+            salt = secrets.token_hex(16)
+            combined = f"{salt}:{safe_password}".encode('utf-8')
+            hashed = hashlib.sha256(combined).hexdigest()
+            logger.warning(f"⚠️ Using SHA256 fallback for password hashing")
+            return f"sha256:{salt}:{hashed}"
 
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
-        """Verify a password against its hash with bulletproof handling"""
-        # Apply same truncation as in hash_password
-        safe_password = plain_password[:40] if len(plain_password) > 40 else plain_password
+        """Verify a password against its hash with proper 72-byte limit handling"""
+        # ☁️ CRITICAL: Apply same 72-byte truncation as in hash_password
+        password_bytes = plain_password.encode('utf-8')
+        
+        if len(password_bytes) > 72:
+            safe_password_bytes = password_bytes[:72]
+            safe_password = safe_password_bytes.decode('utf-8', errors='ignore')
+        else:
+            safe_password = plain_password
         
         try:
-            # First attempt: bcrypt verification
+            # Check if it's a SHA256 fallback hash (format: "sha256:salt:hash")
+            if hashed_password.startswith("sha256:"):
+                import hashlib
+                parts = hashed_password.split(":")
+                if len(parts) == 3:
+                    salt, stored_hash = parts[1], parts[2]
+                    combined = f"{salt}:{safe_password}".encode('utf-8')
+                    computed_hash = hashlib.sha256(combined).hexdigest()
+                    return computed_hash == stored_hash
+                return False
+            
+            # Standard bcrypt verification
             return pwd_context.verify(safe_password, hashed_password)
         except Exception as e:
-            logger.error(f"Bcrypt verification failed: {e}, trying alternatives")
-            try:
-                # Try with even shorter password
-                ultra_safe = plain_password[:20] if len(plain_password) > 20 else plain_password
-                return pwd_context.verify(ultra_safe, hashed_password)
-            except Exception as e2:
-                # Check if it's a SHA256 hash (fallback from hashing)
-                if len(hashed_password) == 64:  # SHA256 hash length
-                    import hashlib
-                    return hashlib.sha256(safe_password.encode()).hexdigest() == hashed_password
-                logger.error(f"All password verification methods failed: {e2}")
-                return False
+            logger.error(f"❌ Password verification failed: {e}")
+            return False
 
     @staticmethod
     def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
@@ -178,7 +194,7 @@ class AuthUtils:
             
         return safe_user
 
-# Dependency to get current user from JWT token
+# Dependency to get current user from JWT token (legacy / internal)
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
     """
     FastAPI dependency to get current authenticated user from JWT token
@@ -221,7 +237,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         name=user_data.get("name")
     )
 
-# Optional dependency for endpoints that may or may not require authentication
+# Optional dependency for endpoints that may or may not require authentication (JWT-based)
 async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[User]:
     """
     FastAPI dependency for optional authentication
@@ -235,7 +251,7 @@ async def get_optional_user(credentials: Optional[HTTPAuthorizationCredentials] 
     except HTTPException:
         return None
 
-# Dependency to ensure user is verified
+# Dependency to ensure user is verified (JWT-based placeholder)
 async def get_verified_user(user: User = Depends(get_current_user)) -> User:
     """
     FastAPI dependency to ensure user is verified
@@ -250,6 +266,165 @@ async def get_verified_user(user: User = Depends(get_current_user)) -> User:
     # if not user_data.get("verified", False):
     #     raise HTTPException(...)
     return user
+
+
+# --------------------------------------------------------------------
+# Session-based Authentication (Server-side sessions with HTTP-only cookie)
+# --------------------------------------------------------------------
+
+SESSION_COOKIE_NAME = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+SESSION_EXPIRE_DAYS = getattr(settings, "SESSION_EXPIRE_DAYS", 30)
+AUTH_SINGLE_SESSION = getattr(settings, "AUTH_SINGLE_SESSION", False)
+
+
+async def create_session_for_user(
+    user: dict,
+    user_agent: Optional[str] = None,
+    ip: Optional[str] = None,
+) -> str:
+    """
+    Create a new login session for the given user and persist it in MongoDB.
+    Returns the opaque sessionId to be set in an HTTP-only cookie.
+    """
+    from bson import ObjectId
+    import uuid
+
+    user_id = user.get("_id") or user.get("id") or user.get("user_id")
+    if isinstance(user_id, str):
+        try:
+            user_id_obj = ObjectId(user_id)
+        except Exception:
+            # Fallback: store string user id if not a valid ObjectId
+            user_id_obj = user_id
+    else:
+        user_id_obj = user_id
+
+    # Optionally enforce a single active session per user
+    if AUTH_SINGLE_SESSION and user_id_obj:
+        try:
+            await auth_sessions_collection.update_many(
+                {"userId": user_id_obj, "is_active": True},
+                {"$set": {"is_active": False, "invalidated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to invalidate existing sessions for user {user_id}: {e}")
+
+    session_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=SESSION_EXPIRE_DAYS)
+
+    session_doc = {
+        "sessionId": session_id,
+        "userId": user_id_obj,
+        "email": user.get("email"),
+        "created_at": now,
+        "expires_at": expires_at,
+        "user_agent": user_agent or "",
+        "ip": ip or "",
+        "is_active": True,
+    }
+
+    try:
+        await auth_sessions_collection.insert_one(session_doc)
+        logger.info(f"✅ Created login session for user {user.get('email')} | sessionId={session_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to create login session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create login session",
+        )
+
+    return session_id
+
+
+async def get_session(session_id: str) -> Optional[dict]:
+    """Fetch a session document by opaque sessionId and validate basic fields."""
+    if not session_id:
+        return None
+
+    try:
+        session = await auth_sessions_collection.find_one({"sessionId": session_id})
+        if not session:
+            return None
+
+        if not session.get("is_active", False):
+            return None
+
+        expires_at = session.get("expires_at")
+        if isinstance(expires_at, datetime):
+            # Safety fix: ensure expires_at is timezone-aware
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < datetime.now(timezone.utc):
+                return None
+
+        return session
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch session: {e}")
+        return None
+
+
+async def get_current_user_from_session(
+    session_cookie_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> User:
+    """
+    FastAPI dependency to get the authenticated user from an HTTP-only session cookie.
+
+    - Reads opaque session_id from cookie
+    - Validates session in auth_sessions_collection
+    - Loads user from users_collection
+    """
+    if not session_cookie_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
+    session = await get_session(session_cookie_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
+
+    user_id = session.get("userId")
+    try:
+        from bson import ObjectId
+
+        if isinstance(user_id, str) and ObjectId.is_valid(user_id):
+            user_id_query = ObjectId(user_id)
+        else:
+            user_id_query = user_id
+
+        user_doc = await users_collection.find_one({"_id": user_id_query})
+    except Exception as e:
+        logger.error(f"❌ Error fetching user for session: {e}")
+        user_doc = None
+
+    if not user_doc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found for session",
+        )
+
+    # Minimal user model used throughout the app
+    return User(
+        user_id=str(user_doc["_id"]),
+        email=user_doc["email"],
+        name=user_doc.get("name"),
+    )
+
+
+async def get_optional_user_from_session(
+    session_cookie_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> Optional[User]:
+    """Optional session-based dependency: returns User or None."""
+    if not session_cookie_id:
+        return None
+    try:
+        return await get_current_user_from_session(session_cookie_id=session_cookie_id)
+    except HTTPException:
+        return None
 
 # Rate limiting and security utilities
 class SecurityUtils:

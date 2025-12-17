@@ -12,6 +12,9 @@ import {
 } from "@/components/ui/tooltip";
 import { X, Send, Trash2, Bot, Quote, Edit2, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { CodeBlock } from "./CodeBlock";
 
 /**
  * Mini Agent Panel Component
@@ -48,9 +51,12 @@ export const MiniAgentPanel = () => {
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
   const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
   const [justSentMessageId, setJustSentMessageId] = useState<string | null>(null);
+  const [panelWidth, setPanelWidth] = useState(320); // Default 320px (20rem)
+  const [isResizing, setIsResizing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const draftKey = `sub-brain-draft-${activeMiniAgentId}`;
 
   const activeAgent = miniAgents.find((a) => a.id === activeMiniAgentId);
@@ -317,9 +323,13 @@ export const MiniAgentPanel = () => {
     try {
       await updateMiniAgentSnippet(activeMiniAgentId, editedSnippet);
       setIsEditingSnippet(false);
-      console.log('✅ Snippet updated successfully');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[MiniAgent] Snippet updated successfully');
+      }
     } catch (error) {
-      console.error('❌ Failed to update snippet:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('[MiniAgent] Failed to update snippet:', error);
+      }
       // Restore original snippet on error
       if (activeAgent) {
         setEditedSnippet(activeAgent.selectedText);
@@ -334,26 +344,65 @@ export const MiniAgentPanel = () => {
       await updateMiniAgentSnippet(activeMiniAgentId, "");
       setEditedSnippet("");
       setIsEditingSnippet(false);
-      console.log('✅ Snippet removed successfully');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[MiniAgent] Snippet removed successfully');
+      }
     } catch (error) {
-      console.error('❌ Failed to remove snippet:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('[MiniAgent] Failed to remove snippet:', error);
+      }
     }
   };
+
+  // Handle resize
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      
+      const newWidth = window.innerWidth - e.clientX;
+      // Min width: 280px, Max width: 600px
+      const clampedWidth = Math.max(280, Math.min(600, newWidth));
+      setPanelWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   return (
     <AnimatePresence>
       {activeAgent && (
         <motion.div
-          initial={{ x: "100%" }}
-          animate={{ x: 0 }}
-          exit={{ x: "100%" }}
+          ref={panelRef}
+          initial={{ x: "100%", opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={{ x: "100%", opacity: 0 }}
           transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="w-80 h-full bg-card border-l border-border flex flex-col shadow-xl"
-          style={{
-            minWidth: "320px",
-            maxWidth: "600px",
-          }}
+          style={{ width: `${panelWidth}px` }}
+          className="h-full bg-card border-l border-border flex flex-col shadow-xl relative"
         >
+          {/* Resize Handle */}
+          <div
+            onMouseDown={handleMouseDown}
+            className={`absolute left-0 top-0 bottom-0 w-1 hover:w-1.5 bg-transparent hover:bg-primary/50 cursor-col-resize transition-all z-50 ${isResizing ? 'bg-primary w-1.5' : ''}`}
+            title="Drag to resize"
+          />
           {/* Header */}
           <div className="p-4 border-b border-border flex items-center justify-between bg-gradient-to-r from-primary/10 via-primary/5 to-transparent backdrop-blur-sm">
             <div className="flex items-center gap-2">
@@ -373,26 +422,42 @@ export const MiniAgentPanel = () => {
               </div>
             </div>
             <div className="flex gap-1">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => {
-                  deleteMiniAgent(activeAgent.id);
-                }}
-                className="text-muted-foreground hover:text-destructive"
-                title="Delete Sub-Brain"
-              >
-                <Trash2 className="w-4 h-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setActiveMiniAgent(null)}
-                className="text-muted-foreground"
-                title="Close Sub-Brain"
-              >
-                <X className="w-4 h-4" />
-              </Button>
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => {
+                        deleteMiniAgent(activeAgent.id);
+                      }}
+                      className="text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left" className="text-xs py-1 px-2">
+                    Delete
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => setActiveMiniAgent(null)}
+                      className="text-muted-foreground"
+                    >
+                      <X className="w-4 h-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="left" className="text-xs py-1 px-2">
+                    Close
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
           </div>
 
@@ -466,10 +531,10 @@ export const MiniAgentPanel = () => {
                   >
                     <div
                       className={cn(
-                        "max-w-[90%] p-3 rounded-xl text-sm leading-relaxed transition-all duration-300",
+                        "max-w-[90%] p-3 rounded-xl leading-relaxed transition-all duration-300",
                         msg.role === "user"
-                          ? "bg-primary text-primary-foreground rounded-br-sm"
-                          : "bg-secondary text-secondary-foreground rounded-bl-sm",
+                          ? "bg-primary text-primary-foreground rounded-br-sm text-sm"
+                          : "bg-secondary text-secondary-foreground rounded-bl-sm text-[15px] font-medium [word-spacing:0.06em]",
                         isCurrentConversation && "ring-1 ring-primary/20 shadow-sm",
                         isJustSent && "ring-2 ring-primary/40 shadow-md" // Extra highlight for just sent
                       )}
@@ -485,8 +550,48 @@ export const MiniAgentPanel = () => {
                           </div>
                         </div>
                       )}
-                      <div className="whitespace-pre-wrap break-words">
-                        {displayText}
+                      <div className={cn(
+                        "break-words",
+                        msg.role === "user" ? "whitespace-pre-wrap" : ""
+                      )}>
+                        {msg.role === "assistant" && displayText.includes('```') ? (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              code({ node, inline, className, children, ...props }: any) {
+                                const match = /language-(\w+)/.exec(className || '');
+                                const codeString = String(children).replace(/\n$/, '');
+                                
+                                return !inline ? (
+                                  <CodeBlock language={match ? match[1] : 'text'}>
+                                    {codeString}
+                                  </CodeBlock>
+                                ) : (
+                                  <CodeBlock inline>{codeString}</CodeBlock>
+                                );
+                              },
+                              p({ children }) {
+                                return <p className="mb-1.5">{children}</p>;
+                              },
+                              strong({ children }) {
+                                return <strong className="font-bold">{children}</strong>;
+                              },
+                              ul({ children }) {
+                                return <ul className="list-disc list-inside mb-1.5 space-y-0.5">{children}</ul>;
+                              },
+                              ol({ children }) {
+                                return <ol className="list-decimal list-inside mb-1.5 space-y-0.5">{children}</ol>;
+                              },
+                              li({ children }) {
+                                return <li className="ml-1.5">{children}</li>;
+                              },
+                            }}
+                          >
+                            {displayText}
+                          </ReactMarkdown>
+                        ) : (
+                          displayText
+                        )}
                       </div>
                       {isLongMessage && (
                         <button

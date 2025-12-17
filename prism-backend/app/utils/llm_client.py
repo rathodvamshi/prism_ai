@@ -9,9 +9,23 @@ client = AsyncGroq(
     api_key=settings.GROQ_API_KEY,
 )
 
-async def get_llm_response(prompt: str, system_prompt: str, image_url: str | None = None) -> str:
+async def get_llm_response(
+    prompt: str, 
+    system_prompt: str = "You are a helpful AI assistant.", 
+    image_url: str | None = None,
+    timeout: float = 30.0
+) -> str:
     """
     Sends a prompt to Groq. Supports text-only and vision via image_url.
+    
+    Args:
+        prompt: User prompt
+        system_prompt: System prompt (defaults to basic assistant)
+        image_url: Optional image URL for vision models
+        timeout: Request timeout in seconds (default 30s)
+    
+    Returns:
+        AI response text
     """
     try:
         if image_url:
@@ -33,19 +47,26 @@ async def get_llm_response(prompt: str, system_prompt: str, image_url: str | Non
                 {"role": "user", "content": prompt},
             ]
 
-        chat_completion = await client.chat.completions.create(
-            messages=messages,
-            model=model_name,
-            temperature=0.8,  # Slightly higher for more creative, energetic responses
-            max_tokens=2048,  # More tokens for detailed, warm responses
-            top_p=0.95,      # Slight reduction for more focused responses
-            stop=None,
-            stream=False,
+        import asyncio
+        chat_completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                messages=messages,
+                model=model_name,
+                temperature=0.8,  # Creative and engaging
+                max_tokens=2048,  # Detailed responses
+                top_p=0.95,      # Focused but creative
+                stop=None,
+                stream=False,
+            ),
+            timeout=timeout
         )
         return chat_completion.choices[0].message.content
+    except asyncio.TimeoutError:
+        print(f"LLM Timeout: Request took longer than {timeout}s")
+        return "I'm taking a bit longer to think... Let me get back to you! 🤔"
     except Exception as e:
         print(f"LLM Error: {e}")
-        return "I'm having trouble seeing or thinking right now."
+        return "I'm having trouble processing right now. Let me try again! 😅"
 
 async def get_llm_response_stream(prompt: str, system_prompt: str, image_url: str | None = None):
     """

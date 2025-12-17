@@ -1,0 +1,60 @@
+# ☁️ Render Cloud Deployment Configuration
+# =========================================
+# This file defines two services: Web Service (API) and Background Worker (Celery)
+
+services:
+  # Service A: FastAPI Web Service
+  - type: web
+    name: prism-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENVIRONMENT
+        value: production
+      - key: CELERY_BROKER_URL
+        sync: false  # Set in Render dashboard: rediss://user:pass@host:port
+      - key: CELERY_RESULT_BACKEND
+        sync: false  # Set in Render dashboard: rediss://user:pass@host:port
+      - key: REDIS_URL
+        sync: false  # Fallback if CELERY_BROKER_URL not set
+      - key: MONGO_URI
+        sync: false  # MongoDB connection string
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+
+  # Service B: Celery Background Worker
+  - type: worker
+    name: prism-celery-worker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A app.core.celery_app worker --loglevel=info --queues=email,default --concurrency=4
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: CELERY_BROKER_URL
+        sync: false  # MUST match API service (same Redis instance)
+      - key: CELERY_RESULT_BACKEND
+        sync: false  # MUST match API service (same Redis instance)
+      - key: REDIS_URL
+        sync: false  # Fallback
+      - key: MONGO_URI
+        sync: false  # Same MongoDB as API
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false

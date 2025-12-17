@@ -79,6 +79,27 @@ async def save_long_term_memory(user_id: str, text: str, memory_type: str = "fac
     vector = await get_embedding(text)
     memory_id = _deterministic_memory_id(user_id, text, memory_type)
 
+    # 🧠 MEMORY HARDENING - Semantic Deduplicator
+    # Skip saving if a very similar memory already exists (>95% similarity)
+    try:
+        existing = index.query(
+            vector=vector,
+            top_k=1,
+            include_metadata=True,
+            filter={"user_id": user_id}
+        )
+
+        if existing and getattr(existing, "matches", None):
+            top_match = existing.matches[0]
+            score = top_match.score if hasattr(top_match, "score") else 0.0
+            if score > 0.95:
+                existing_text = top_match.metadata.get("text") if hasattr(top_match, "metadata") else ""
+                print(f"⚠️ Memory ignored (Duplicate): '{text}' is too similar to '{existing_text}' (score={score:.3f})")
+                logger.info(f"[Memory Dedup] Skipped duplicate memory for user {user_id} (score={score:.3f})")
+                return
+    except Exception as e:
+        logger.warning(f"[Memory Dedup] Pinecone duplicate check failed: {e}")
+
     try:
         index.upsert(
             vectors=[
@@ -137,10 +158,13 @@ async def save_user_profile_memory(user_id: str, profile_data: dict):
 # ------------------------------------------------------
 # Retrieve Relevant Memories
 # ------------------------------------------------------
-async def retrieve_long_term_memory(user_id: str, query: str, top_k: int = 3):
+async def retrieve_long_term_memory(user_id: str, query: str, top_k: int = 5):
     """
     Retrieves the top-k most relevant memories for a user.
     Uses semantic search (vector similarity).
+    
+    🧠 MEMORY HARDENING PROTOCOL - Fix 3: Score Filtering
+    Only returns memories with > 75% match confidence to prevent fuzzy/hallucinated memories.
     """
     if not index:
         logger.warning("Pinecone not available, returning empty memories")
@@ -149,6 +173,7 @@ async def retrieve_long_term_memory(user_id: str, query: str, top_k: int = 3):
     try:
         vector = await get_embedding(query)
 
+        # Get top 5 matches (we'll filter by score)
         results = index.query(
             vector=vector,
             top_k=top_k,
@@ -156,13 +181,24 @@ async def retrieve_long_term_memory(user_id: str, query: str, top_k: int = 3):
             filter={"user_id": user_id}   # Only load this user's memories
         )
 
-        memories = []
+        valid_memories = []
         if results and hasattr(results, "matches"):
             for match in results.matches:
-                if "text" in match.metadata:
-                    memories.append(match.metadata["text"])
-
-        return memories
+                # QUALITY CONTROL: Only accept memories with > 75% match confidence
+                score = match.score if hasattr(match, "score") else 0.0
+                if score > 0.75:
+                    if "text" in match.metadata:
+                        valid_memories.append(match.metadata["text"])
+                        logger.debug(f"[Memory Hardening] Accepted memory with score {score:.3f}: {match.metadata['text'][:50]}...")
+                else:
+                    logger.debug(f"[Memory Hardening] Rejected memory with score {score:.3f} (below 0.75 threshold)")
+        
+        if not valid_memories:
+            logger.info(f"[Memory Hardening] No memories found with score > 0.75 for query: {query[:50]}...")
+            return ["(No relevant past memories found)"]
+        
+        logger.info(f"[Memory Hardening] Returning {len(valid_memories)} high-quality memories (score > 0.75)")
+        return valid_memories
     except Exception as e:
         logger.error(f"Failed to retrieve memories from Pinecone: {e}")
         return []

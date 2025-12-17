@@ -112,7 +112,7 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
       }
     } catch {}
     return new Promise<HTMLImageElement>((resolve, reject) => {
-      const img = new Image();
+      const img = document.createElement('img');
       img.onload = () => resolve(img);
       img.onerror = reject;
       img.src = URL.createObjectURL(blob);
@@ -192,20 +192,20 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="p-3 sm:p-4 bg-background"
+      className="shrink-0 p-2 sm:p-3 md:p-4 bg-background border-t border-transparent"
     >
-      <div className="max-w-4xl mx-auto">
-        {/* Previews */}
+      <div className="max-w-3xl mx-auto w-full">
+        {/* Attachment Previews */}
         {attachments.length > 0 && (
           <div className="mb-2">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-1.5 flex items-center justify-between">
               <span className="text-xs text-muted-foreground">Attachments ({attachments.length})</span>
               <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => {
                 attachments.forEach((a) => { if (a.url.startsWith("blob:")) URL.revokeObjectURL(a.url); });
                 setAttachments([]);
               }}>Clear all</button>
             </div>
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-1.5 sm:gap-2">
             {attachments.map((a, i) => (
               <div key={a.id} className="relative group">
                 {a.type === "image" ? (
@@ -232,13 +232,13 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
           </div>
         )}
         <div
-          className="relative bg-card rounded-2xl shadow-soft overflow-hidden"
+          className="relative bg-card rounded-xl sm:rounded-2xl shadow-soft overflow-hidden"
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
           onDrop={(e) => { e.preventDefault(); onPickFiles(e.dataTransfer.files); }}
         >
-          <div className="flex items-end gap-2 sm:gap-3 p-2">
+          <div className="flex items-end gap-1.5 sm:gap-2 p-1.5 sm:p-2">
             {/* Left Actions */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
               {/* Hidden pickers */}
               <input ref={galleryInputRef} type="file" multiple className="hidden" accept="image/*" onChange={(e) => onPickFiles(e.target.files)} />
               <input ref={filesInputRef} type="file" multiple className="hidden" onChange={(e) => onPickFiles(e.target.files)} accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip,application/x-zip-compressed,application/x-7z-compressed,text/plain,application/json" />
@@ -315,13 +315,13 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Message PRISM..."
-              className="flex-1 min-h-[40px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 py-2.5 text-sm md:text-base"
+              className="flex-1 min-h-[36px] sm:min-h-[40px] max-h-[160px] sm:max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 py-2 sm:py-2.5 text-sm sm:text-base px-1"
               rows={1}
             />
 
             {/* Right Actions */}
-            <div className="flex items-center gap-1">
-              <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
+            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
+              <Button variant="ghost" size="icon-sm" className="text-muted-foreground h-8 w-8 sm:h-9 sm:w-9">
                 <Mic className="w-4 h-4" />
               </Button>
               <Button
@@ -329,17 +329,17 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
                 onClick={handleSubmit}
                 disabled={(!input.trim() && attachments.length === 0) || isLoading}
                 className={cn(
-                  "transition-all",
+                  "transition-all h-8 w-8 sm:h-9 sm:w-9",
                   (input.trim() || attachments.length > 0) && "bg-primary shadow-soft"
                 )}
               >
-                <Send className="w-4 h-4 md:w-5 md:h-5" />
+                <Send className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </Button>
             </div>
           </div>
         </div>
 
-        <p className="text-xs sm:text-[0.8rem] text-muted-foreground text-center mt-2">
+        <p className="text-[10px] sm:text-xs text-muted-foreground text-center mt-1.5 sm:mt-2 px-2">
           PRISM can make mistakes. Consider checking important information.
         </p>
       </div>

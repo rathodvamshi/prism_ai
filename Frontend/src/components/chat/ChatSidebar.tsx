@@ -2,6 +2,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useChatStore } from "@/stores/chatStore";
 import { useProfileStore } from "@/stores/profileStore";
 import { Button } from "@/components/ui/button";
+import type { Chat } from "@/types/chat";
 import { ChatListSkeleton, TaskSkeleton } from "@/components/chat/LoadingSkeletons";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -199,15 +200,15 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
         animate={
           isMobile
             ? { x: sidebarExpanded ? 0 : -320 }
-            : { width: sidebarExpanded ? 280 : 64 }
+            : { width: sidebarExpanded ? 260 : 64 }
         }
         transition={{ duration: 0.2, ease: "easeInOut" }}
         className={cn(
           "h-screen bg-sidebar border-r border-sidebar-border flex flex-col",
           isMobile
-            ? "fixed top-0 left-0 z-50 w-[85vw] max-w-[280px]"
+            ? "fixed top-0 left-0 z-50 w-[85vw] max-w-[240px]"
             : "relative",
-          !isMobile && !sidebarExpanded && "cursor-pointer"
+          !isMobile && !sidebarExpanded && "cursor-e-resize hover:bg-sidebar/80 transition-colors"
         )}
         drag={isMobile && sidebarExpanded ? "x" : false}
         dragConstraints={isMobile && sidebarExpanded ? { left: -320, right: 0 } : undefined}
@@ -301,9 +302,12 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  onClick={() => {
-                    // Unified handler: reuse empty or start a fresh session
-                    useChatStore.getState().startNewSession();
+                  onClick={async () => {
+                    // Create new session and navigate
+                    const newSessionId = await useChatStore.getState().startNewSession();
+                    if (newSessionId) {
+                      navigate(`/chat/${newSessionId}`);
+                    }
                   }}
                   className={cn("w-full gap-2 btn-responsive", "justify-center")}
                   size="default"
@@ -370,8 +374,11 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => {
-                      const id = useChatStore.getState().startNewSession();
+                    onClick={async () => {
+                      const newSessionId = await useChatStore.getState().startNewSession();
+                      if (newSessionId) {
+                        navigate(`/chat/${newSessionId}`);
+                      }
                     }}
                     className={cn(
                       "text-sidebar-foreground rounded-full",
@@ -527,25 +534,34 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                       initial={{ opacity: 0, x: -10 }}
                       animate={{ opacity: 1, x: 0 }}
                       className={cn(
-                        "group flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 rounded-lg cursor-pointer transition-colors hover:bg-sidebar-accent/25"
+                        "group flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 rounded-lg cursor-pointer transition-all w-full",
+                        currentChatId === chat.id
+                          ? "bg-sidebar-accent/50 border border-primary/30 shadow-sm"
+                          : "hover:bg-sidebar-accent/25"
                       )}
-                      onClick={() => setCurrentChat(chat.id)}
+                      onClick={() => {
+                        setCurrentChat(chat.id);
+                        navigate(`/chat/${chat.id}`);
+                      }}
                     >
-                      <MessageSquare className="w-3.5 h-3.5 md:w-4 md:h-4 text-muted-foreground shrink-0" />
+                      <MessageSquare className={cn(
+                        "w-3.5 h-3.5 md:w-4 md:h-4 shrink-0",
+                        currentChatId === chat.id ? "text-primary" : "text-muted-foreground"
+                      )} />
                       {sidebarExpanded && (
                         <>
-                          <div className="flex-1 min-w-0">
+                          <div className="flex-1 min-w-0 overflow-hidden">
                             <p className={cn(
                               "text-[13px] md:text-sm truncate",
                               currentChatId === chat.id ? "font-semibold text-sidebar-foreground" : "font-medium text-sidebar-foreground"
                             )}>
                               {chat.title}
                             </p>
-                            <p className="text-[11px] md:text-xs text-muted-foreground">
+                            <p className="text-[11px] md:text-xs text-muted-foreground truncate">
                               {format(chat.updatedAt, "MMM d")}
                             </p>
                           </div>
-                          <div className="flex items-center gap-1">
+                          <div className="flex items-center gap-1 shrink-0">
                             {chat.isPinned && (
                               <TooltipProvider>
                                 <Tooltip>
@@ -569,7 +585,7 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                                         variant="ghost"
                                         size="icon-sm"
                                         onClick={(e) => e.stopPropagation()}
-                                        className={cn("text-muted-foreground", isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100")}
+                                        className={cn("text-muted-foreground shrink-0", isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100")}
                                       >
                                         <MoreVertical className="w-3.5 h-3.5" />
                                       </Button>
@@ -657,21 +673,26 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                         {pendingTasks.map((task) => (
                           <div
                             key={task.id}
-                            className="group flex items-center gap-2 md:gap-3 p-2 rounded-lg bg-sidebar-accent/50"
+                            className="group flex items-center gap-2 md:gap-3 p-2 rounded-lg bg-sidebar-accent/50 w-full"
                           >
                             <input
                               type="checkbox"
                               checked={task.completed}
                               onChange={() => toggleTask(task.id)}
-                              className="rounded border-border"
+                              className="rounded border-border shrink-0"
                             />
-                            <div className="flex-1 min-w-0">
+                            <div className="flex-1 min-w-0 overflow-hidden">
                               <p className="text-sm text-sidebar-foreground truncate">{task.title}</p>
-                              {(taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds || taskMeta[task.id]?.imageUrl) && (
+                              {/* ☁️ Show due date from task if available, otherwise show taskMeta */}
+                              {(task.dueDate || taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds || taskMeta[task.id]?.imageUrl) && (
                                 <p className="text-xs text-muted-foreground truncate">
-                                  {taskMeta[task.id]?.date ? `${format(taskMeta[task.id]!.date!, "dd/MM/yy")}` : ""}
-                                  {taskMeta[task.id]?.timeSeconds ? `${taskMeta[task.id]!.date ? " • " : ""}${taskMeta[task.id]!.timeSeconds}s` : ""}
-                                  {taskMeta[task.id]?.imageUrl ? `${(taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds) ? " • " : ""}image attached` : ""}
+                                  {task.dueDate 
+                                    ? format(task.dueDate, "MMM dd, yyyy 'at' h:mm a")
+                                    : taskMeta[task.id]?.date 
+                                      ? `${format(taskMeta[task.id]!.date!, "dd/MM/yy")}`
+                                      : ""}
+                                  {taskMeta[task.id]?.timeSeconds ? `${(task.dueDate || taskMeta[task.id]?.date) ? " • " : ""}${taskMeta[task.id]!.timeSeconds}s` : ""}
+                                  {taskMeta[task.id]?.imageUrl ? `${(task.dueDate || taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds) ? " • " : ""}image attached` : ""}
                                 </p>
                               )}
                             </div>
@@ -683,7 +704,7 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                                       <Button
                                         variant="ghost"
                                         size="icon-sm"
-                                        className={cn(isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100")}
+                                        className={cn(isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100", "shrink-0")}
                                         onClick={(e) => e.stopPropagation()}
                                       >
                                         <MoreVertical className="w-3.5 h-3.5" />
@@ -741,21 +762,26 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                         {completedTasks.map((task) => (
                           <div
                             key={task.id}
-                            className="group flex items-center gap-2 p-2 rounded-lg"
+                            className="group flex items-center gap-2 p-2 rounded-lg w-full"
                           >
                             <input
                               type="checkbox"
                               checked={task.completed}
                               onChange={() => toggleTask(task.id)}
-                              className="rounded border-border"
+                              className="rounded border-border shrink-0"
                             />
-                            <div className="flex-1 min-w-0">
+                            <div className="flex-1 min-w-0 overflow-hidden">
                               <p className="text-sm text-muted-foreground line-through truncate">{task.title}</p>
-                              {(taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds || taskMeta[task.id]?.imageUrl) && (
+                              {/* ☁️ Show due date from task if available, otherwise show taskMeta */}
+                              {(task.dueDate || taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds || taskMeta[task.id]?.imageUrl) && (
                                 <p className="text-xs text-muted-foreground truncate">
-                                  {taskMeta[task.id]?.date ? `${format(taskMeta[task.id]!.date!, "dd/MM/yy")}` : ""}
-                                  {taskMeta[task.id]?.timeSeconds ? `${taskMeta[task.id]!.date ? " • " : ""}${taskMeta[task.id]!.timeSeconds}s` : ""}
-                                  {taskMeta[task.id]?.imageUrl ? `${(taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds) ? " • " : ""}image attached` : ""}
+                                  {task.dueDate 
+                                    ? format(task.dueDate, "MMM dd, yyyy 'at' h:mm a")
+                                    : taskMeta[task.id]?.date 
+                                      ? `${format(taskMeta[task.id]!.date!, "dd/MM/yy")}`
+                                      : ""}
+                                  {taskMeta[task.id]?.timeSeconds ? `${(task.dueDate || taskMeta[task.id]?.date) ? " • " : ""}${taskMeta[task.id]!.timeSeconds}s` : ""}
+                                  {taskMeta[task.id]?.imageUrl ? `${(task.dueDate || taskMeta[task.id]?.date || taskMeta[task.id]?.timeSeconds) ? " • " : ""}image attached` : ""}
                                 </p>
                               )}
                             </div>
@@ -764,7 +790,7 @@ export const ChatSidebar = ({ onOpenSettings }: ChatSidebarProps) => {
                                 <Button
                                   variant="ghost"
                                   size="icon-sm"
-                                  className={cn(isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100")}
+                                  className={cn(isMobile ? "opacity-100" : "opacity-0 group-hover:opacity-100", "shrink-0")}
                                   onClick={(e) => e.stopPropagation()}
                                 >
                                   <MoreVertical className="w-3.5 h-3.5" />

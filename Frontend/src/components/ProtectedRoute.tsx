@@ -11,16 +11,30 @@ interface ProtectedRouteProps {
   children: React.ReactNode;
 }
 
+// Loading component for auth check
+const AuthLoader = () => (
+  <div className="flex items-center justify-center min-h-screen">
+    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+  </div>
+);
+
 export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, checkAuth } = useAuthStore();
+  const { isAuthenticated, authLoading, checkAuth } = useAuthStore();
   const location = useLocation();
 
   useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
+    if (authLoading) {
+      checkAuth();
+    }
+  }, [checkAuth, authLoading]);
 
+  // Show loader while checking authentication
+  if (authLoading) {
+    return <AuthLoader />;
+  }
+
+  // Redirect to auth page if not authenticated
   if (!isAuthenticated) {
-    // Redirect to auth page with return url
     return <Navigate to={`/auth?mode=login&from=${encodeURIComponent(location.pathname)}`} replace />;
   }
 
@@ -32,14 +46,21 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
  * Redirects to chat if user is already authenticated
  */
 export const PublicRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, checkAuth } = useAuthStore();
+  const { isAuthenticated, authLoading, checkAuth } = useAuthStore();
 
   useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
+    if (authLoading) {
+      checkAuth();
+    }
+  }, [checkAuth, authLoading]);
 
+  // Show loader while checking authentication
+  if (authLoading) {
+    return <AuthLoader />;
+  }
+
+  // Redirect to chat if already authenticated
   if (isAuthenticated) {
-    // Redirect to chat if already logged in
     return <Navigate to="/chat" replace />;
   }
 

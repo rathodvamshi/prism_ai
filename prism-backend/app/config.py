@@ -21,15 +21,24 @@ class Settings(BaseSettings):
     # --------------------------------------------------
     # Server Configuration
     # --------------------------------------------------
-    HOST: str = "localhost"
-    PORT: int = 8000
-    CORS_ORIGINS: str = "http://localhost:8080,http://localhost:3000"
+    HOST: str = "0.0.0.0"  # Required for Render deployment
+    PORT: int = int(os.getenv("PORT", "8000"))  # Render auto-assigns PORT
+    CORS_ORIGINS: str = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:8080,http://localhost:3000"
+    )  # Add production frontend URL in production
     
     # --------------------------------------------------
     # Security Configuration
     # --------------------------------------------------
     JWT_SECRET: str = "CHANGE_ME_IN_PRODUCTION"
     ENCRYPTION_KEY: str = "CHANGE_ME_32_CHARACTER_KEY_HERE"
+    # Session configuration (server-side sessions)
+    SESSION_COOKIE_NAME: str = "session_id"
+    SESSION_EXPIRE_DAYS: int = 30
+    AUTH_SINGLE_SESSION: bool = False  # If True, invalidate previous sessions on new login
+    SESSION_COOKIE_SECURE: bool = False  # Default False for local HTTP; override to True in production
+    SESSION_COOKIE_SAMESITE: str = "lax"  # "lax" for typical SPA, "strict" for extra security
     
     # --------------------------------------------------
     # AI/LLM Services
@@ -42,13 +51,31 @@ class Settings(BaseSettings):
     # --------------------------------------------------
     REDIS_URL: str = "redis://localhost:6379/0" # Redis (Short-term memory)
     PINECONE_API_KEY: str = ""                  # Pinecone (Long-term memory)
+    PINECONE_INDEX_NAME: str = "prism-memory"   # Pinecone index name
+    PINECONE_ENVIRONMENT: str = ""              # Pinecone environment (gcp-starter, us-east-1, etc.) - leave empty for serverless
+    PINECONE_INDEX_TYPE: str = "serverless"     # "serverless" (cloud-native) or "pod" (legacy)
     MONGO_URI: str = "mongodb://localhost:27017/prism"# MongoDB (users, tasks, analytics)
+    
+    # --------------------------------------------------
+    # Celery Configuration (Cloud-Native)
+    # --------------------------------------------------
+    # ☁️ CLOUD-NATIVE: Use rediss:// (with SSL) for production (Render, Upstash, AWS)
+    # Fallback to redis:// for local development
+    CELERY_BROKER_URL: str = ""  # If empty, uses REDIS_URL. Use rediss:// for cloud.
+    CELERY_RESULT_BACKEND: str = ""  # If empty, uses REDIS_URL. Use rediss:// for cloud.
 
     # --------------------------------------------------
     # Email Service (SendGrid)
     # --------------------------------------------------
     SENDGRID_API_KEY: str = ""                  # SendGrid API Key
     SENDER_EMAIL: str = "dev@example.com"       # Verified sender email
+    ENABLE_EMAIL_WORKER: bool = False           # Old Redis-based worker (disabled - using Celery now)
+
+    # --------------------------------------------------
+    # Email Limits & Retries
+    # --------------------------------------------------
+    MAX_DAILY_TASK_EMAILS: int = 10
+    EMAIL_RETRY_DELAYS: list[int] = [10, 60, 300]  # seconds: 10s, 1m, 5m
 
     # --------------------------------------------------
     # Neo4j Graph Database

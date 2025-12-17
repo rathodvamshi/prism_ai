@@ -8,7 +8,12 @@ import json
 
 from app.db.mongo_client import MongoClient
 from app.db.redis_client import RedisClient
+from app.utils.retry import retry_mongodb, retry_redis, retry_neo4j, retry_pinecone  # 🚀 Part 18
 from app.db.neo4j_client import AdvancedNeo4jClient, PineconeClient
+from app.services.pending_memory_service import (
+    save_draft_memory,
+    get_draft_memories,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,12 @@ class AdvancedMemoryManager:
         """
         Loads ALL relevant user memory from MongoDB, Redis, Pinecone, and Neo4j.
         Returns a comprehensive dict for context injection into the AI model.
+        
+        🚀 Part 12: MEMORY FALLBACK STRATEGY
+        - Neo4j fails → use Redis
+        - Redis fails → respond without session memory
+        - Pinecone fails → skip deep memory
+        - NEVER say "I don't know" due to infra errors!
         """
         if not self.validate_user_access(user_id):
             raise ValueError("Invalid user access")
@@ -67,22 +78,92 @@ class AdvancedMemoryManager:
             if not await self.validate_user_access(user_id):
                 raise ValueError("Invalid user access")
                 
-            # MongoDB: Profile + Structured Memory + Tasks
-            profile = await self.get_user_profile(user_id)
-            structured_memory = await self.get_structured_memory(user_id)
-            tasks = await self.get_user_tasks(user_id)
-            conversations = await self.get_recent_conversations(user_id)
+            # MongoDB: Profile + Structured Memory + Tasks (CRITICAL - with retry)
+            # 🚀 Part 18: Retry MongoDB operations (max 2 retries with exponential backoff)
+            profile = await retry_mongodb(
+                lambda: self.get_user_profile(user_id),
+                f"Get user profile for {user_id}"
+            ) or {}
             
-            # Redis: Temporary/Session Memory
-            temp_memory = await self.get_temp_memory(user_id)
-            session_state = await self.get_session_state(user_id)
+            structured_memory = await retry_mongodb(
+                lambda: self.get_structured_memory(user_id),
+                f"Get structured memory for {user_id}"
+            ) or []
             
-            # Pinecone: Vector Memories (Long-term)
-            vector_memories = await self.get_vector_memories(user_id)
+            tasks = await retry_mongodb(
+                lambda: self.get_user_tasks(user_id),
+                f"Get tasks for {user_id}"
+            ) or []
             
-            # Neo4j: Graph Relationships
-            graph_relationships = await self.get_graph_relationships(user_id)
-            user_interests = await self.get_user_interests_graph(user_id)
+            conversations = await retry_mongodb(
+                lambda: self.get_recent_conversations(user_id),
+                f"Get conversations for {user_id}"
+            ) or []
+            
+            # 🚀 Part 12: Redis with fallback
+            # 🚀 Part 18: Retry Redis operations (max 1 retry, fast fail)
+            temp_memory = {}
+            session_state = {}
+            try:
+                temp_memory = await retry_redis(
+                    lambda: self.get_temp_memory(user_id),
+                    f"Get temp memory for {user_id}"
+                ) or {}
+                
+                session_state = await retry_redis(
+                    lambda: self.get_session_state(user_id),
+                    f"Get session state for {user_id}"
+                ) or {}
+            except Exception as redis_error:
+                logger.warning(f"⚠️ Redis failed after retries, responding without session memory: {redis_error}")
+                # Fallback: Use empty state, continue without session memory
+                temp_memory = {}
+                session_state = {}
+            
+            # 🚀 Part 12: Pinecone with fallback
+            # 🚀 Part 18: Retry Pinecone operations (max 1 retry, optional service)
+            vector_memories = []
+            try:
+                vector_memories = await retry_pinecone(
+                    lambda: self.get_vector_memories(user_id),
+                    f"Get vector memories for {user_id}"
+                ) or []
+            except Exception as pinecone_error:
+                logger.warning(f"⚠️ Pinecone failed after retries, skipping deep memory: {pinecone_error}")
+                # Fallback: Use empty vector memories, continue without deep memory
+                vector_memories = []
+            
+            # 🚀 Part 12: Neo4j with fallback to Redis
+            # 🚀 Part 18: Retry Neo4j operations (max 2 retries)
+            graph_relationships = []
+            user_interests = []
+            try:
+                graph_relationships = await retry_neo4j(
+                    lambda: self.get_graph_relationships(user_id),
+                    f"Get graph relationships for {user_id}"
+                ) or []
+                
+                user_interests = await retry_neo4j(
+                    lambda: self.get_user_interests_graph(user_id),
+                    f"Get user interests for {user_id}"
+                ) or []
+            except Exception as neo4j_error:
+                logger.warning(f"⚠️ Neo4j failed after retries, trying Redis fallback: {neo4j_error}")
+                # Fallback 1: Try to get from Redis
+                try:
+                    cached_graph = await retry_redis(
+                        lambda: self.redis_client.get_user_data(user_id, "graph_cache"),
+                        f"Get cached graph for {user_id}"
+                    )
+                    if cached_graph:
+                        graph_relationships = cached_graph.get("relationships", [])
+                        user_interests = cached_graph.get("interests", [])
+                        logger.info("✅ Using Redis fallback for Neo4j data")
+                except Exception as redis_fallback_error:
+                    logger.warning(f"⚠️ Redis fallback also failed: {redis_fallback_error}")
+                    # Final fallback: Empty data, but continue
+                    graph_relationships = []
+                    user_interests = []
             
             return {
                 "profile": profile,
@@ -183,21 +264,50 @@ class AdvancedMemoryManager:
             return []
     
     async def add_structured_memory(self, user_id: str, memory: Dict[str, Any]) -> bool:
-        """Add structured memory to MongoDB with duplicate prevention"""
+        """
+        Add structured memory to MongoDB with duplicate prevention.
+        If MongoDB write fails, memory is stored as a pending draft instead of being lost.
+        """
         try:
             # Rule 2: Prevent duplicates - check if memory already exists
             existing_memories = await self.get_structured_memory(user_id)
             for existing in existing_memories:
-                if (existing.get('type') == memory.get('type') and 
-                    existing.get('value') == memory.get('value')):
-                    logger.info(f"Duplicate structured memory detected for user {user_id}, skipping")
+                if (
+                    existing.get("type") == memory.get("type")
+                    and existing.get("value") == memory.get("value")
+                ):
+                    logger.info(
+                        f"Duplicate structured memory detected for user {user_id}, skipping"
+                    )
                     return True
-            
-            memory['timestamp'] = datetime.now().isoformat()
-            memory['user_id'] = user_id
-            return await self.mongo_client.add_structured_memory(user_id, memory)
+
+            memory["timestamp"] = datetime.now().isoformat()
+            memory["user_id"] = user_id
+
+            ok = await self.mongo_client.add_structured_memory(user_id, memory)
+            if not ok:
+                # Mongo failed – keep it as pending so it's never lost
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type=memory.get("type", "STRUCTURED"),
+                    value=memory.get("value"),
+                    source="structured_memory",
+                    targets=[],
+                )
+            return ok
         except Exception as e:
             logger.error(f"Error adding structured memory: {str(e)}")
+            # Best‑effort fallback to pending memory
+            try:
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type=memory.get("type", "STRUCTURED"),
+                    value=memory.get("value"),
+                    source="structured_memory_error",
+                    targets=[],
+                )
+            except Exception as inner:
+                logger.error(f"Failed to save structured memory as draft: {inner}")
             return False
     
     async def get_user_tasks(self, user_id: str) -> List[Dict[str, Any]]:
@@ -267,43 +377,124 @@ class AdvancedMemoryManager:
             return []
     
     async def add_vector_memory(self, user_id: str, memory_text: str) -> bool:
-        """Add vector memory to Pinecone with duplicate prevention"""
+        """
+        Add vector memory to Pinecone with duplicate prevention.
+        If Pinecone is unavailable, memory is stored as a draft to sync later.
+        """
         try:
             # Rule 2: Prevent duplicates - check existing vectors
             existing_vectors = await self.get_vector_memories(user_id)
             for existing in existing_vectors:
-                if existing.get('text', '').strip().lower() == memory_text.strip().lower():
-                    logger.info(f"Duplicate vector memory detected for user {user_id}, skipping")
+                if existing.get("text", "").strip().lower() == memory_text.strip().lower():
+                    logger.info(
+                        f"Duplicate vector memory detected for user {user_id}, skipping"
+                    )
                     return True
-            
-            return await self.pinecone_client.add_memory(user_id, memory_text)
+
+            ok = await self.pinecone_client.add_memory(user_id, memory_text)
+            if not ok:
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type="VECTOR_MEMORY",
+                    value=memory_text,
+                    source="pinecone",
+                    targets=["pinecone"],
+                )
+            return ok
         except Exception as e:
             logger.error(f"Error adding vector memory: {str(e)}")
+            try:
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type="VECTOR_MEMORY",
+                    value=memory_text,
+                    source="pinecone_error",
+                    targets=["pinecone"],
+                )
+            except Exception as inner:
+                logger.error(f"Failed to save vector memory as draft: {inner}")
             return False
     
     # Neo4j Operations (Graph Relationships)
     async def get_graph_relationships(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get graph relationships from Neo4j"""
+        """Get graph relationships from Neo4j
+        🚀 Part 12: Cache to Redis for fallback
+        """
         try:
-            return await self.neo4j_client.get_user_relationships(user_id) or []
+            relationships = await self.neo4j_client.get_user_relationships(user_id) or []
+            
+            # 🚀 Part 12: Cache in Redis for fallback
+            try:
+                await self.redis_client.set_user_data(
+                    user_id,
+                    "graph_cache",
+                    {"relationships": relationships, "cached_at": datetime.now().isoformat()},
+                    ttl=1800  # 30 minutes
+                )
+            except Exception as cache_error:
+                logger.warning(f"Failed to cache graph data to Redis: {cache_error}")
+            
+            return relationships
         except Exception as e:
             logger.error(f"Error getting graph relationships: {str(e)}")
             return []
     
     async def get_user_interests_graph(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get user interests and connections from Neo4j"""
+        """Get user interests and connections from Neo4j
+        🚀 Part 12: Cache to Redis for fallback
+        """
         try:
-            return await self.neo4j_client.get_user_interests(user_id) or []
+            interests = await self.neo4j_client.get_user_interests(user_id) or []
+            
+            # 🚀 Part 12: Cache in Redis for fallback
+            try:
+                await self.redis_client.set_user_data(
+                    user_id,
+                    "interests_cache",
+                    {"interests": interests, "cached_at": datetime.now().isoformat()},
+                    ttl=1800  # 30 minutes
+                )
+            except Exception as cache_error:
+                logger.warning(f"Failed to cache interests to Redis: {cache_error}")
+            
+            return interests
         except Exception as e:
             logger.error(f"Error getting user interests graph: {str(e)}")
             return []
     
-    async def add_graph_relationship(self, user_id: str, relation_type: str, target_value: str) -> bool:
-        """Add graph relationship to Neo4j (Rule 2: Use MERGE not CREATE to prevent duplicates)"""
+    async def add_graph_relationship(
+        self, user_id: str, relation_type: str, target_value: str
+    ) -> bool:
+        """
+        Add graph relationship to Neo4j (Rule 2: MERGE).
+        If Neo4j is down or slow, the relationship is stored as draft memory and
+        will be synced later by the background job.
+        """
         try:
-            return await self.neo4j_client.merge_user_relationship(user_id, relation_type, target_value)
+            ok = await self.neo4j_client.merge_user_relationship(
+                user_id, relation_type, target_value
+            )
+            if not ok:
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type="GRAPH_RELATIONSHIP",
+                    value={"relation_type": relation_type, "target": target_value},
+                    source="neo4j",
+                    targets=["neo4j"],
+                )
+            return ok
         except Exception as e:
             logger.error(f"Error adding graph relationship: {str(e)}")
+            try:
+                await save_draft_memory(
+                    user_id=user_id,
+                    memory_type="GRAPH_RELATIONSHIP",
+                    value={"relation_type": relation_type, "target": target_value},
+                    source="neo4j_error",
+                    targets=["neo4j"],
+                )
+            except Exception as inner:
+                logger.error(f"Failed to save graph relationship as draft: {inner}")
             return False
     
     # Utility Methods

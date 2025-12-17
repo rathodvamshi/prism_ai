@@ -26,6 +26,8 @@ interface ChatState {
   createTask: (title: string, chatId?: string) => string;
   toggleTask: (id: string) => void;
   deleteTask: (id: string) => void;
+  loadTasksFromBackend: () => Promise<void>;
+  confirmTaskDraft: (messageId: string, description: string, dueDate?: string) => Promise<void>;
   
   createMiniAgent: (messageId: string, selectedText: string, userPrompt?: string) => Promise<string>;
   fetchMiniAgent: (agentId: string) => Promise<void>;
@@ -51,6 +53,7 @@ interface ChatState {
   // Backend synchronization
   loadChatsFromBackend: () => Promise<void>;
   syncChatWithBackend: (chatId: string) => Promise<void>;
+  loadSessionData: (sessionId: string) => Promise<void>;
 
   // Local highlight ranges (hex colors) per chat
   addRangeHighlight: (chatId: string, msgId: string, start: number, end: number, colorHex: string) => void;
@@ -168,15 +171,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const response = await chatAPI.getChatHistory(chatId);
       if (response.status === 200 && response.data?.messages) {
-        // Map messages - handle different formats
-        // Backend stores: { id, role, content, timestamp }
-        const messages = response.data.messages.map((msg: any) => ({
-          id: msg.id || msg.message_id || generateId(),
-          role: msg.role || "user", // Must be "user" or "assistant"
-          content: msg.content || msg.text || msg.message || msg.response || "",
-          timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
-          highlights: msg.highlights || [],
-        }));
+        // Map messages with proper highlight field mapping AND action payload
+        const messages = response.data.messages.map((msg: any) => {
+          // Map highlights with correct field names
+          const highlights = (msg.highlights || []).map((h: any) => ({
+            id: h.id || h.highlightId || h.highlight_id || generateId(),
+            text: h.text || h.highlightedText || '',
+            color: h.color || '#FFD93D',
+            // CRITICAL: Backend uses startIndex/endIndex, frontend uses startOffset/endOffset
+            startOffset: h.startOffset ?? h.startIndex ?? h.start_index ?? 0,
+            endOffset: h.endOffset ?? h.endIndex ?? h.end_index ?? 0,
+            note: h.note || '',
+            createdAt: h.createdAt ? new Date(h.createdAt) : new Date(),
+          }));
+          
+          // Extract action payload from metadata (restored from MongoDB)
+          const actionPayload = msg.metadata?.action_payload || msg.action;
+          
+          return {
+            id: msg.id || msg.message_id || generateId(),
+            role: msg.role || "user",
+            content: msg.content || msg.text || msg.message || msg.response || "",
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+            highlights,
+            action: actionPayload, // ✅ Restore confirmation state from database
+          };
+        });
 
         // Update ONLY the specific chat - prevent message mixing
         set((state) => ({
@@ -207,6 +227,137 @@ export const useChatStore = create<ChatState>((set, get) => ({
           currentChatId: state.currentChatId === chatId ? null : state.currentChatId
         }));
       }
+    }
+  },
+
+  // Batch load session data (messages, highlights, mini agents) in ONE API call
+  loadSessionData: async (sessionId: string) => {
+    // Prevent duplicate loads
+    const state = get();
+    if (state.isLoadingChats) {
+      return;
+    }
+    
+    set({ isLoadingChats: true });
+    
+    try {
+      const response = await chatAPI.loadSessionData(sessionId);
+      
+      if (response.status === 200 && response.data) {
+        const { session, messages, highlights, miniAgents } = response.data;
+        
+        // Build highlights map for O(1) lookup instead of O(n*m) filtering
+        const highlightsByMessageId = new Map<string, any[]>();
+        (highlights || []).forEach((h: any) => {
+          const messageId = h.messageId || h.message_id;
+          if (messageId) {
+            if (!highlightsByMessageId.has(messageId)) {
+              highlightsByMessageId.set(messageId, []);
+            }
+            highlightsByMessageId.get(messageId)!.push(h);
+          }
+        });
+        
+        // Map messages with highlights attached AND action payload
+        const mappedMessages = (messages || []).map((msg: any) => {
+          const messageHighlights = (highlightsByMessageId.get(msg.id) || []).map((h: any) => ({
+            id: h.highlightId || h.id || h.highlight_id || generateId(),
+            text: h.text || h.highlightedText || '',
+            color: h.color || '#FFD93D',
+            startOffset: h.startOffset ?? h.startIndex ?? h.start_index ?? 0,
+            endOffset: h.endOffset ?? h.endIndex ?? h.end_index ?? 0,
+            note: h.note || '',
+            createdAt: h.createdAt ? new Date(h.createdAt) : new Date(),
+          }));
+          
+          // Extract action payload from metadata (restored from MongoDB)
+          const actionPayload = msg.metadata?.action_payload || msg.action;
+          
+          return {
+            id: msg.id || msg.message_id || generateId(),
+            role: msg.role || "user",
+            content: msg.content || msg.text || "",
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+            highlights: messageHighlights,
+            action: actionPayload, // ✅ Restore confirmation state from database
+          };
+        });
+        
+        // Map mini agents with intelligent field mapping
+        const mappedMiniAgents = (miniAgents || []).map((agent: any) => {
+          const agentMessages = Array.isArray(agent.messages) 
+            ? agent.messages.map((m: any) => ({
+                id: m.id || m.message_id || generateId(),
+                role: m.role || 'user',
+                content: m.content || m.text || '',
+                timestamp: m.timestamp ? new Date(m.timestamp) : new Date(),
+              }))
+            : [];
+          
+          return {
+            id: agent.agentId || agent.id || agent.agent_id || generateId(),
+            messageId: agent.messageId || agent.message_id || '',
+            sessionId: agent.sessionId || agent.session_id || sessionId,
+            title: agent.title || "Mini Agent",
+            snippet: agent.snippet || agent.selectedText || agent.selected_text || "",
+            messages: agentMessages,
+            createdAt: agent.createdAt ? new Date(agent.createdAt) : new Date(),
+            hasConversation: agentMessages.length > 0,
+          };
+        });
+        
+        const totalHighlights = mappedMessages.reduce((sum, msg) => sum + (msg.highlights?.length || 0), 0);
+        
+        // Check if chat exists in state
+        const currentState = get();
+        const existingChat = currentState.chats.find(c => c.id === sessionId);
+        
+        if (existingChat) {
+          // Update existing chat - merge intelligently
+          set((state) => ({
+            chats: state.chats.map((chat) => {
+              if (chat.id === sessionId) {
+                return {
+                  ...chat,
+                  messages: mappedMessages,
+                  miniAgents: mappedMiniAgents,
+                  title: session?.title || chat.title,
+                  updatedAt: session?.updated_at ? new Date(session.updated_at) : chat.updatedAt,
+                  isPinned: session?.isPinned ?? chat.isPinned,
+                  isSaved: session?.isSaved ?? chat.isSaved,
+                };
+              }
+              return chat;
+            }),
+            miniAgents: mappedMiniAgents,
+            isLoadingChats: false,
+          }));
+        } else {
+          // Create new chat entry
+          const newChat: Chat = {
+            id: sessionId,
+            title: session?.title || "Chat Session",
+            messages: mappedMessages,
+            miniAgents: mappedMiniAgents,
+            createdAt: session?.created_at ? new Date(session.created_at) : new Date(),
+            updatedAt: session?.updated_at ? new Date(session.updated_at) : new Date(),
+            isPinned: session?.isPinned || false,
+            isSaved: session?.isSaved || false,
+          };
+          
+          set((state) => ({
+            chats: [newChat, ...state.chats],
+            miniAgents: mappedMiniAgents,
+            isLoadingChats: false,
+          }));
+          console.log(`✅ Added new chat to state`);
+        }
+      } else {
+        set({ isLoadingChats: false });
+        throw new Error(response.error || 'Failed to load session data');
+      }
+    } catch (error) {
+      throw error;
     }
   },
 
@@ -324,11 +475,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     
-    const tempId = generateId();
+  const tempId = generateId();
     const fullMessage: Message = {
       ...message,
       id: tempId,
-      timestamp: new Date(),
+    timestamp: new Date(),
     };
 
     // Optimistic update - ONLY update the target chat
@@ -362,6 +513,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         role: 'assistant',
         content: '', // Start empty, will be filled as chunks arrive
         timestamp: new Date(),
+        action: undefined,
       };
       
       // Add empty AI message to show loading state
@@ -376,53 +528,121 @@ export const useChatStore = create<ChatState>((set, get) => ({
             };
           }
           return chat;
-        })
+        }),
+        isSendingMessage: true,
+        isStreaming: false
       }));
+
+      // GPT-Style streaming: Append chunks using RAF for 60fps smoothness
+      let rafId: number | null = null;
+      let pendingChunk = '';
+      let isFirstChunk = true;
+      
+      const scheduleUpdate = () => {
+        if (rafId) return; // Already scheduled
+        
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          
+          if (pendingChunk) {
+            const chunk = pendingChunk;
+            pendingChunk = '';
+            
+            // CRITICAL: Append-only update (GPT-style)
+            set(state => ({
+              chats: state.chats.map(chat => {
+                if (chat.id === chatId) {
+                  const updatedMessages = chat.messages.map(m => 
+                    m.id === aiTempId 
+                      ? { ...m, content: m.content + chunk } // APPEND ONLY
+                      : m
+                  );
+                  return { ...chat, messages: updatedMessages };
+                }
+                return chat;
+              }),
+              isStreaming: true,
+              isSendingMessage: false
+            }));
+          }
+        });
+      };
 
       // Stream AI response using streaming endpoint
       await chatAPI.sendMessageStream(
         chatId,
         message.content,
-        // onChunk - update AI message content as chunks arrive
+        // onChunk - GPT-style append-only streaming
         (chunk: string) => {
-          set(state => ({
-            chats: state.chats.map(chat => {
-              if (chat.id === chatId) {
-                const updatedMessages = chat.messages.map(m => 
-                  m.id === aiTempId 
-                    ? { ...m, content: m.content + chunk }
-                    : m
-                );
-                return { ...chat, messages: updatedMessages };
-              }
-              return chat;
-            }),
-            isStreaming: true, // Set streaming to true on first chunk
-            isSendingMessage: false // Stop showing "thinking" when streaming starts
-          }));
+          // First chunk - immediately switch from thinking to streaming
+          if (isFirstChunk) {
+            isFirstChunk = false;
+            set(state => ({
+              ...state,
+              isStreaming: true,
+              isSendingMessage: false
+            }));
+          }
+          
+          // Accumulate chunk and schedule RAF update
+          pendingChunk += chunk;
+          scheduleUpdate();
         },
         // onComplete - finalize message with real ID from backend
         (messageId: string) => {
-          set(state => ({
-            chats: state.chats.map(chat => {
-              if (chat.id === chatId) {
-                const updatedMessages = chat.messages.map(m => 
-                  m.id === aiTempId 
-                    ? { ...m, id: messageId }
-                    : m
-                );
-                return { 
-                  ...chat, 
-                  messages: updatedMessages,
-                  messageCount: updatedMessages.length,
-                  updatedAt: new Date()
-                };
-              }
-              return chat;
-            }),
-            isSendingMessage: false,
-            isStreaming: false // Stop streaming indicator
-          }));
+          // Cancel any pending RAF
+          if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
+          
+          // Flush any remaining content immediately
+          if (pendingChunk) {
+            const finalChunk = pendingChunk;
+            pendingChunk = '';
+            
+            set(state => ({
+              chats: state.chats.map(chat => {
+                if (chat.id === chatId) {
+                  const updatedMessages = chat.messages.map(m => 
+                    m.id === aiTempId 
+                      ? { ...m, id: messageId, content: m.content + finalChunk }
+                      : m
+                  );
+                  return { 
+                    ...chat, 
+                    messages: updatedMessages,
+                    messageCount: updatedMessages.length,
+                    updatedAt: new Date()
+                  };
+                }
+                return chat;
+              }),
+              isSendingMessage: false,
+              isStreaming: false
+            }));
+          } else {
+            set(state => ({
+              chats: state.chats.map(chat => {
+                if (chat.id === chatId) {
+                  const updatedMessages = chat.messages.map(m => 
+                    m.id === aiTempId 
+                      ? { ...m, id: messageId }
+                      : m
+                  );
+                  return { 
+                    ...chat, 
+                    messages: updatedMessages,
+                    messageCount: updatedMessages.length,
+                    updatedAt: new Date()
+                  };
+                }
+                return chat;
+              }),
+              isSendingMessage: false,
+              isStreaming: false
+            }));
+          }
         },
         // onError - handle streaming errors
         (error: string) => {
@@ -440,6 +660,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
             isStreaming: false
           }));
           throw new Error(error);
+        },
+        // onAction - attach structured action data to the streaming AI message
+        (action: any) => {
+          set(state => ({
+            chats: state.chats.map(chat => {
+              if (chat.id === chatId) {
+                const updatedMessages = chat.messages.map(m =>
+                  m.id === aiTempId ? { ...m, action } : m
+                );
+                return { ...chat, messages: updatedMessages };
+              }
+              return chat;
+            })
+          }));
+        },
+        // onStatus - update streaming status for long-running tasks (e.g., deep research)
+        (status: string) => {
+          set(state => ({
+            chats: state.chats.map(chat => {
+              if (chat.id === chatId) {
+                const updatedMessages = chat.messages.map(m =>
+                  m.id === aiTempId ? { ...m, streamStatus: status } : m
+                );
+                return { ...chat, messages: updatedMessages };
+              }
+              return chat;
+            })
+          }));
         }
       );
 
@@ -585,6 +833,119 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteTask: (id) =>
     set((state) => ({ tasks: state.tasks.filter((task) => task.id !== id) })),
+
+  loadTasksFromBackend: async () => {
+    try {
+      const [pending, completed] = await Promise.all([
+        chatAPI.getTasks("pending"),
+        chatAPI.getTasks("completed"),
+      ]);
+
+      const mapTasks = (resp: any, completedFlag: boolean): Task[] => {
+        if (resp.status !== 200 || !Array.isArray(resp.data)) return [];
+        return resp.data.map((t: any) => {
+          // ☁️ Handle due_date - can be ISO string or datetime object
+          let dueDate: Date | undefined = undefined;
+          if (t.due_date) {
+            try {
+              if (typeof t.due_date === 'string') {
+                dueDate = new Date(t.due_date);
+              } else if (t.due_date instanceof Date) {
+                dueDate = t.due_date;
+              } else if (t.due_date.$date) {
+                // MongoDB extended JSON format
+                dueDate = new Date(t.due_date.$date);
+              }
+            } catch (e) {
+              console.warn("Failed to parse due_date:", t.due_date, e);
+            }
+          }
+          
+          return {
+            id: t.task_id,
+            title: t.description || "Untitled Task",
+            completed: completedFlag,
+            createdAt: dueDate || new Date(),
+            dueDate: dueDate,
+          };
+        });
+      };
+
+      const tasks = [...mapTasks(pending, false), ...mapTasks(completed, true)];
+      set({ tasks });
+      console.log(`✅ Loaded ${tasks.length} tasks from backend (${pending.data?.length || 0} pending, ${completed.data?.length || 0} completed)`);
+    } catch (e) {
+      console.error("❌ Failed to load tasks from backend", e);
+    }
+  },
+
+  confirmTaskDraft: async (messageId, description, dueDate) => {
+    try {
+      // ☁️ Ensure due_date is in correct format (ISO or YYYY-MM-DD HH:MM)
+      // If dueDate is missing, we can't create the task
+      if (!dueDate) {
+        throw new Error("Due date is required to create a reminder. Please provide a date and time.");
+      }
+      
+      // Format dueDate if it's a Date object or needs conversion
+      let formattedDueDate = dueDate;
+      if (dueDate instanceof Date) {
+        // Convert to ISO string format
+        formattedDueDate = dueDate.toISOString();
+      } else if (typeof dueDate === 'string') {
+        // If it's already a string, use it as-is (should be ISO or YYYY-MM-DD HH:MM)
+        formattedDueDate = dueDate;
+      }
+      
+      const resp = await chatAPI.confirmTask(description, formattedDueDate);
+      if (resp.status === 200 && resp.data) {
+        const t = resp.data;
+        const newTask: Task = {
+          id: t.task_id,
+          title: t.description,
+          completed: false,
+          createdAt: new Date(t.due_date || new Date().toISOString()),
+          dueDate: t.due_date ? new Date(t.due_date) : undefined,
+        };
+        
+        // Get confirmation message from backend
+        const confirmationMsg = t.confirmation_message || `Reminder created successfully for ${description}`;
+        
+        set((state) => ({
+          tasks: [newTask, ...state.tasks],
+          chats: state.chats.map((chat) => ({
+            ...chat,
+            messages: chat.messages.map((m) =>
+              m.id === messageId
+                ? { 
+                    ...m, 
+                    action: m.action ? { 
+                      ...m.action, 
+                      confirmed: true,
+                      confirmationMessage: confirmationMsg,
+                      confirmedAt: new Date().toISOString()
+                    } : m.action 
+                  }
+                : m
+            ),
+          })),
+        }));
+        
+        // ✅ Database is the single source of truth - no localStorage
+        // Refresh task list from backend
+        await get().loadTasksFromBackend();
+        
+        // Sync chat with backend to persist confirmation state in MongoDB
+        const state = get();
+        if (state.currentChatId) {
+          await get().syncChatWithBackend(state.currentChatId);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to confirm task draft", e);
+      throw e;
+    }
+  },
 
   createMiniAgent: async (messageId, selectedText, userPrompt?: string) => {
     try {
@@ -943,11 +1304,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (response.status === 201 && response.data?.highlight) {
         const newHighlight: Highlight = {
-          id: response.data.highlightId,
+          id: response.data.highlightId || response.data.highlight.id,
           text: response.data.highlight.text,
           color: response.data.highlight.color, // Use actual HEX color from response
-          startOffset: response.data.highlight.startIndex,
-          endOffset: response.data.highlight.endIndex,
+          // Backend returns startIndex/endIndex, frontend uses startOffset/endOffset
+          startOffset: response.data.highlight.startOffset ?? response.data.highlight.startIndex ?? 0,
+          endOffset: response.data.highlight.endOffset ?? response.data.highlight.endIndex ?? 0,
           note: response.data.highlight.note || undefined,
         };
 
@@ -1037,7 +1399,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Check if highlights already loaded for this session
       const existingChat = get().chats.find(c => c.id === sessionId);
       if (existingChat && existingChat.messages.some(m => m.highlights && m.highlights.length > 0)) {
-        console.log('⚡ Highlights already loaded for session, skipping fetch');
         return;
       }
 
@@ -1053,11 +1414,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             highlightsByMessage.set(h.messageId, []);
           }
           highlightsByMessage.get(h.messageId)!.push({
-            id: h.highlightId,
-            text: h.text,
-            color: h.color as "yellow" | "green" | "blue" | "pink",
-            startOffset: h.startIndex,
-            endOffset: h.endIndex,
+            id: h.highlightId || h.id,
+            text: h.text || '',
+            color: h.color || '#FFD93D',
+            // CRITICAL: Backend uses startIndex/endIndex, frontend uses startOffset/endOffset
+            startOffset: h.startOffset ?? h.startIndex ?? 0,
+            endOffset: h.endOffset ?? h.endIndex ?? 0,
             note: h.note || undefined,
           });
         });
@@ -1076,11 +1438,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : chat
           ),
         }));
-        
-        console.log(`✅ Loaded ${highlights.length} highlights for session ${sessionId}`);
       }
     } catch (error) {
-      console.error("❌ Failed to load highlights:", error);
+      console.error("Failed to load highlights:", error);
     }
   },
 

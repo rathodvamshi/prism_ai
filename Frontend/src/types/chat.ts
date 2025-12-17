@@ -6,6 +6,13 @@ export interface Message {
   highlights?: Highlight[];
   miniAgentId?: string;  // DEPRECATED: Use Mini Agent tied to message_id instead
   attachments?: Attachment[];
+  // Optional rich action payload (e.g., video/charts)
+  action?: {
+    type: "video" | "chart" | "link" | "custom";
+    data: any;
+  };
+  // Optional streaming status for long-running tools (e.g., deep_research)
+  streamStatus?: string | null;
 }
 
 export interface Highlight {
@@ -83,4 +90,5 @@ export interface Task {
   completed: boolean;
   createdAt: Date;
   chatId?: string;
+  dueDate?: Date;
 }

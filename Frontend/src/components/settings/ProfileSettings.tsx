@@ -130,7 +130,8 @@ export const ProfileSettings = () => {
     setIsDeleting(true);
     try {
       const token = localStorage.getItem('prism_auth_token');
-      const response = await fetch('http://127.0.0.1:8000/users/account', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+      const response = await fetch(`${apiUrl}/users/account`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,

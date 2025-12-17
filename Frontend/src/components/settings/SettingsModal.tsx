@@ -33,8 +33,10 @@ import {
   Save,
   Wand2,
   Keyboard,
+  Sparkles,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useCodeBeautifier } from "@/hooks/useCodeBeautifier";
 
 
 interface SettingsModalProps {
@@ -47,6 +49,14 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
   const { toast } = useToast();
   const { theme, setTheme } = useThemeStore();
   const { profile, updateProfile, setAvatarUrl: setProfileAvatar } = useProfileStore();
+  const {
+    settings: beautifierSettings,
+    updateSettings: updateBeautifierSettings,
+    stats: beautifierStats,
+    resetStats: resetBeautifierStats,
+    isEnabled: beautifierEnabled,
+    toggle: toggleBeautifier,
+  } = useCodeBeautifier();
   
   const [tab, setTab] = useState<string>(defaultTab);
   const tabsRef = useRef<HTMLDivElement>(null);
@@ -135,7 +145,7 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
           <div className="relative sm:static">
             <TabsList
               ref={tabsRef}
-              className="w-full flex overflow-x-auto no-scrollbar gap-2 p-1 -mx-1 snap-x snap-mandatory scroll-smooth sm:grid sm:grid-cols-5 sm:gap-1 sm:p-0 sm:mx-0"
+              className="w-full flex overflow-x-auto no-scrollbar gap-2 p-1 -mx-1 snap-x snap-mandatory scroll-smooth sm:grid sm:grid-cols-6 sm:gap-1 sm:p-0 sm:mx-0"
             >
             <TabsTrigger value="general" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
               <User className="w-3.5 h-3.5 mr-1" />
@@ -156,6 +166,10 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
             <TabsTrigger value="language" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
               <Globe className="w-3.5 h-3.5 mr-1" />
               Language
+            </TabsTrigger>
+            <TabsTrigger value="beautifier" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+              <Sparkles className="w-3.5 h-3.5 mr-1" />
+              Code
             </TabsTrigger>
             </TabsList>
             {/* Edge fades for mobile */}
@@ -398,6 +412,200 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
                 </SelectContent>
               </Select>
             </div>
+          </TabsContent>
+
+          <TabsContent value="beautifier" className="space-y-4 mt-4">
+            {/* Main Toggle */}
+            <div className="p-4 bg-secondary/50 rounded-xl border border-border">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-yellow-500" />
+                  <h4 className="font-medium text-sm">Code Auto-Beautification</h4>
+                </div>
+                <Switch
+                  checked={beautifierEnabled}
+                  onCheckedChange={toggleBeautifier}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Automatically format and beautify all code blocks in AI responses
+              </p>
+            </div>
+
+            {/* Settings when enabled */}
+            <AnimatePresence>
+              {beautifierEnabled && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="space-y-4"
+                >
+                  {/* Format Settings */}
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-sm">Indent Size</Label>
+                        <span className="text-xs text-muted-foreground">
+                          {beautifierSettings.indentSize} spaces
+                        </span>
+                      </div>
+                      <Select 
+                        value={beautifierSettings.indentSize.toString()} 
+                        onValueChange={(value) => updateBeautifierSettings({ indentSize: parseInt(value) })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="2">2 spaces</SelectItem>
+                          <SelectItem value="4">4 spaces</SelectItem>
+                          <SelectItem value="6">6 spaces</SelectItem>
+                          <SelectItem value="8">8 spaces</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-sm">Max Line Length</Label>
+                        <span className="text-xs text-muted-foreground">
+                          {beautifierSettings.maxLineLength} chars
+                        </span>
+                      </div>
+                      <Select 
+                        value={beautifierSettings.maxLineLength?.toString() || "80"} 
+                        onValueChange={(value) => updateBeautifierSettings({ maxLineLength: parseInt(value) })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="60">60 characters</SelectItem>
+                          <SelectItem value="80">80 characters</SelectItem>
+                          <SelectItem value="100">100 characters</SelectItem>
+                          <SelectItem value="120">120 characters</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm">Auto-detect Language</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically identify programming languages
+                        </p>
+                      </div>
+                      <Switch
+                        checked={beautifierSettings.autoDetectLanguage}
+                        onCheckedChange={(checked) => updateBeautifierSettings({ autoDetectLanguage: checked })}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm">Show Beautification Indicator</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Display ✨ icon when code is formatted
+                        </p>
+                      </div>
+                      <Switch
+                        checked={beautifierSettings.showBeautificationIndicator}
+                        onCheckedChange={(checked) => updateBeautifierSettings({ showBeautificationIndicator: checked })}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Statistics */}
+                  <div className="p-4 bg-secondary/30 rounded-lg border border-border">
+                    <div className="flex items-center gap-2 mb-3">
+                      <User className="w-4 h-4" />
+                      <h4 className="font-medium text-sm">Statistics</h4>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="space-y-1">
+                        <div className="text-muted-foreground text-xs">Total Blocks</div>
+                        <div className="font-medium">{beautifierStats.totalCodeBlocks}</div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-muted-foreground text-xs">Beautified</div>
+                        <div className="font-medium">{beautifierStats.beautifiedBlocks}</div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-muted-foreground text-xs">Success Rate</div>
+                        <div className="font-medium">{Math.round(beautifierStats.successRate || 0)}%</div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-muted-foreground text-xs">Languages</div>
+                        <div className="font-medium">{Object.keys(beautifierStats.languages || {}).length}</div>
+                      </div>
+                    </div>
+
+                    {Object.keys(beautifierStats.languages || {}).length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-border">
+                        <div className="text-xs text-muted-foreground mb-2">Language Usage:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {Object.entries(beautifierStats.languages || {}).slice(0, 5).map(([lang, count]) => (
+                            <div key={lang} className="text-xs px-2 py-1 bg-muted rounded">
+                              {lang} ({count})
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end mt-3">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={resetBeautifierStats}
+                        className="text-xs"
+                      >
+                        Reset Stats
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Demo */}
+                  <div className="p-4 bg-gradient-to-br from-yellow-500/5 to-emerald-500/5 rounded-lg border border-yellow-500/20">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Sparkles className="w-4 h-4 text-yellow-500" />
+                      <h4 className="font-medium text-sm">Live Preview</h4>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      <div>
+                        <div className="text-xs text-muted-foreground mb-1">BEFORE (Messy AI Output)</div>
+                        <pre className="text-xs bg-muted/50 p-2 rounded overflow-auto font-mono">
+{`function test(x,y){
+if(x>y)return x+y;
+else{let r=x*y;
+for(let i=0;i<10;i++){r+=i;}
+return r;}}`}
+                        </pre>
+                      </div>
+                      
+                      <div>
+                        <div className="text-xs text-muted-foreground mb-1">AFTER ✨ (Auto-Beautified)</div>
+                        <pre className="text-xs bg-green-500/10 border border-green-500/20 p-2 rounded overflow-auto font-mono">
+{`function test(x, y) {
+  if (x > y) return x + y;
+  else {
+    let r = x * y;
+    for (let i = 0; i < 10; i++) {
+      r += i;
+    }
+    return r;
+  }
+}`}
+                        </pre>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </TabsContent>
         </Tabs>
 

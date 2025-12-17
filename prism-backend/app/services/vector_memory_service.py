@@ -14,30 +14,33 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import json
 from fastembed import TextEmbedding
-from pinecone import Pinecone
+from pinecone import Pinecone, ServerlessSpec
 from app.config import settings
 from app.models.perfect_models import PineconeMetadata
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ☁️ Cloud-Native Pinecone Configuration
+# Supports both serverless (recommended) and pod-based indexes
+
 # Initialize Pinecone conditionally
 pc = None
 try:
     if settings.PINECONE_API_KEY:
         pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-        logger.info("Pinecone initialized successfully")
+        logger.info("✅ Pinecone initialized successfully")
     else:
-        logger.warning("Pinecone API key not provided, vector memory disabled")
+        logger.warning("⚠️ Pinecone API key not provided, vector memory disabled")
 except Exception as e:
-    logger.error(f"Failed to initialize Pinecone: {e}")
+    logger.error(f"❌ Failed to initialize Pinecone: {e}")
     pc = None
 
 # Initialize FastEmbed for embeddings (local, fast, free)
 embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-# Index configuration
-INDEX_NAME = "prism-memory"
+# Index configuration (cloud-native)
+INDEX_NAME = settings.PINECONE_INDEX_NAME or "prism-memory"
 VECTOR_DIMENSION = 384  # BAAI/bge-small-en-v1.5 dimension
 
 class VectorMemoryService:
@@ -51,10 +54,10 @@ class VectorMemoryService:
         self._initialize_index()
     
     def _initialize_index(self):
-        """Initialize or connect to Pinecone index"""
+        """☁️ Initialize or connect to Pinecone index (cloud-native)"""
         try:
             if pc is None:
-                logger.warning("Pinecone client not available, vector memory disabled")
+                logger.warning("⚠️ Pinecone client not available, vector memory disabled")
                 self.index = None
                 return
                 
@@ -62,24 +65,44 @@ class VectorMemoryService:
             existing_indexes = [index.name for index in pc.list_indexes()]
             
             if INDEX_NAME not in existing_indexes:
-                print(f"🚀 Creating Pinecone index: {INDEX_NAME}")
-                pc.create_index(
-                    name=INDEX_NAME,
-                    dimension=VECTOR_DIMENSION,
-                    metric="cosine",
-                    spec={
-                        "pod": {
-                            "environment": "gcp-starter",
-                            "pod_type": "starter"
+                logger.info(f"🚀 Creating Pinecone index: {INDEX_NAME}")
+                
+                # ☁️ Cloud-Native: Use serverless by default (better for cloud deployment)
+                index_type = getattr(settings, "PINECONE_INDEX_TYPE", "serverless").lower()
+                
+                if index_type == "serverless":
+                    # Serverless spec (recommended for cloud - AWS/GCP)
+                    environment = getattr(settings, "PINECONE_ENVIRONMENT", "us-east-1") or "us-east-1"
+                    logger.info(f"☁️ Creating serverless index in {environment}")
+                    pc.create_index(
+                        name=INDEX_NAME,
+                        dimension=VECTOR_DIMENSION,
+                        metric="cosine",
+                        spec=ServerlessSpec(cloud="aws", region=environment)
+                    )
+                else:
+                    # Pod-based spec (legacy, for starter plans)
+                    environment = getattr(settings, "PINECONE_ENVIRONMENT", "gcp-starter") or "gcp-starter"
+                    logger.info(f"📦 Creating pod-based index in {environment}")
+                    pc.create_index(
+                        name=INDEX_NAME,
+                        dimension=VECTOR_DIMENSION,
+                        metric="cosine",
+                        spec={
+                            "pod": {
+                                "environment": environment,
+                                "pod_type": "starter"
+                            }
                         }
-                    }
-                )
+                    )
             
             # Connect to index
             self.index = pc.Index(INDEX_NAME)
+            logger.info(f"✅ Connected to Pinecone index: {INDEX_NAME}")
             print(f"[SUCCESS] Connected to Pinecone index: {INDEX_NAME}")
             
         except Exception as e:
+            logger.error(f"❌ Pinecone initialization error: {e}")
             print(f"[ERROR] Pinecone initialization error: {e}")
             self.index = None
     
@@ -121,8 +144,11 @@ class VectorMemoryService:
             
             # Generate vector ID if not provided
             if not vector_id:
-                timestamp = int(datetime.utcnow().timestamp())
-                vector_id = f"mem_{timestamp}_{hash(text) % 10000}"
+                # Deterministic ID to prevent duplicates: userId + normalized text + type
+                norm_text = " ".join(text.lower().split())[:1024]
+                import hashlib
+                digest = hashlib.md5(f"{user_id}:{memory_type}:{norm_text}".encode()).hexdigest()
+                vector_id = f"mem_{digest}"
             
             # Prepare metadata
             metadata = PineconeMetadata(
@@ -148,6 +174,14 @@ class VectorMemoryService:
         except Exception as e:
             print(f"[ERROR] Error storing memory: {e}")
             return False
+
+    async def add_memory(self, user_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Backwards-compatible wrapper expected by some callers.
+        Uses `metadata.get('type')` if provided to select memory_type.
+        """
+        memory_type = (metadata or {}).get("type", "conversation")
+        return await self.store_memory(user_id=user_id, text=text, memory_type=memory_type)
     
     async def search_memories(
         self, 
@@ -190,19 +224,25 @@ class VectorMemoryService:
                 filter=filter_dict if filter_dict else None
             )
             
-            # Format results
+            # Format results with score filtering
+            # 🧠 MEMORY HARDENING PROTOCOL - Fix 3: Score Filtering (>0.75)
             memories = []
             for match in results.matches:
-                memory = {
-                    "id": match.id,
-                    "text": match.metadata.get("text", ""),
-                    "type": match.metadata.get("type", "unknown"),
-                    "score": match.score,
-                    "timestamp": match.metadata.get("timestamp", "")
-                }
-                memories.append(memory)
+                score = match.score if hasattr(match, "score") else 0.0
+                # QUALITY CONTROL: Only accept memories with > 75% match confidence
+                if score > 0.75:
+                    memory = {
+                        "id": match.id,
+                        "text": match.metadata.get("text", ""),
+                        "type": match.metadata.get("type", "unknown"),
+                        "score": score,
+                        "timestamp": match.metadata.get("timestamp", "")
+                    }
+                    memories.append(memory)
+                else:
+                    print(f"[Memory Hardening] Rejected memory with score {score:.3f} (below 0.75 threshold)")
             
-            print(f"[SUCCESS] Found {len(memories)} memories for query: {query}")
+            print(f"[SUCCESS] Found {len(memories)} high-quality memories (score > 0.75) for query: {query}")
             return memories
             
         except Exception as e:

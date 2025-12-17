@@ -103,6 +103,10 @@ class TaskModel(BaseModel):
     title: str
     description: Optional[str] = ""
     status: TaskStatus = TaskStatus.PENDING
+    email_status: str = "queued"  # queued, sent, failed, retrying
+    email_retry_count: int = 0
+    email_last_error: Optional[str] = None
+    email_sent_at: Optional[datetime] = None
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     completedAt: Optional[datetime] = None
     updatedAt: datetime = Field(default_factory=datetime.utcnow)

@@ -4,7 +4,7 @@
  */
 
 import { create } from 'zustand';
-import { authAPI, TokenManager } from '@/lib/api';
+import { authAPI } from '@/lib/api';
 
 interface User {
   id: string;
@@ -20,6 +20,7 @@ interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  authLoading: boolean;
   error: string | null;
   showAccountCreatedAnimation: boolean;
   
@@ -38,6 +39,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: false,
+  authLoading: true,
   error: null,
   showAccountCreatedAnimation: false,
 
@@ -57,6 +59,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           user: response.data.user, 
           isAuthenticated: true, 
           isLoading: false,
+          authLoading: false,
           error: null 
         });
         return { success: true };
@@ -114,6 +117,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           user: response.data.user, 
           isAuthenticated: true, 
           isLoading: false,
+          authLoading: false,
           error: null,
           showAccountCreatedAnimation: accountCreated
         });
@@ -153,18 +157,34 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ 
       user: null, 
       isAuthenticated: false, 
+      authLoading: false,
       error: null 
     });
   },
 
-  checkAuth: () => {
-    const isAuth = authAPI.isAuthenticated();
-    const user = authAPI.getCurrentUser();
-    
-    set({ 
-      isAuthenticated: isAuth, 
-      user: isAuth ? user : null 
-    });
+  checkAuth: async () => {
+    try {
+      const response = await authAPI.me();
+      if (response.status === 200 && response.data?.user) {
+        set({
+          user: response.data.user,
+          isAuthenticated: true,
+          authLoading: false,
+        });
+      } else {
+        set({
+          user: null,
+          isAuthenticated: false,
+          authLoading: false,
+        });
+      }
+    } catch {
+      set({
+        user: null,
+        isAuthenticated: false,
+        authLoading: false,
+      });
+    }
   },
 
   clearError: () => {

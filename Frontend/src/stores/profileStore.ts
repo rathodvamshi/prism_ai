@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { userAPI } from "@/lib/api";
 
 interface Profile {
   name: string;
@@ -65,18 +66,11 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   loadProfileFromBackend: async () => {
     set({ isLoading: true });
     try {
-      const token = localStorage.getItem('prism_auth_token');
-      if (!token) throw new Error('Not authenticated');
-      
-      const response = await fetch('http://127.0.0.1:8000/users/profile', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-      
-      if (!response.ok) throw new Error('Failed to load profile');
-      
-      const data = await response.json();
+      const result = await userAPI.getProfile();
+      if (result.status !== 200 || !result.data) {
+        throw new Error(result.error || "Failed to load profile");
+      }
+      const data = result.data;
       set({
         profile: data.profile,
         stats: data.stats,
@@ -91,21 +85,11 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   saveProfileToBackend: async (updates) => {
     set({ isSaving: true });
     try {
-      const token = localStorage.getItem('prism_auth_token');
-      if (!token) throw new Error('Not authenticated');
-      
-      const response = await fetch('http://127.0.0.1:8000/users/profile', {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updates),
-      });
-      
-      if (!response.ok) throw new Error('Failed to save profile');
-      
-      const data = await response.json();
+      const result = await userAPI.updateProfile(updates);
+      if (result.status !== 200 || !result.data) {
+        throw new Error(result.error || "Failed to save profile");
+      }
+      const data = result.data;
       set((state) => ({
         profile: { ...state.profile, ...data.profile },
         isSaving: false,

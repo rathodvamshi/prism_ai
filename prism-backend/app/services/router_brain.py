@@ -1,7 +1,7 @@
 from app.models.chat_models import ChatRequest
 from app.services.main_brain import generate_response
 from app.services.search_service import search_web
-from app.services.task_service import create_task
+from app.services.task_service import build_task_draft
 from app.services.email_service import send_email_notification
 
 # Optional capabilities (present in newer builds)
@@ -36,8 +36,12 @@ async def decide_intent(request: ChatRequest) -> str:
     if any(word in msg for word in ["remind", "schedule", "task", "todo", "appointment", "calendar", "set a reminder"]):
         return "task_management"
 
-    # Web search
-    if any(word in msg for word in ["weather", "news", "price", "current", "search", "who is", "what is", "latest", "google"]):
+    # Conversational memory: self-questions must hit memory, not web
+    if "my name" in msg or "who am i" in msg:
+        return "general_chat"
+
+    # Web search (factual / current topics)
+    if any(word in msg for word in ["weather", "news", "price of", "price", "current", "search", "who is", "what is", "latest", "trending", "google"]):
         return "web_search"
 
     # Email
@@ -83,7 +87,7 @@ async def process_chat(request: ChatRequest):
         elif intent == "deep_research":
             if deep_research is None:
                 # Fallback to simple web search if deep research service is absent
-                search_data = await search_web(request.message)
+                search_data = await search_web(request.message, mode="deep", max_results=5)
                 reply = await generate_response(
                     user_id=user_id,
                     message=request.message,
@@ -100,10 +104,28 @@ async def process_chat(request: ChatRequest):
                 )
 
         elif intent == "task_management":
-            reply = await create_task(user_id, request.message)
+            draft = await build_task_draft(request.message)
+            if draft.get("missing_time"):
+                reply = (
+                    f"I've noted you want to **{draft.get('description')}**.\n\n"
+                    "When should I remind you? (e.g., \"in 20 minutes\" or \"tomorrow at 5 PM\")"
+                )
+            else:
+                reply = (
+                    f"Got it. I'll remind you to **{draft.get('description')}** "
+                    f"at **{draft.get('due_date_human_readable')}**. Please confirm."
+                )
+                action_data = {
+                    "type": "task_draft",
+                    "payload": {
+                        "description": draft.get("description"),
+                        "due_date": draft.get("due_date_iso"),
+                        "due_date_human_readable": draft.get("due_date_human_readable"),
+                    },
+                }
 
         elif intent == "web_search":
-            search_data = await search_web(request.message)
+            search_data = await search_web(request.message, mode="quick")
             reply = await generate_response(
                 user_id=user_id,
                 message=request.message,

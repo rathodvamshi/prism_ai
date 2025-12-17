@@ -1,12 +1,20 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Response, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, validator
-from app.db.mongo_client import users_collection
+from app.db.mongo_client import users_collection, auth_sessions_collection
 from app.db.redis_client import redis_client
 from app.config import settings
-from app.utils.auth import AuthUtils, SecurityUtils, get_current_user, security
+from app.utils.auth import (
+    AuthUtils,
+    SecurityUtils,
+    get_current_user,
+    security,
+    create_session_for_user,
+    get_current_user_from_session,
+)
 from app.utils.security import input_validator, auth_security
 from app.services.global_user_service import add_user_to_global
+from app.services.email_queue_service import enqueue_otp
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 import random
@@ -165,8 +173,14 @@ async def check_email(email: EmailStr):
 
 
 @router.post("/login")
-async def simple_login(payload: LoginRequest):
-    """Simple login that works with new signup"""
+async def simple_login(payload: LoginRequest, response: Response, request: Request):
+    """
+    Simple login that works with new signup.
+
+    - Verifies password
+    - Creates a server-side session
+    - Sets HTTP-only session cookie for browser clients
+    """
     try:
         logger.info(f"🔐 Login attempt: {payload.email}")
         
@@ -175,47 +189,70 @@ async def simple_login(payload: LoginRequest):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         
-        # Check password (handle both old bcrypt and new simple hash)
-        safe_password = payload.password[:60]
-        import hashlib
-        password_hash = hashlib.sha256(safe_password.encode()).hexdigest()
-        
-        # Check if password matches (try both methods)
+        # Check password (supports bcrypt stored in either 'passwordHash' or 'password',
+        # and legacy simple SHA-256 stored in 'password')
         password_valid = False
+
+        stored_password = user.get("password")
+        stored_bcrypt = user.get("passwordHash")
         
-        # Try new simple hash
-        if user.get("password") == password_hash:
-            password_valid = True
-            logger.info("✅ Password valid (simple hash)")
-        
-        # Try old bcrypt hash as fallback
-        elif user.get("passwordHash"):
+        # Prefer bcrypt-style / modern hashes using dedicated field if present
+        if stored_bcrypt and not password_valid:
             try:
-                password_valid = AuthUtils.verify_password(payload.password, user["passwordHash"])
-                logger.info("✅ Password valid (bcrypt)")
-            except:
-                pass
+                if AuthUtils.verify_password(payload.password, stored_bcrypt):
+                    password_valid = True
+                    logger.info("✅ Password valid (passwordHash via AuthUtils.verify_password)")
+            except Exception as e:
+                logger.warning(f"Password verification failed for passwordHash: {e}")
+        
+        # If not yet valid, inspect 'password' field with the unified verifier
+        if not password_valid and stored_password:
+            try:
+                # AuthUtils.verify_password handles bcrypt and our 'sha256:salt:hash' fallback
+                if AuthUtils.verify_password(payload.password, stored_password):
+                    password_valid = True
+                    logger.info("✅ Password valid (password field via AuthUtils.verify_password)")
+            except Exception as e:
+                logger.warning(f"Password verification failed for password field: {e}")
         
         if not password_valid:
             raise HTTPException(status_code=401, detail="Invalid password")
         
-        # Create response
+        # Create login session (server-side) and set cookie
+        session_id = await create_session_for_user(
+            user,
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
+        )
+
+        # HTTP-only, secure cookie for browser auth
+        cookie_secure = getattr(settings, "SESSION_COOKIE_SECURE", True)
+        cookie_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax")
+        cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+
+        response.set_cookie(
+            key=cookie_name,
+            value=session_id,
+            httponly=True,
+            secure=cookie_secure,
+            samesite=cookie_samesite,  # type: ignore[arg-type]
+            domain="127.0.0.1",
+            path="/",
+            max_age=60 * 60 * 24 * getattr(settings, "SESSION_EXPIRE_DAYS", 30)
+        )
+
+        # Minimal user object for UI (no tokens needed)
         user_data = {
             "id": str(user["_id"]),
             "email": user["email"],
             "name": user.get("name", ""),
-            "verified": True
+            "verified": True,
         }
-        
-        access_token = AuthUtils.create_access_token(
-            data={"sub": str(user["_id"]), "email": user["email"], "user_id": str(user["_id"])}
-        )
-        
-        logger.info(f"✅ Login successful: {payload.email}")
+
+        logger.info(f"✅ Login successful (session) for: {payload.email}")
         return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": user_data
+            "user": user_data,
+            "session_active": True,
         }
         
     except HTTPException:
@@ -378,32 +415,37 @@ async def signup_with_otp(payload: SignupRequest):
         
         logger.info(f"💾 Temporary signup data stored in Redis for {payload.email}")
         
-        # Try to send OTP via SendGrid
+        # ☁️ Send OTP email immediately (direct send for reliability)
+        # OTP emails are critical and should be sent immediately, not queued
         try:
             email_result = await send_otp_email(payload.email, otp)
-            if email_result["success"]:
+            if email_result.get("success"):
+                logger.info(f"✅ OTP email sent successfully to {payload.email}")
                 print(f"✅ Email successfully sent to {payload.email}")
                 return {
-                    "message": f"OTP sent to {payload.email}. Please check your email and enter the 6-digit code to complete signup.",
+                    "message": f"OTP sent to {payload.email}. Please check your email and enter the 6-digit code.",
                     "email": payload.email,
                     "otp_required": True
                 }
             else:
-                print(f"❌ Email sending failed: {email_result['error']}")
-                print(f"📱 USE OTP FROM TERMINAL: {otp}")
+                # Email failed but OTP is still valid (shown in terminal)
+                logger.warning(f"⚠️ Email sending failed: {email_result.get('error')}, but OTP is available in terminal")
+                print(f"⚠️ Email sending failed, but OTP is shown above ☝️")
                 return {
                     "message": f"Registration initiated. Please use the OTP code displayed in the terminal/console: {otp}",
                     "email": payload.email,
-                    "otp_required": True
+                    "otp_required": True,
+                    "otp_code": otp  # Include OTP in response for development
                 }
         except Exception as email_error:
-            print(f"❌ Email sending failed with exception: {str(email_error)}")
+            logger.error(f"❌ OTP email sending failed: {email_error}")
+            print(f"❌ Email sending error: {email_error}")
             print(f"📱 USE OTP FROM TERMINAL: {otp}")
-            logger.error(f"Email sending error: {str(email_error)}")
             return {
                 "message": f"Registration initiated. Please use the OTP code displayed in the terminal/console: {otp}",
                 "email": payload.email,
-                "otp_required": True
+                "otp_required": True,
+                "otp_code": otp  # Include OTP in response for development
             }
         
     except HTTPException:
@@ -474,8 +516,12 @@ async def signup(payload: SignupRequest):
             upsert=True
         )
         
-        # Send OTP email
-        await send_otp_email(payload.email, otp)
+        # Enqueue OTP email (preferred). Fallback to direct send if enqueue fails.
+        try:
+            await enqueue_otp(payload.email, otp)
+        except Exception as email_error:
+            logger.error(f"OTP enqueue failed (legacy path), falling back to direct send: {email_error}")
+            await send_otp_email(payload.email, otp)
         
         # In development mode, auto-verify users if email sending is disabled
         if settings.ENVIRONMENT.lower() == "development" and not getattr(settings, "SENDGRID_API_KEY", ""):
@@ -522,7 +568,7 @@ async def signup(payload: SignupRequest):
         )
 
 async def send_otp_email(email: str, otp: str):
-    """Send OTP email via SendGrid with robust error handling"""
+    """☁️ Send OTP email via SendGrid with robust error handling and perfect delivery"""
     
     # Always print OTP to terminal first (most important for development)
     print(f"\n" + "="*60)
@@ -550,27 +596,47 @@ async def send_otp_email(email: str, otp: str):
             print("⚠️ Email sending skipped - No sender email configured")
             return {"success": False, "error": "Sender email not configured"}
         
-        # Try multiple sender email formats if the first one fails
-        sender_emails_to_try = [
-            from_addr,
-            "noreply@gmail.com",  # Generic fallback
-            f"prism-{otp}@gmail.com"  # Dynamic sender
-        ]
+        # ☁️ Use the professional email service for OTP
+        from app.services.email_service import send_otp_email_direct
         
-        for sender_email in sender_emails_to_try:
+        try:
+            # Use the dedicated OTP email function
+            email_sent = await send_otp_email_direct(
+                to_email=email,
+                otp_code=otp,
+                subject="PRISM AI Verification Code"
+            )
+            
+            if email_sent:
+                logger.info(f"✅ OTP email sent successfully to {email}")
+                print(f"✅ Email sent successfully to {email} via SendGrid")
+                return {"success": True, "message": f"Email sent successfully to {email}"}
+            else:
+                logger.warning(f"⚠️ OTP email service returned False for {email}")
+                return {"success": False, "error": "Email service returned False"}
+                
+        except Exception as service_error:
+            logger.error(f"❌ OTP email service error: {service_error}")
+            # Fallback to direct SendGrid send
             try:
-                # Create simple email content (avoid complex HTML that might be blocked)
                 msg = Mail(
-                    from_email=sender_email,
+                    from_email=from_addr,
                     to_emails=email,
                     subject=f"PRISM AI Verification Code: {otp}",
                     html_content=f"""
-                    <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px;">
-                        <h2>PRISM AI Verification</h2>
-                        <p>Your verification code is:</p>
-                        <h1 style="font-size: 36px; color: #0066cc; letter-spacing: 5px;">{otp}</h1>
-                        <p>This code expires in 10 minutes.</p>
-                        <p>If you didn't request this, please ignore this email.</p>
+                    <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
+                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+                            <h1 style="color: white; margin: 0;">PRISM AI</h1>
+                        </div>
+                        <div style="padding: 30px; background: #ffffff; border-radius: 0 0 8px 8px;">
+                            <h2 style="color: #333;">Verification Code</h2>
+                            <p style="color: #666;">Your verification code is:</p>
+                            <div style="background: #f3f4f6; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
+                                <h1 style="font-size: 36px; color: #0066cc; letter-spacing: 5px; margin: 0;">{otp}</h1>
+                            </div>
+                            <p style="color: #666; font-size: 14px;">This code expires in 10 minutes.</p>
+                            <p style="color: #999; font-size: 12px;">If you didn't request this, please ignore this email.</p>
+                        </div>
                     </div>
                     """,
                     plain_text_content=f"""
@@ -583,22 +649,20 @@ If you didn't request this, please ignore this email.
                     """
                 )
                 
-                # Send email with SendGrid
                 sg = SendGridAPIClient(api_key)
                 response = sg.send(msg)
                 
-                logger.info(f"✅ OTP email sent to {email} (Status: {response.status_code}) from {sender_email}")
-                print(f"✅ Email sent successfully to {email}")
-                return {"success": True, "message": f"Email sent successfully to {email}"}
-                
-            except Exception as send_error:
-                logger.warning(f"❌ Failed to send from {sender_email}: {send_error}")
-                continue  # Try next sender email
-        
-        # If all sender emails failed
-        logger.error(f"❌ All email sending attempts failed for {email}")
-        print(f"❌ All email sending attempts failed - but OTP is available above ☝️")
-        return {"success": False, "error": "All email sending attempts failed"}
+                if 200 <= response.status_code < 300:
+                    logger.info(f"✅ OTP email sent to {email} (Status: {response.status_code})")
+                    print(f"✅ Email sent successfully to {email} (fallback method)")
+                    return {"success": True, "message": f"Email sent successfully to {email}"}
+                else:
+                    logger.error(f"❌ SendGrid returned status {response.status_code}")
+                    return {"success": False, "error": f"SendGrid returned status {response.status_code}"}
+                    
+            except Exception as fallback_error:
+                logger.error(f"❌ Fallback email send failed: {fallback_error}")
+                return {"success": False, "error": f"All email sending methods failed: {str(fallback_error)}"}
         
     except Exception as e:
         logger.error(f"❌ Critical email error for {email}: {e}")
@@ -607,8 +671,8 @@ If you didn't request this, please ignore this email.
         return {"success": False, "error": f"Critical email error: {str(e)}"}
 
 @router.post("/verify-otp")
-async def verify_otp(payload: OTPVerify):
-    """Verify OTP and complete user registration"""
+async def verify_otp(payload: OTPVerify, response: Response, request: Request):
+    """Verify OTP, complete user registration, and establish a login session."""
     try:
         logger.info(f"🔍 OTP verification for: {payload.email}")
         
@@ -688,23 +752,39 @@ async def verify_otp(payload: OTPVerify):
             "id": user_id,
             "email": final_user_doc["email"],
             "name": final_user_doc.get("name", "User"),
-            "verified": True
+            "verified": True,
         }
-        
-        # Create JWT token
-        access_token = AuthUtils.create_access_token(
-            data={"sub": user_id, "email": final_user_doc["email"], "user_id": user_id}
+
+        # Immediately create a session so the user is logged in after verification
+        session_id = await create_session_for_user(
+            {**final_user_doc, "_id": insert_result.inserted_id},
+            user_agent=request.headers.get("user-agent"),
+            ip=request.client.host if request.client else None,
         )
-        
-        logger.info(f"🎉 Registration completed for {payload.email}")
+
+        cookie_secure = getattr(settings, "SESSION_COOKIE_SECURE", True)
+        cookie_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax")
+        cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+
+        response.set_cookie(
+            key=cookie_name,
+            value=session_id,
+            httponly=True,
+            secure=cookie_secure,
+            samesite=cookie_samesite,  # type: ignore[arg-type]
+            domain="127.0.0.1",
+            path="/",
+            max_age=60 * 60 * 24 * getattr(settings, "SESSION_EXPIRE_DAYS", 30)
+        )
+
+        logger.info(f"🎉 Registration completed (session created) for {payload.email}")
         print(f"\n🎉 ACCOUNT CREATED SUCCESSFULLY! 🎉\n📧 User: {payload.email}\n👤 Name: {user_data['name']}\n✨ Welcome to PRISM AI!\n")
-        
+
         return {
             "message": "🎉 Account created successfully! Welcome to PRISM AI!",
-            "access_token": access_token,
-            "token_type": "bearer",
             "user": user_data,
-            "account_created": True  # Flag for frontend animation
+            "session_active": True,
+            "account_created": True,  # Flag for frontend animation
         }
         
     except HTTPException:
@@ -785,46 +865,56 @@ async def send_reset_email(email: str, reset_otp: str):
         logger.error(f"Failed to send reset email: {e}")
 
 @router.get("/me")
-async def get_current_user_info(current_user: dict = Depends(get_current_user)):
-    """Get current authenticated user information"""
-    return {"user": AuthUtils.create_user_response(current_user)}
-
-@router.post("/refresh")
-async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Refresh access token"""
+async def get_current_user_info(current_user: User = Depends(get_current_user_from_session)):
+    """
+    Get current authenticated user information from the session cookie.
+    """
     try:
-        # Verify the current token
-        payload = AuthUtils.verify_token(credentials.credentials)
-        
-        # Get user
-        user_id = payload.get("sub")
-        user = await AuthUtils.get_user_by_id(user_id)
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found"
-            )
-        
-        # Create new access token
-        access_token = AuthUtils.create_access_token(
-            data={"sub": str(user["_id"]), "email": user["email"]}
-        )
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": AuthUtils.create_user_response(user)
-        }
-        
+        # Load full user document to build a rich, but safe, response
+        from bson import ObjectId
+
+        user_doc = await users_collection.find_one({"_id": ObjectId(current_user.user_id)})
+        if not user_doc:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {"user": AuthUtils.create_user_response(user_doc)}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Token refresh failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token refresh failed"
-        )
+        logger.error(f"Error in /auth/me: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load current user")
+
+@router.post("/logout")
+async def logout(response: Response, request: Request):
+    """
+    Logout endpoint:
+    - Marks the current session as inactive (if present)
+    - Clears the session cookie
+    """
+    cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+    session_id = request.cookies.get(cookie_name)
+
+    if session_id:
+        try:
+            await auth_sessions_collection.update_one(
+                {"sessionId": session_id},
+                {
+                    "$set": {
+                        "is_active": False,
+                        "invalidated_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to invalidate session on logout: {e}")
+
+    # Clear cookie in browser
+    response.delete_cookie(
+        key=cookie_name,
+        path="/",
+    )
+
+    return {"message": "Logged out successfully", "session_active": False}
 
     # Compose a clean HTML email template
     html = (
@@ -917,7 +1007,7 @@ async def verify_otp(payload: OTPVerify):
         
         # Check if OTP has expired
         otp_expires_at = user.get("otpExpiresAt")
-        if not otp_expires_at or datetime.utcnow().timestamp() > otp_expires_at:
+        if not otp_expires_at or datetime.now(timezone.utc).timestamp() > otp_expires_at:
             # Clear expired OTP data
             await users_collection.update_one(
                 {"email": payload.email},
@@ -940,8 +1030,8 @@ async def verify_otp(payload: OTPVerify):
                     "user_id": user_id,
                     "passwordHash": temp_password_hash,  # Move from temp to permanent
                     "verified": True,
-                    "verifiedAt": datetime.utcnow(),
-                    "createdAt": datetime.utcnow(),  # Actual account creation time
+                    "verifiedAt": datetime.now(timezone.utc),
+                    "createdAt": datetime.now(timezone.utc),  # Actual account creation time
                     "isFirstLoginCompleted": False,  # User needs onboarding
                     "profileComplete": False  # Profile not yet complete
                 },
