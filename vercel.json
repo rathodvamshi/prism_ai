@@ -1,21 +1,5 @@
 {
-  "functions": {
-    "Frontend/src/**": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "build": {
-    "env": {
-      "NODE_VERSION": "18"
-    }
-  },
-  "buildCommand": "cd Frontend && npm install && npm run build",
+  "buildCommand": "ls -la && ls -la Frontend && cd Frontend && npm install && npm run build",
   "outputDirectory": "Frontend/dist",
-  "installCommand": "cd Frontend && npm install",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/"
-    }
-  ]
+  "installCommand": "ls -la && ls -la Frontend && cd Frontend && npm install"
 }
