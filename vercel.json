@@ -1,26 +1,21 @@
 {
-  "version": 2,
-  "name": "prism-ai-studio",
-  "buildCommand": "npm --prefix Frontend install && npm --prefix Frontend run build",
+  "functions": {
+    "Frontend/src/**": {
+      "runtime": "nodejs18.x"
+    }
+  },
+  "build": {
+    "env": {
+      "NODE_VERSION": "18"
+    }
+  },
+  "buildCommand": "cd Frontend && npm install && npm run build",
   "outputDirectory": "Frontend/dist",
-  "installCommand": "npm --prefix Frontend install",
-  "framework": "vite",
+  "installCommand": "cd Frontend && npm install",
   "rewrites": [
     {
       "source": "/(.*)",
       "destination": "/"
     }
-  ],
-  "headers": [
-    {
-      "source": "/assets/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    }
-  ],
-  "ignoreCommand": "if [ \"$VERCEL_ENV\" = \"production\" ]; then exit 0; else exit 1; fi"
+  ]
 }

@@ -1,6 +1,0 @@
-# Ignore Python backend files only
-prism-backend/
-render*.yaml
-RENDER_MANUAL_SETUP.md
-COMMANDS.md
-.renderignore
