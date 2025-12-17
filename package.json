@@ -1,0 +1,14 @@
+{
+  "name": "prism-ai-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "cd Frontend && npm install && npm run build",
+    "start": "cd Frontend && npm run preview",
+    "dev": "cd Frontend && npm run dev"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

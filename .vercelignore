@@ -1,0 +1,12 @@
+# Ignore Python backend - deploy only Frontend
+prism-backend/
+*.py
+*.pyc
+__pycache__/
+.pytest_cache/
+requirements.txt
+Dockerfile
+docker-compose.yml
+
+# Keep Frontend files for deployment
+!Frontend/

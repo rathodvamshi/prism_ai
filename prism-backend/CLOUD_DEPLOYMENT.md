@@ -1,7 +1,14 @@
 # ☁️ Cloud-Native Deployment Guide
 
 ## Overview
-PRISM is configured for cloud deployment (Render, Vercel, AWS) with:
+PRISM is a full-stack application with separate deployment strategies:
+
+### Frontend (React/Vite) → Vercel
+- ✅ Static site generation with Vite
+- ✅ Optimized asset caching
+- ✅ Global CDN distribution
+
+### Backend (FastAPI/Python) → Render
 - ✅ SSL Redis connections (rediss://)
 - ✅ IST → UTC timezone conversion
 - ✅ Celery for reliable background tasks
@@ -38,15 +45,39 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=xxx
 ```
 
-## Deployment on Render
+## Frontend Deployment on Vercel
+
+### Monorepo Configuration
+The project uses a monorepo structure with Frontend and Backend in separate directories. Vercel is configured to deploy only the Frontend.
+
+**Required Files (Already Created):**
+- `vercel.json` - Root-level Vercel configuration
+- `package.json` - Root-level package with build scripts  
+- `.vercelignore` - Excludes Python backend files
+
+**Vercel Settings:**
+- **Root Directory**: `./` (project root)
+- **Build Command**: `cd Frontend && npm install && npm run build`
+- **Output Directory**: `Frontend/dist`
+- **Install Command**: `cd Frontend && npm install`
+
+### Environment Variables for Frontend
+```bash
+# API Base URL (point to your Render backend)
+VITE_API_BASE_URL=https://your-backend-api.onrender.com
+VITE_APP_NAME=PRISM AI Studio
+```
+
+## Backend Deployment on Render
 
 ### Step 1: Create Web Service (API)
 
 1. **New → Web Service**
-2. **Build Command**: `pip install -r requirements.txt`
-3. **Start Command**: `gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT`
-4. **Environment Variables**: Add all required vars (see above)
-5. **Health Check Path**: `/health`
+2. **Root Directory**: `prism-backend` (Backend only)
+3. **Build Command**: `pip install -r requirements.txt`
+4. **Start Command**: `gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT`
+5. **Environment Variables**: Add all required vars (see above)
+6. **Health Check Path**: `/health`
 
 ### Step 2: Create Background Worker (Celery)
 
