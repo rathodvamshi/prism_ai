@@ -1,0 +1,22 @@
+# Ignore Frontend files - deploy only Backend
+Frontend/
+node_modules/
+*.json
+*.html
+*.css
+*.js
+*.ts
+*.tsx
+*.jsx
+.gitignore
+.vercelignore
+vercel.json
+vite.config.ts
+tailwind.config.ts
+postcss.config.js
+eslint.config.js
+tsconfig*.json
+
+# Keep Backend files for deployment
+!prism-backend/
+!render.yaml

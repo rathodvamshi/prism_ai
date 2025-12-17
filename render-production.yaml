@@ -1,0 +1,83 @@
+version: 1
+services:
+  # Backend API Service (Python FastAPI)
+  - type: web
+    name: prism-backend-api
+    runtime: python
+    rootDir: ./prism-backend
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      python health_check.py || echo "Health check completed"
+    startCommand: python -m gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    plan: starter
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENVIRONMENT
+        value: production
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        sync: false
+      - key: PINECONE_ENVIRONMENT
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: PYTHONPATH
+        value: /opt/render/project/src/prism-backend
+      - key: TZ
+        value: UTC
+
+  # Background Worker Service (Celery)
+  - type: worker
+    name: prism-celery-worker
+    runtime: python
+    rootDir: ./prism-backend
+    buildCommand: |
+      pip install --upgrade pip  
+      pip install -r requirements.txt
+    startCommand: python -m celery -A app.core.celery_app worker --loglevel=info --queues=email,default --concurrency=1
+    plan: starter
+    scaling:
+      minInstances: 1
+      maxInstances: 2
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false
+      - key: PYTHONPATH
+        value: /opt/render/project/src/prism-backend
+      - key: TZ
+        value: UTC

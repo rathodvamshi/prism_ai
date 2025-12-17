@@ -72,12 +72,16 @@ VITE_APP_NAME=PRISM AI Studio
 
 ### Step 1: Create Web Service (API)
 
+**Option A: Manual Setup**
 1. **New → Web Service**
 2. **Root Directory**: `prism-backend` (Backend only)
 3. **Build Command**: `pip install -r requirements.txt`
 4. **Start Command**: `gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT`
 5. **Environment Variables**: Add all required vars (see above)
 6. **Health Check Path**: `/health`
+
+**Option B: Infrastructure as Code (Recommended)**
+Use the `render.yaml` file in the project root for automated service configuration.
 
 ### Step 2: Create Background Worker (Celery)
 
