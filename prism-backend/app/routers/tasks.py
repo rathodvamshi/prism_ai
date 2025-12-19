@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db.mongo_client import tasks_collection
-from app.routers.auth import get_current_user, User
+from app.utils.auth import get_current_user_from_session
+from app.models.user_models import User
 from app.services.scheduler_service import schedule_next_task
 from app.services.email_queue_service import schedule_task_reminder, remove_scheduled_email
 from app.services.cache_service import cache_service  # Part 10: Smart caching
@@ -51,7 +52,7 @@ class CancelTaskRequest(BaseModel):
 @router.post("/confirm", response_model=TaskResponse)
 async def confirm_task(
     payload: ConfirmTaskRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_session),
 ):
     """
     Finalizes a task after the user confirms it in the UI.
@@ -79,6 +80,13 @@ async def confirm_task(
     # Define timezones explicitly
     IST = pytz.timezone('Asia/Kolkata')
     UTC = pytz.utc
+    
+    # 🚀 GOLDEN RULE LOGGING: Track all time calculations
+    now_ist = datetime.now(IST)
+    logger.info(f"[TIME] 🎯 TASK CREATION DEBUG")
+    logger.info(f"[TIME] Raw user input: {payload.description}")
+    logger.info(f"[TIME] Received due_date: {payload.due_date}")
+    logger.info(f"[TIME] Current IST time: {now_ist.strftime('%Y-%m-%d %I:%M %p IST')}")
     
     # ☁️ Parse due_date string into datetime if provided
     # Frontend may send null/undefined, so we need to handle that gracefully
@@ -125,9 +133,20 @@ async def confirm_task(
     # If due_dt is naive (no timezone), assume it's IST
     if due_dt.tzinfo is None:
         due_local = IST.localize(due_dt)  # "2025-12-16 21:00:00" → "2025-12-16 21:00:00 IST"
+        logger.info(f"[TIME] Parsed as naive, localized to IST: {due_local.strftime('%Y-%m-%d %I:%M %p IST')}")
     else:
         # If it already has timezone, convert to IST first
         due_local = due_dt.astimezone(IST)
+        logger.info(f"[TIME] Had timezone, converted to IST: {due_local.strftime('%Y-%m-%d %I:%M %p IST')}")
+    
+    # 🎯 CRITICAL CHECK: Is this really "2 minutes from now"?
+    time_diff_minutes = (due_local - now_ist).total_seconds() / 60
+    logger.info(f"[TIME] ⚡ Time difference: {time_diff_minutes:.2f} minutes from now")
+    logger.info(f"[TIME] Expected for 'in 2 min': ~2.0 minutes")
+    
+    if abs(time_diff_minutes) > 24 * 60:  # More than 24 hours difference
+        logger.warning(f"[TIME] ⚠️  SUSPICIOUS: Time difference is {time_diff_minutes:.1f} minutes (~{time_diff_minutes/60/24:.1f} days)")
+        logger.warning(f"[TIME] ⚠️  This suggests LLM calculated wrong datetime!")
     
     # ☁️ STEP 2: Convert IST to UTC (Machine Time for Celery)
     # 9 PM IST → 3:30 PM UTC (example)
@@ -413,7 +432,7 @@ async def confirm_task(
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(
     status: Optional[Literal["pending", "completed"]] = Query(default=None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_session),
 ):
     """
     Returns tasks for the current user, optionally filtered by status.
@@ -499,7 +518,7 @@ async def list_tasks(
 @router.post("/update", response_model=TaskResponse)
 async def update_task(
     payload: UpdateTaskRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_session),
 ):
     """Update an existing task's time/description/recurrence after chat confirmation."""
     user_id = current_user.user_id
@@ -601,7 +620,7 @@ async def update_task(
 @router.post("/cancel", response_model=TaskResponse)
 async def cancel_task(
     payload: CancelTaskRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_session),
 ):
     """Cancel a task after chat confirmation."""
     user_id = current_user.user_id
@@ -660,7 +679,7 @@ async def cancel_task(
 @router.post("/test-email/{task_id}")
 async def test_task_email(
     task_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_session),
 ):
     """
     Test endpoint to manually trigger email notification for a specific task.

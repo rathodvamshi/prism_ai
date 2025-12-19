@@ -104,6 +104,69 @@ def _parse_next_weekday(text: str, now: datetime) -> Optional[datetime]:
     return None
 
 
+def calculate_datetime_from_time_info(time_info: Optional[Dict], fallback_message: str, now: datetime) -> Tuple[Optional[datetime], Optional[str]]:
+    """
+    🎯 NEW GOLDEN RULE: Backend calculates ALL datetime, never trust LLM datetime.
+    
+    Args:
+        time_info: LLM-extracted time information in format:
+                  {"type": "relative", "value": 2, "unit": "minutes"} OR
+                  {"type": "absolute", "expression": "tomorrow at 5 PM"}
+        fallback_message: Original user message for parsing fallback
+        now: Current IST datetime (source of truth)
+    
+    Returns:
+        Tuple of (calculated_datetime, human_readable_string) or (None, None) if ambiguous
+    """
+    if not time_info:
+        # Fallback: try to parse the original message directly
+        return normalize_due_date(None, fallback_message, now)
+    
+    time_type = time_info.get("type")
+    
+    if time_type == "relative":
+        # 🚀 RELATIVE TIME: Perfect backend calculation
+        value = time_info.get("value")
+        unit = time_info.get("unit", "").lower()
+        
+        if not value or not unit:
+            return None, None
+            
+        try:
+            value = int(value)
+        except (ValueError, TypeError):
+            return None, None
+            
+        # Calculate exact datetime using backend time
+        if unit in ["minute", "minutes", "min", "mins"]:
+            result_dt = now + timedelta(minutes=value)
+        elif unit in ["hour", "hours", "hr", "hrs"]:
+            result_dt = now + timedelta(hours=value)
+        elif unit in ["second", "seconds", "sec", "secs"]:
+            result_dt = now + timedelta(seconds=value)
+        elif unit in ["day", "days"]:
+            result_dt = now + timedelta(days=value)
+        else:
+            return None, None
+            
+        # Format human readable string
+        if value == 1:
+            unit_singular = unit.rstrip('s')  # Remove plural 's'
+            human = f"in {value} {unit_singular} (at {result_dt.strftime('%I:%M %p IST')})"
+        else:
+            human = f"in {value} {unit} (at {result_dt.strftime('%I:%M %p IST')})"
+            
+        return result_dt, human
+        
+    elif time_type == "absolute":
+        # 🚀 ABSOLUTE TIME: Let backend parse expression
+        expression = time_info.get("expression", "")
+        return normalize_due_date(expression, fallback_message, now)
+    
+    # Unknown type, fallback
+    return normalize_due_date(None, fallback_message, now)
+
+
 def normalize_due_date(raw: Optional[str], fallback_text: str, now: Optional[datetime] = None) -> Tuple[Optional[datetime], Optional[str]]:
     """
     Convert human time language to a concrete datetime in IST (Asia/Kolkata).
@@ -208,29 +271,42 @@ async def extract_task_details(message: str, previous_ai_message: Optional[str] 
         combined_prompt = message
 
     system_prompt = f"""
-    You are a task extractor for a personal assistant.
+    You are a task detail extractor. Extract ONLY the task description and time duration/pattern.
+
     Current Date & Time: {current_time_local}
     
-    CRITICAL RULES:
-    1. The user is in **IST (India Standard Time - Asia/Kolkata)**.
-    2. If user says "Tomorrow at 5 PM", calculate based on Current Date in IST.
-    3. Return 'due_date' as a clear string (e.g., "tomorrow at 2 PM IST").
-    4. Ambiguity Check: If the user says "at 2" or "at 8" without AM/PM, set "is_ambiguous": true.
-    5. Missing Time: If they say "tomorrow" without a time, set "missing_time": true.
-    6. Context: Use previous AI message to understand answers like "PM" or "Tomorrow".
-
+    🛑 CRITICAL: DO NOT calculate absolute datetime. Only extract intent and duration.
+    
+    EXTRACT ONLY:
+    1. Task description (what to remind)  
+    2. Time pattern/duration (how long from now)
+    
+    FOR RELATIVE TIME (in X minutes/hours):
+    - Extract: {{"type": "relative", "value": 2, "unit": "minutes"}}
+    - Backend will calculate exact datetime
+    
+    FOR ABSOLUTE TIME (tomorrow at 5 PM):  
+    - Extract: {{"type": "absolute", "expression": "tomorrow at 5 PM"}}
+    - Backend will parse and calculate
+    
+    AMBIGUITY RULES:
+    - "at 7" without AM/PM → set "is_ambiguous": true
+    - "tomorrow" without time → set "missing_time": true
+    
     Return JSON:
     {{
-        "task_description": "Buy milk",
-        "due_date": "tomorrow at 2 PM",
+        "task_description": "call someone", 
+        "time_info": {{"type": "relative", "value": 2, "unit": "minutes"}},
         "missing_time": false,
         "is_ambiguous": false,
         "clarification_question": null
     }}
-
-    Example of Ambiguity:
-    Input: "Remind me at 7"
-    Output: {{ "task_description": "Remind me", "due_date": "7:00", "is_ambiguous": true, "clarification_question": "Did you mean 7 AM or 7 PM?" }}
+    
+    Examples:
+    "in 2 min" → {{"type": "relative", "value": 2, "unit": "minutes"}}
+    "in 1 hour" → {{"type": "relative", "value": 1, "unit": "hours"}}  
+    "tomorrow 9 PM" → {{"type": "absolute", "expression": "tomorrow 9 PM"}}
+    "at 7" → {{"type": "absolute", "expression": "at 7", "is_ambiguous": true}}
     """
 
     response = await get_llm_response(prompt=combined_prompt, system_prompt=system_prompt)
@@ -242,16 +318,17 @@ async def extract_task_details(message: str, previous_ai_message: Optional[str] 
         end = response.rfind("}") + 1
         json_str = response[start:end]
         parsed = json.loads(json_str)
-        _agent_log("H1", "task_service.py:extract_task_details", "parsed_json", {"task_description": parsed.get("task_description"), "due_date_raw": parsed.get("due_date")})
+        _agent_log("H1", "task_service.py:extract_task_details", "parsed_json", {"task_description": parsed.get("task_description"), "time_info": parsed.get("time_info")})
     except Exception as e:
-        parsed = {"task_description": message, "due_date": None}
+        parsed = {"task_description": message, "time_info": None}
         _agent_log("H1", "task_service.py:extract_task_details", "parse_failed", {"error": str(e), "fallback": parsed})
 
     task_description = parsed.get("task_description") or parsed.get("description") or message
-    raw_due = parsed.get("due_date")
-
-    normalized_dt, human = normalize_due_date(raw_due, fallback_text=message)
-    _agent_log("H1", "task_service.py:extract_task_details", "normalized_result", {"normalized_iso": normalized_dt.isoformat() if normalized_dt else None, "human": human})
+    time_info = parsed.get("time_info")
+    
+    # 🎯 NEW: Backend calculates datetime based on extracted time_info
+    normalized_dt, human = calculate_datetime_from_time_info(time_info, message, now_ist)
+    _agent_log("H1", "task_service.py:extract_task_details", "calculated_datetime", {"normalized_iso": normalized_dt.isoformat() if normalized_dt else None, "human": human})
 
     is_ambiguous = bool(parsed.get("is_ambiguous"))
     missing_time_flag = bool(parsed.get("missing_time"))
@@ -267,9 +344,9 @@ async def extract_task_details(message: str, previous_ai_message: Optional[str] 
             clarification_question = "Just to be sure, did you mean AM (morning) or PM (evening)? 🤔"
 
     parsed["task_description"] = task_description
-    parsed["due_date_display"] = parsed.get("due_date") or raw_due
+    parsed["due_date_display"] = human or (time_info.get("expression") if time_info and time_info.get("type") == "absolute" else None)
     parsed["due_date_iso"] = normalized_dt.isoformat() if normalized_dt else None
-    parsed["due_date_human_readable"] = human or raw_due
+    parsed["due_date_human_readable"] = human or (time_info.get("expression") if time_info and time_info.get("type") == "absolute" else None)
     parsed["missing_time"] = missing_time_flag
     parsed["is_ambiguous"] = is_ambiguous
     parsed["clarification_question"] = clarification_question
