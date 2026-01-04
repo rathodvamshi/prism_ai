@@ -1,9 +1,9 @@
 """
-🎨 Response Formatter Utility
-=============================
+Response Formatter Utility
+==========================
 
-Enhances AI responses with emojis, icons, and visual formatting.
-Makes responses more engaging and user-friendly.
+Minimal, semantic-only emoji usage for clean, professional responses.
+Emojis are anchors, not decoration - used only with semantic labels.
 """
 
 import re
@@ -12,129 +12,59 @@ from typing import List, Dict, Any, Optional
 
 class ResponseFormatter:
     """
-    Formats AI responses with emojis, icons, and visual elements.
+    Formats AI responses with controlled, semantic emoji usage.
+    Only uses emojis for semantic labels: ✅ ⚠️ 🔑 📌 🚀 ❌
     """
     
-    # Emoji mapping for common contexts
-    EMOJI_MAP = {
-        # Greetings & Positive
-        "greeting": ["👋", "🌟", "✨", "😊"],
-        "positive": ["✅", "🎉", "🎊", "💪", "🌟", "✨", "👍"],
-        "success": ["🎉", "🚀", "✨", "🏆", "✅"],
-        
-        # Thinking & Ideas
-        "thinking": ["🤔", "💭", "🧠"],
-        "idea": ["💡", "✨", "🎯", "💡"],
-        "suggestion": ["💡", "✨", "📌"],
-        
-        # Tasks & Actions
-        "task": ["📝", "✅", "📌", "🎯"],
-        "reminder": ["⏰", "📅", "🔔"],
-        "completed": ["✅", "🎉", "✨"],
-        
-        # Information
-        "info": ["📚", "📖", "💡", "ℹ️"],
-        "tip": ["💡", "✨", "🎯"],
-        "note": ["📝", "📌", "ℹ️"],
-        
-        # Support & Emotions
-        "support": ["🫂", "❤️", "💙", "🤗", "💚"],
-        "encouragement": ["💪", "🌟", "✨", "🚀"],
-        "celebration": ["🎉", "🎊", "🎈", "✨"],
-        
-        # Technology
-        "tech": ["💻", "🚀", "⚡", "🔧"],
-        "code": ["💻", "⚡", "🔨"],
-        "ai": ["🤖", "🧠", "✨"],
-        
-        # Fun & Hobbies
-        "fun": ["🎮", "🎨", "🎵", "🎬", "🎭"],
-        "music": ["🎵", "🎶", "🎧"],
-        "art": ["🎨", "🖼️", "✨"],
-        "sports": ["⚽", "🏀", "🎾", "🏃"],
-        
-        # Food & Lifestyle
-        "food": ["🍕", "🍔", "🍰", "☕", "🍎"],
-        "travel": ["✈️", "🌍", "🗺️", "🏖️"],
-        "work": ["💼", "📊", "📈", "📋"],
-        "health": ["💪", "🏃", "🧘", "❤️"],
-        
-        # Communication
-        "question": ["❓", "🤔", "💭"],
-        "answer": ["💡", "✨", "📝"],
-        "thanks": ["🙏", "❤️", "✨"],
+    # Allowed emoji mapping for semantic labels only
+    ALLOWED_EMOJIS = {
+        "best_practice": "✅",
+        "warning": "⚠️",
+        "key_point": "🔑",
+        "note": "📌",
+        "performance": "🚀",
+        "mistake": "❌",
     }
     
-    # Context-based emoji selection
-    CONTEXT_KEYWORDS = {
-        "name": ["name", "called", "i'm", "i am"],
-        "location": ["live", "from", "location", "city", "country"],
-        "work": ["work", "job", "occupation", "developer", "engineer"],
-        "hobby": ["hobby", "hobbies", "like to", "enjoy", "love"],
-        "goal": ["goal", "want", "aspire", "plan", "dream"],
-        "task": ["task", "todo", "remind", "schedule"],
-        "help": ["help", "assist", "support", "guide"],
-        "thanks": ["thank", "thanks", "appreciate"],
-    }
+    # Forbidden emojis - these should never appear in responses
+    FORBIDDEN_EMOJIS = ["😂", "😭", "🔥", "💀", "🤣", "😜", "🤪", "😍", "🙃"]
     
     @staticmethod
-    def detect_context(message: str) -> List[str]:
-        """Detect context from message to select appropriate emojis"""
-        message_lower = message.lower()
-        contexts = []
-        
-        for context, keywords in ResponseFormatter.CONTEXT_KEYWORDS.items():
-            if any(keyword in message_lower for keyword in keywords):
-                contexts.append(context)
-        
-        return contexts if contexts else ["general"]
-    
-    @staticmethod
-    def get_emoji_for_context(context: str) -> str:
-        """Get appropriate emoji for a context"""
-        emoji_list = ResponseFormatter.EMOJI_MAP.get(context, ["✨"])
-        import random
-        return random.choice(emoji_list)
+    def remove_forbidden_emojis(text: str) -> str:
+        """Remove forbidden emojis from text"""
+        for emoji in ResponseFormatter.FORBIDDEN_EMOJIS:
+            text = text.replace(emoji, "")
+        return text
     
     @staticmethod
     def enhance_response(
         response: str,
         user_name: Optional[str] = None,
         context: Optional[List[str]] = None,
-        add_emojis: bool = True,
+        add_emojis: bool = False,  # Disabled by default - emojis should come from AI, not auto-added
         add_formatting: bool = True
     ) -> str:
         """
-        Enhance AI response with emojis and formatting.
+        Clean and format AI response.
+        Removes forbidden emojis and applies minimal formatting.
         
         Args:
             response: Original AI response
             user_name: User's name for personalization
-            context: List of context keywords
-            add_emojis: Whether to add emojis
+            context: Not used (kept for compatibility)
+            add_emojis: Not used - emojis should come from AI responses
             add_formatting: Whether to add markdown formatting
         
         Returns:
-            Enhanced response with emojis and formatting
+            Cleaned and formatted response
         """
         if not response:
             return response
         
         enhanced = response
         
-        # Add greeting emoji if response starts with greeting
-        if add_emojis:
-            if any(word in enhanced.lower()[:20] for word in ["hi", "hello", "hey", "greetings"]):
-                emoji = ResponseFormatter.get_emoji_for_context("greeting")
-                if not enhanced.startswith(emoji):
-                    enhanced = f"{emoji} {enhanced}"
-        
-        # Add context-appropriate emojis
-        if add_emojis and context:
-            for ctx in context:
-                emoji = ResponseFormatter.get_emoji_for_context(ctx)
-                # Add emoji at strategic points (beginning of sentences, after periods)
-                enhanced = ResponseFormatter._add_emojis_strategically(enhanced, emoji, ctx)
+        # Remove forbidden emojis
+        enhanced = ResponseFormatter.remove_forbidden_emojis(enhanced)
         
         # Personalize with user name
         if user_name and add_formatting:
@@ -142,26 +72,12 @@ class ResponseFormatter:
             enhanced = enhanced.replace("the user", user_name)
             enhanced = enhanced.replace("you", user_name)
         
-        # Add formatting for lists
+        # Add formatting for lists (keep this - it's useful)
         if add_formatting:
             enhanced = ResponseFormatter._format_lists(enhanced)
             enhanced = ResponseFormatter._format_emphasis(enhanced)
         
         return enhanced
-    
-    @staticmethod
-    def _add_emojis_strategically(text: str, emoji: str, context: str) -> str:
-        """Add emojis at strategic points in the text"""
-        # Don't over-emoji - check if already has emojis
-        if any(char in text for char in ["👋", "🌟", "✨", "✅", "🎉", "💡"]):
-            return text
-        
-        # Add emoji at the beginning if it's a positive/success message
-        if context in ["success", "positive", "greeting"]:
-            if not text.startswith(emoji):
-                text = f"{emoji} {text}"
-        
-        return text
     
     @staticmethod
     def _format_lists(text: str) -> str:
@@ -198,41 +114,25 @@ class ResponseFormatter:
         return text
     
     @staticmethod
-    def add_visual_break(text: str, emoji: str = "✨") -> str:
-        """Add visual break with emoji"""
-        return f"{emoji}\n\n{text}\n\n{emoji}"
-    
-    @staticmethod
     def format_task_response(task_description: str, due_date: Optional[str] = None) -> str:
-        """Format task-related response with appropriate emojis"""
-        response = f"📝 **Task Created:** {task_description}"
+        """Format task-related response with semantic emoji"""
+        response = f"✅ **Task Created:** {task_description}"
         if due_date:
-            response += f"\n⏰ **Due:** {due_date}"
-        response += "\n✅ I'll remind you when it's time!"
+            response += f"\n📌 **Due:** {due_date}"
+        response += "\nI'll remind you when it's time!"
         return response
     
     @staticmethod
     def format_memory_response(memory_type: str, content: str) -> str:
-        """Format memory-related response"""
-        emoji_map = {
-            "name": "👤",
-            "location": "📍",
-            "interest": "🎯",
-            "hobby": "🎨",
-            "preference": "❤️",
-            "goal": "🎯",
-            "skill": "💪",
-        }
-        
-        emoji = emoji_map.get(memory_type, "💡")
-        return f"{emoji} **Got it!** I've saved that you {content.lower()}. I'll remember this for future conversations! ✨"
+        """Format memory-related response with minimal emoji"""
+        return f"✅ **Got it!** I've saved that you {content.lower()}. I'll remember this for future conversations."
     
     @staticmethod
     def format_error_response(error_message: str, friendly: bool = True) -> str:
-        """Format error messages in a friendly way"""
+        """Format error messages with semantic emoji"""
         if friendly:
-            return f"😅 Oops! {error_message}\n\nLet me try a different approach... 💡"
-        return f"❌ Error: {error_message}"
+            return f"⚠️ **Oops!** {error_message}\n\nLet me try a different approach..."
+        return f"❌ **Error:** {error_message}"
 
 
 # Global instance

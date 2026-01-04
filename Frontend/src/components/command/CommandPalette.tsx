@@ -206,3 +206,5 @@ export const CommandPalette = ({ onOpenSettings }: CommandPaletteProps) => {
     </AnimatePresence>
   );
 };
+
+export default CommandPalette;

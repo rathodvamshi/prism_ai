@@ -19,14 +19,10 @@ const AuthLoader = () => (
 );
 
 export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, authLoading, checkAuth } = useAuthStore();
+  const { isAuthenticated, authLoading } = useAuthStore();
   const location = useLocation();
 
-  useEffect(() => {
-    if (authLoading) {
-      checkAuth();
-    }
-  }, [checkAuth, authLoading]);
+  // Auth check handled by App.tsx
 
   // Show loader while checking authentication
   if (authLoading) {
@@ -46,13 +42,9 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
  * Redirects to chat if user is already authenticated
  */
 export const PublicRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
-  const { isAuthenticated, authLoading, checkAuth } = useAuthStore();
+  const { isAuthenticated, authLoading } = useAuthStore();
 
-  useEffect(() => {
-    if (authLoading) {
-      checkAuth();
-    }
-  }, [checkAuth, authLoading]);
+  // Auth check handled by App.tsx
 
   // Show loader while checking authentication
   if (authLoading) {

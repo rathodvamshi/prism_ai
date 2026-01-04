@@ -365,15 +365,22 @@ async def get_session(session_id: str) -> Optional[dict]:
 
 
 async def get_current_user_from_session(
+    request: Request,
     session_cookie_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> User:
     """
-    FastAPI dependency to get the authenticated user from an HTTP-only session cookie.
-
-    - Reads opaque session_id from cookie
-    - Validates session in auth_sessions_collection
-    - Loads user from users_collection
+    FastAPI dependency to get the authenticated user.
+    Leverages AuthMiddleware for performance (O(1) lookup).
     """
+    # ⚡ Performance: Check Request State (Middleware)
+    if hasattr(request.state, "user") and request.state.user:
+        u = request.state.user
+        return User(
+            user_id=u["user_id"],
+            email=u["email"],
+            name=u.get("name")
+        )
+
     if not session_cookie_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

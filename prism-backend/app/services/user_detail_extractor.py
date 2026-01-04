@@ -189,6 +189,13 @@ Extract the following information ONLY if EXPLICITLY mentioned:
    - Achievements
    - Current mood or state
 
+10. EXPLICIT RELATIONSHIPS (for Knowledge Graph)
+   - LIKES / DISLIKES (e.g., "I hate broccoli")
+   - KNOWS (e.g., "I know Python")
+   - HAS (e.g., "I have a dog")
+   - WANTS (e.g., "I want to learn Go")
+   - LIVES_IN (e.g., "I live in Tokyo")
+
 === OUTPUT FORMAT ===
 
 Return ONLY valid JSON with this exact structure:
@@ -242,7 +249,10 @@ Return ONLY valid JSON with this exact structure:
       "recent_events": ["string"],
       "challenges": ["string"],
       "achievements": ["string"]
-    }
+    },
+    "explicit_relationships": [
+      {"type": "LIKES|DISLIKES|KNOWS|HAS|WANTS|LIVES_IN", "target": "string"}
+    ]
   },
   "confidence": 0.0-1.0,
   "extraction_notes": "Brief notes about what was extracted"
@@ -615,6 +625,18 @@ Remember: Your extraction enables personalized AI experiences. Be thorough and a
                 if rels.get("pets"):
                     for pet in rels["pets"]:
                         await graph_memory.add_interest_relationship(user_id, pet, "pet")
+            
+            # Explicit Relationships (New Holographic Feature)
+            if "explicit_relationships" in data:
+                for rel in data["explicit_relationships"]:
+                    try:
+                        rel_type = rel.get("type", "INTERESTED_IN")
+                        target = rel.get("target")
+                        if target:
+                            # Use the new dynamic relationship adder
+                            await graph_memory.add_dynamic_relationship(user_id, target, rel_type)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to save explicit relationship {rel}: {e}")
             
             logger.info(f"✅ Neo4j: Extracted details saved for user {user_id}")
             return True

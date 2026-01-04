@@ -24,12 +24,18 @@ highlights_collection = db.message_highlights
 from app.services.advanced_memory_manager import memory_manager
 from app.services import router_service
 from app.services.cache_service import cache_service
-from app.utils.llm_client import get_llm_response as groq_llm_response, get_llm_response_stream
+from app.utils.llm_client import get_llm_response as groq_llm_response, get_llm_response_stream, generate_chat_title
 from app.services.main_brain import generate_response as main_brain_generate_response
 from pydantic import BaseModel, EmailStr
 from app.routers.auth import User
 from app.utils.auth import get_current_user_from_session
 from app.utils.timeout_utils import tracked_timeout, TimeoutConfig
+from app.utils.preprocess import preprocess as safe_preprocess
+from app.cognitive.router_engine import route_message
+from app.cognitive.context_stack import push_context, peek_context, pop_context
+from app.db.mongo_client import tasks_collection
+from bson import ObjectId
+from app.services.email_queue_service import remove_scheduled_email, schedule_task_reminder
 logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
@@ -38,12 +44,13 @@ async def get_llm_response(prompt: str) -> str:
     """Simple LLM response function for memory-enhanced chat"""
     system_prompt = "You are a helpful AI assistant with access to user memory and context. Provide personalized, accurate responses based on the user's profile and history."
     return await groq_llm_response(prompt, system_prompt)
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 import uuid
 import json
 import logging
 from bson import ObjectId
+import asyncio
 
 # Create a router specifically for chat
 router = APIRouter(
@@ -118,35 +125,34 @@ async def create_new_chat(
         raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
 
 @router.get("/chats")
-async def get_user_chats(current_user: User = Depends(get_current_user_from_session)):
+async def get_user_chats(
+    limit: int = 20, 
+    skip: int = 0,
+    current_user: User = Depends(get_current_user_from_session)
+):
     """
-    Retrieves all chat sessions for the authenticated user.
+    Retrieves all chat sessions for the authenticated user (Paginated).
     🟢 MongoDB is the single source of truth - returns all metadata from database.
     """
     try:
         user_id = ObjectId(current_user.user_id)
-        print(f"📥 Fetching chats for user: {user_id}")
+        # print(f"📥 Fetching chats for user: {user_id} (skip={skip}, limit={limit})")
         
-        # Simplified query - MongoDB will match either field name
-        # Query: (user_id OR userId matches) AND (isDeleted is not True)
+        # Query: Filter by userId AND not deleted
         query = {
-            "$or": [{"user_id": user_id}, {"userId": user_id}]
+            "$or": [{"user_id": user_id}, {"userId": user_id}],
+            "isDeleted": {"$ne": True}
         }
-        # Only filter deleted if isDeleted is explicitly True
-        # This allows sessions without isDeleted field to pass through
-        chats_cursor = sessions_collection.find(query).sort("updated_at", -1)
+        
+        # Use native MongoDB pagination for speed
+        cursor = sessions_collection.find(query).sort("updated_at", -1).skip(skip).limit(limit)
     
         chats = []
-        seen_ids = set()  # Prevent duplicates
+        seen_ids = set()
         
-        async for chat in chats_cursor:
-            # Skip deleted sessions
-            if chat.get("isDeleted") is True:
-                continue
-                
+        async for chat in cursor:
             chat_id = chat.get("chat_id") or chat.get("sessionId", "")
             
-            # Skip duplicates - MongoDB is source of truth
             if not chat_id or chat_id in seen_ids:
                 continue
             
@@ -158,32 +164,27 @@ async def get_user_chats(current_user: User = Depends(get_current_user_from_sess
             
             if isinstance(created_at, datetime):
                 created_at = created_at.isoformat()
-            elif created_at:
-                created_at = str(created_at)
-            else:
+            elif not created_at:
                 created_at = datetime.utcnow().isoformat()
-                
+
             if isinstance(updated_at, datetime):
                 updated_at = updated_at.isoformat()
-            elif updated_at:
-                updated_at = str(updated_at)
-            else:
+            elif not updated_at:
                 updated_at = created_at
             
-            # Get message count from MongoDB (don't load full messages for list view)
-            message_count = len(chat.get("messages", []))
-            
             chats.append({
-                "chat_id": chat_id,
-                "title": chat.get("title", "New Chat"),  # Preserve renamed titles
+                "chat_id": str(chat_id),
+                "id": str(chat_id), # Add 'id' for compatibility
+                "title": chat.get("title", "New Chat"),
                 "isPinned": chat.get("isPinned", False),
                 "isSaved": chat.get("isSaved", False),
-                "created_at": created_at,
-                "updated_at": updated_at,
-                "message_count": message_count,  # Add message count to know if chat has messages
+                "created_at": str(created_at),
+                "updated_at": str(updated_at),
+                "createdAt": str(created_at), # Add camelCase for compatibility
+                "updatedAt": str(updated_at),
+                "message_count": len(chat.get("messages", [])),
             })
         
-        print(f"✅ Found {len(chats)} chats for user {user_id}")
         return {"chats": chats}
     except Exception as e:
         print(f"❌ Error fetching chats: {e}")
@@ -218,6 +219,151 @@ async def get_chat_history(
         "title": session.get("title", "New Chat"),
         "message_count": len(messages)
     }
+
+@router.get("/{chat_id}/data")
+async def get_session_data(
+    chat_id: str,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """
+    ⚡ AGGREGATED SESSION DATALOADER
+    Fetches Messages, Highlights, and Mini Agents in ONE parallel call.
+    Drastically reduces frontend load time and network requests.
+    """
+    try:
+        user_id = ObjectId(current_user.user_id)
+        
+        # Define collections
+        # highlights_collection is already imported
+        mini_agent_threads_coll = db.mini_agent_threads
+        mini_agent_messages_coll = db.mini_agent_messages
+
+        # Define tasks for parallel execution
+        async def fetch_session():
+            return await sessions_collection.find_one({
+                "$and": [
+                    {"$or": [{"chat_id": chat_id}, {"sessionId": chat_id}]},
+                    {"$or": [{"user_id": user_id}, {"userId": user_id}]}
+                ]
+            })
+
+        async def fetch_highlights():
+            return await highlights_collection.find({
+                "sessionId": chat_id,
+            }, {"_id": 0}).to_list(length=None)
+
+        async def fetch_mini_agent_threads():
+            return await mini_agent_threads_coll.find({
+                "sessionId": chat_id
+            }, {"_id": 0}).to_list(length=None)
+
+        # 🚀 Execute session, highlights, and threads fetch in parallel
+        session, highlights, threads = await asyncio.gather(
+            fetch_session(),
+            fetch_highlights(),
+            fetch_mini_agent_threads()
+        )
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        # 🚀 Fetch Mini Agent Messages (Batch Optimisation)
+        # Get all thread IDs
+        thread_ids = [t.get("id") for t in threads if t.get("id")]
+        
+        mini_agent_messages = []
+        if thread_ids:
+            # Fetch all messages for these threads in one query
+            mini_agent_messages = await mini_agent_messages_coll.find(
+                {"threadId": {"$in": thread_ids}},
+                {"_id": 0}
+            ).sort("createdAt", 1).to_list(length=None)
+
+        # Group messages by threadId
+        messages_by_thread = {}
+        for msg in mini_agent_messages:
+            tid = msg.get("threadId")
+            if tid not in messages_by_thread:
+                messages_by_thread[tid] = []
+            
+            # Normalize message
+            created_at = msg.get("createdAt")
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+
+            normalized_msg = {
+                "id": msg.get("id", f"msg_{tid}_{len(messages_by_thread[tid])}"),
+                "role": msg.get("role", msg.get("sender", "assistant")).replace("ai", "assistant"),
+                "content": msg.get("content", msg.get("text", "")),
+                "timestamp": created_at
+            }
+            if not normalized_msg["content"]: 
+                normalized_msg["content"] = "[Content unavailable]"
+                
+            messages_by_thread[tid].append(normalized_msg)
+
+        # Format Highlights
+        formatted_highlights = []
+        for h in highlights:
+            created_at = h.get("createdAt")
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+
+            formatted_highlights.append({
+                "highlightId": h.get("highlightId"),
+                "messageId": h.get("messageId"),
+                "text": h.get("text"),
+                "color": h.get("color"),
+                "startOffset": h.get("startIndex"),
+                "endOffset": h.get("endIndex"),
+                "note": h.get("note"),
+                "createdAt": created_at
+            })
+
+        # Format Mini Agents (Attach messages)
+        formatted_mini_agents = []
+        for agent in threads:
+            agent_id = agent.get("id")
+            msgs = messages_by_thread.get(agent_id, [])
+            created_at = agent.get("createdAt")
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+            
+            formatted_mini_agents.append({
+                "agentId": agent_id,
+                "messageId": agent.get("messageId"),
+                "selectedText": agent.get("selectedText"),
+                "messages": msgs,
+                "hasConversation": len(msgs) > 0,
+                "createdAt": created_at,
+                "sessionId": agent.get("sessionId")
+            })
+
+        # Serialize session timestamps
+        session_updated = session.get("updated_at")
+        if isinstance(session_updated, datetime):
+            session_updated = session_updated.isoformat()
+
+        return {
+            "session": {
+                "id": chat_id,
+                "title": session.get("title", "New Chat"),
+                "updated_at": session_updated,
+                "isPinned": session.get("isPinned", False),
+                "isSaved": session.get("isSaved", False)
+            },
+            "messages": session.get("messages", []),
+            "highlights": formatted_highlights,
+            "miniAgents": formatted_mini_agents
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error fetching session data: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to fetch session data: {str(e)}")
 
 @router.delete("/{chat_id}", status_code=200)
 async def delete_chat(chat_id: str, current_user: User = Depends(get_current_user_from_session)):
@@ -382,16 +528,21 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
 
+    # Preprocess (entity-safe, dual-text); keep raw in storage
+    _pre = safe_preprocess(request.message)
+    _raw_text = _pre["raw_text"]
+    _working_text = _pre["working_text"]
+
     user_message = {
         "id": str(uuid.uuid4()),
         "role": "user",
-        "content": request.message,
-        "timestamp": datetime.utcnow(),
+        "content": _raw_text,
+        "timestamp": datetime.now(timezone.utc),
     }
 
     # Add user message to the session and update timestamp
     # ⏱️ FAIL FAST: 300ms timeout for MongoDB update
-    update_time = datetime.utcnow()
+    update_time = datetime.now(timezone.utc)
     await tracked_timeout(
         sessions_collection.update_one(
             {"_id": session["_id"]},
@@ -408,19 +559,23 @@ async def send_message(
         fallback=None
     )
 
-    # Get AI response
-    ai_response_content = await get_llm_response(request.message)
+    # Cognitive routing payload (for executor/LLM grounding)
+    routing = await route_message(str(user_id), request.chatId, _raw_text)
+    routing_payload = routing.payload
+
+    # Get AI response using working text (safe-normalized)
+    ai_response_content = await get_llm_response(_working_text)
 
     ai_message = {
         "id": str(uuid.uuid4()),
         "role": "assistant",
         "content": ai_response_content,
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
     }
 
     # Add AI message to the session and update timestamp
     # ⏱️ FAIL FAST: 300ms timeout for MongoDB update
-    update_time = datetime.utcnow()
+    update_time = datetime.now(timezone.utc)
     await tracked_timeout(
         sessions_collection.update_one(
             {"_id": session["_id"]},
@@ -437,7 +592,7 @@ async def send_message(
         fallback=None
     )
 
-    return {"response": ai_response_content, "message_id": ai_message["id"], "timestamp": ai_message["timestamp"]}
+    return {"response": ai_response_content, "message_id": ai_message["id"], "timestamp": ai_message["timestamp"], "routing": routing_payload}
 
 @router.post("/message/stream")
 async def send_message_stream(
@@ -468,7 +623,7 @@ async def send_message_stream(
                 "chatId": request.chatId if hasattr(request, 'chatId') else None,
                 "user_id": str(current_user.user_id) if current_user else None
             },
-            "timestamp": int(datetime.utcnow().timestamp() * 1000),
+            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
         }
         with open(r"c:\Users\vamsh\Source\3_1\project_ps2\prism\prism-ai-studio\.cursor\debug.log", "a", encoding="utf-8") as f:
             f.write(_json.dumps(log_data) + "\n")
@@ -501,11 +656,16 @@ async def send_message_stream(
     # ✅ STEP 1: Save user message to database
     logger.info(f"✅ [Step] User message received for user: {user_id}")
     logger.info(f"✅ [Step] Raw user input: {request.message[:100]}...")
+
+    # Preprocess once; raw stored, working used for intent/LLM
+    _pre = safe_preprocess(request.message)
+    _raw_text = _pre["raw_text"]
+    _working_text = _pre["working_text"]
     
     user_message = {
         "id": str(uuid.uuid4()),
         "role": "user",
-        "content": request.message,
+        "content": _raw_text,
         "timestamp": datetime.utcnow(),
     }
 
@@ -531,7 +691,7 @@ async def send_message_stream(
     # ✅ STEP 1.5: Save user message to Redis history for recall (CRITICAL)
     try:
         from app.db.redis_client import add_message_to_history
-        await add_message_to_history(str(user_id), "user", request.message)
+        await add_message_to_history(str(user_id), "user", _raw_text)
         logger.info(f"✅ [Step] User message saved to Redis history")
     except Exception as e:
         logger.warning(f"⚠️ Failed to save user message to Redis history: {e}")
@@ -539,7 +699,7 @@ async def send_message_stream(
     # ✅ STEP 2: DETECT INTENT - Load only required services
     logger.info(f"✅ [Step] Intent detection started")
     from app.services.intent_detector import load_services_for_message, ServiceIntent
-    services = await load_services_for_message(request.message)
+    services = await load_services_for_message(_working_text)
     detected_intent = services["intent"]
     
     print(f"⚡ Intent detected: {detected_intent.value}")
@@ -565,9 +725,11 @@ async def send_message_stream(
         previous_ai_message = None
 
     # Route the request before streaming any tokens
+    routing = await route_message(str(user_id), request.chatId, _raw_text)
+    routing_payload = routing.payload
     # ⚡ OPTIMIZATION: Skip heavy processing for casual chat
     # ⚠️ CRITICAL: Recall questions MUST bypass fast path and use main brain
-    msg_lower = (request.message or "").lower().strip()
+    msg_lower = (_working_text or "").lower().strip()
     # Normalize common abbreviations and variations
     msg_normalized = msg_lower.replace(" u ", " you ").replace(" u,", " you,").replace(" u.", " you.")
     msg_normalized = msg_normalized.replace("what do u", "what do you").replace("what u", "what you")
@@ -626,7 +788,7 @@ async def send_message_stream(
         if is_recall_question:
             logger.info(f"✅ [Step] Recall question detected - bypassing fast path")
         router_result = await router_service.process_request(
-            message=request.message,
+            message=_working_text,
             user_id=str(user_id),
             user_email=current_user.email,
             previous_ai_message=previous_ai_message,
@@ -683,6 +845,202 @@ async def send_message_stream(
                 status_reviews = {"step": "reading_reviews", "message": "Reading reviews..."}
                 yield f"event: status\ndata: {json.dumps(status_reviews)}\n\n"
 
+            # Handle pending confirmation/clarification from context stack
+            msg_clean = (_raw_text or "").strip().lower()
+            pending = await peek_context(str(user_id), request.chatId)
+            if pending and isinstance(pending, dict):
+                if pending.get("type") == "pending_action" and msg_clean in {"yes", "confirm", "okay", "ok"}:
+                    act_intent = pending.get("intent")
+                    act_entities = pending.get("entities", {})
+                    # Execute supported actions
+                    if act_intent == "task_cancel" and act_entities.get("task_id"):
+                        tid = act_entities["task_id"]
+                        try:
+                            obj_id = ObjectId(tid)
+                        except Exception:
+                            obj_id = tid
+                        await tasks_collection.update_one(
+                            {"_id": obj_id, "userId": str(user_id)},
+                            {"$set": {"status": "canceled", "updated_at": datetime.utcnow()}}
+                        )
+                        try:
+                            await remove_scheduled_email(str(obj_id))
+                        except Exception:
+                            pass
+                        await pop_context(str(user_id), request.chatId)
+                        confirm_msg = f"✅ Canceled the reminder: {act_entities.get('task_name') or tid}"
+                        full_response = confirm_msg
+                        yield f"event: token\ndata: {confirm_msg}\n\n"
+                        usage = {"prompt": len(_working_text or ""), "completion": len(full_response)}
+                        yield f"event: done\ndata: {json.dumps({'usage': usage})}\n\n"
+                        return
+                    elif act_intent == "task_update" and act_entities.get("task_id") and act_entities.get("new_time_iso"):
+                        # Parse new time and validate
+                        import datetime as _dt
+                        try:
+                            new_dt = _dt.datetime.fromisoformat(act_entities["new_time_iso"].replace("Z", "+00:00"))
+                        except Exception:
+                            new_dt = None
+                        if not new_dt:
+                            err = "❌ Could not parse the new time. Please specify a valid time."
+                            yield f"event: token\ndata: {err}\n\n"
+                            yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': len(err)}})}\n\n"
+                            return
+                        # Reject past times
+                        now_utc = _dt.datetime.now(_dt.timezone.utc)
+                        if not new_dt.tzinfo:
+                            new_dt = new_dt.replace(tzinfo=_dt.timezone.utc)
+                        if new_dt < now_utc:
+                            err = "⚠️ The new time is in the past. Update rejected."
+                            yield f"event: token\ndata: {err}\n\n"
+                            yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': len(err)}})}\n\n"
+                            return
+                        # Convert to timezone-aware UTC for Mongo storage and reschedule email
+                        aware_utc = new_dt.astimezone(_dt.timezone.utc)
+                        tid = act_entities["task_id"]
+                        try:
+                            obj_id = ObjectId(tid)
+                        except Exception:
+                            obj_id = tid
+                        await tasks_collection.update_one(
+                            {"_id": obj_id, "userId": str(user_id)},
+                            {"$set": {"due_date": aware_utc, "updated_at": _dt.datetime.now(_dt.timezone.utc)}}
+                        )
+                        # Reschedule email job: remove then add
+                        try:
+                            await remove_scheduled_email(str(obj_id))
+                        except Exception:
+                            pass
+                        try:
+                            await schedule_task_reminder(str(obj_id), str(user_id), new_dt.timestamp())
+                        except Exception as e:
+                            err = f"⚠️ Failed to reschedule email: {e}"
+                            yield f"event: token\ndata: {err}\n\n"
+                            yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': len(err)}})}\n\n"
+                            return
+                        await pop_context(str(user_id), request.chatId)
+                        done_msg = f"✅ Rescheduled '{act_entities.get('task_name') or tid}' to {act_entities.get('new_time_iso')}"
+                        yield f"event: token\ndata: {done_msg}\n\n"
+                        yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': len(done_msg)}})}\n\n"
+                        return
+                elif pending.get("type") == "pending_selection":
+                    # Handle numeric selection (1..N) or description match
+                    opts = pending.get("options", [])
+                    chosen = None
+                    if msg_clean.isdigit():
+                        idx = int(msg_clean) - 1
+                        if 0 <= idx < len(opts):
+                            chosen = opts[idx]
+                    else:
+                        for o in opts:
+                            desc = (o.get("description") or "").lower()
+                            if desc and desc in msg_clean:
+                                chosen = o
+                                break
+                    if chosen:
+                        # Replace with pending_action
+                        await pop_context(str(user_id), request.chatId)
+                        await push_context(str(user_id), request.chatId, {
+                            "type": "pending_action",
+                            "intent": pending.get("intent"),
+                            "entities": {"task_id": chosen.get("task_id"), "task_name": chosen.get("description"), "new_time_iso": pending.get("new_time_iso")},
+                        })
+                        # Emit confirmation request for the chosen item
+                        # Build explicit change payload for updates if time is present
+                        old_iso = None
+                        try:
+                            doc = await tasks_collection.find_one({
+                                "_id": ObjectId(chosen.get("task_id")), "userId": str(user_id)
+                            })
+                        except Exception:
+                            doc = None
+                        if doc and doc.get("due_date"):
+                            try:
+                                od = doc["due_date"]
+                                old_iso = od.strftime('%Y-%m-%dT%H:%M:%SZ')
+                            except Exception:
+                                old_iso = None
+                        if pending.get("intent") == "task_update":
+                            conf_payload = {
+                                "type": "confirmation_request",
+                                "intent": pending.get("intent"),
+                                "message": f"Reschedule '{chosen.get('description')}' from {old_iso} to {pending.get('new_time_iso')}?",
+                                "changes": {
+                                    "field": "time",
+                                    "old_value": old_iso,
+                                    "new_value": pending.get("new_time_iso"),
+                                },
+                            }
+                        else:
+                            conf_payload = {
+                                "type": "confirmation_request",
+                                "intent": pending.get("intent"),
+                                "message": f"I am about to {('delete' if pending.get('intent')=='task_cancel' else 'update')} the task '{chosen.get('description')}'. Confirm?",
+                                "entities": {"task_id": chosen.get("task_id"), "task_name": chosen.get("description")},
+                            }
+                        yield f"event: confirmation\ndata: {json.dumps(conf_payload)}\n\n"
+                        yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': 0}})}\n\n"
+                        return
+
+            # If router produced clarification or confirmation directives, emit and exit
+            if routing_payload.get("clarification"):
+                pending_sel = {
+                    "type": "pending_selection",
+                    "intent": routing_payload.get("intent_packet", {}).get("primary_intent"),
+                    "options": routing_payload["clarification"].get("options", []),
+                    "new_time_iso": routing_payload.get("entities_resolved", {}).get("new_time_iso"),
+                }
+                await push_context(str(user_id), request.chatId, pending_sel)
+                yield f"event: clarification\ndata: {json.dumps(routing_payload['clarification'])}\n\n"
+                yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': 0}})}\n\n"
+                return
+            if routing_payload.get("execution_directives", {}).get("requires_confirmation"):
+                # Build and emit confirmation request for supported intents
+                pi = routing_payload.get("intent_packet", {}).get("primary_intent")
+                ents = routing_payload.get("entities_resolved", {})
+                if pi in {"task_cancel", "task_update", "task_create"}:
+                    verb = "delete" if pi == "task_cancel" else ("update" if pi == "task_update" else "create")
+                    target = ents.get("task_name") or ents.get("description") or _raw_text[:80]
+                    if pi == "task_update":
+                        # Build explicit changes with old/new values if possible
+                        old_iso = None
+                        new_iso = ents.get("new_time_iso")
+                        if ents.get("task_id"):
+                            try:
+                                doc = await tasks_collection.find_one({
+                                    "_id": ObjectId(ents["task_id"]), "userId": str(user_id)
+                                })
+                            except Exception:
+                                doc = None
+                            if doc and doc.get("due_date"):
+                                try:
+                                    od = doc["due_date"]
+                                    old_iso = od.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                except Exception:
+                                    old_iso = None
+                        msg_text = f"Reschedule '{target}'" + (f" from {old_iso} to {new_iso}?" if old_iso and new_iso else "?")
+                        conf_payload = {
+                            "type": "confirmation_request",
+                            "intent": pi,
+                            "message": msg_text,
+                            "changes": {
+                                "field": "time",
+                                "old_value": old_iso,
+                                "new_value": new_iso,
+                            },
+                        }
+                    else:
+                        conf_payload = {
+                            "type": "confirmation_request",
+                            "intent": pi,
+                            "message": f"I am about to {verb} the task '{target}'. Confirm?",
+                            "entities": ents,
+                        }
+                    await push_context(str(user_id), request.chatId, {"type": "pending_action", "intent": pi, "entities": ents})
+                    yield f"event: confirmation\ndata: {json.dumps(conf_payload)}\n\n"
+                    yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': 0}})}\n\n"
+                    return
+
             # If the router already produced a direct reply (e.g., task or email), stream that and exit
             if direct_reply is not None:
                 full_response = str(direct_reply)
@@ -698,22 +1056,52 @@ async def send_message_stream(
                         intent = "recall_memory"  # Override intent for proper handling
                     logger.info(f"✅ [Step] Generating response via Main Brain (intent: {intent})")
                     logger.info(f"✅ [Step] Memory-aware pipeline active for recall questions")
+                    
+                    # ⚡ AUTO-RENAME: Start title generation in parallel
+                    title_task = None
+                    current_title = session.get("title", "Untitled")
+                    if current_title in ["New Chat", "Untitled", "", None]:
+                        # Generate based on user message only for speed ("instant")
+                        title_task = asyncio.create_task(generate_chat_title(request.message))
+
                     # Pass session_id to main_brain for conversation history fetching
                     session_id_for_brain = str(session.get("_id")) if session else request.chatId
-                    full_response = await main_brain_generate_response(
+                    
+                    # Run Brain + Title in parallel
+                    brain_pending = asyncio.create_task(main_brain_generate_response(
                         user_id=str(user_id),
-                        message=request.message,
+                        message=_working_text,
                         search_results=context_for_prompt or None,
                         image_url=None,
                         session_id=session_id_for_brain,
-                    )
+                    ))
+                    
+                    # Wait for brain response
+                    full_response = await brain_pending
+                    
+                    # Handle title if task exists
+                    if title_task:
+                        try:
+                            # It might be done by now since brain is slow
+                            new_title = await title_task
+                            if new_title and new_title not in ["New Chat", "Untitled"]:
+                                await sessions_collection.update_one(
+                                     {"_id": session["_id"]},
+                                     {"$set": {"title": new_title}}
+                                )
+                                yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
+                                logger.info(f"✅ [Step] Auto-renamed chat to: {new_title}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Title generation failed: {e}")
+
                     logger.info(f"✅ [Step] Response generated (length: {len(full_response)})")
                     # Stream the full response as a single logical token
                     yield f"event: token\ndata: {full_response}\n\n"
                     usage = {
-                        "prompt": len(request.message or ""),
+                        "prompt": len(_working_text or ""),
                         "completion": len(full_response),
                     }
+                    
                     yield f"event: done\ndata: {json.dumps({'usage': usage})}\n\n"
                 else:
                     # TOOL-ENHANCED FLOWS: use lightweight context + raw streaming
@@ -724,16 +1112,52 @@ async def send_message_stream(
                     if context_for_prompt:
                         system_prompt += f"\n\nContext:\n{context_for_prompt}"
 
-                    async for chunk in get_llm_response_stream(request.message, system_prompt):
+                    # ⚡ AUTO-RENAME: Start title generation in parallel (Tool Flow)
+                    title_task = None
+                    title_sent = False
+                    current_title = session.get("title", "Untitled")
+                    if current_title in ["New Chat", "Untitled", "", None]:
+                        title_task = asyncio.create_task(generate_chat_title(request.message))
+
+                    async for chunk in get_llm_response_stream(_working_text, system_prompt):
                         full_response += chunk
                         # Send token as SSE (raw text chunk)
                         yield f"event: token\ndata: {chunk}\n\n"
+                        
+                        # Check if title is ready mid-stream
+                        if title_task and not title_sent and title_task.done():
+                             try:
+                                 new_title = await title_task
+                                 if new_title and new_title not in ["New Chat", "Untitled"]:
+                                     await sessions_collection.update_one(
+                                         {"_id": session["_id"]},
+                                         {"$set": {"title": new_title}}
+                                     )
+                                     yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
+                                     title_sent = True
+                             except Exception:
+                                 pass # Ignore errors mid-stream
+
+                    # Ensure title is sent if finished after stream
+                    if title_task and not title_sent:
+                        try:
+                            # Await it now if not done yet
+                            new_title = await title_task
+                            if new_title and new_title not in ["New Chat", "Untitled"]:
+                                await sessions_collection.update_one(
+                                     {"_id": session["_id"]},
+                                     {"$set": {"title": new_title}}
+                                )
+                                yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
+                        except Exception:
+                            pass 
 
                     # Send completion signal with basic usage info
                     usage = {
-                        "prompt": len(request.message or ""),
+                        "prompt": len(_working_text or ""),
                         "completion": len(full_response),
                     }
+
                     yield f"event: done\ndata: {json.dumps({'usage': usage})}\n\n"
             
             # ✅ STEP 4: Save complete AI message to database after streaming/direct reply
@@ -746,6 +1170,7 @@ async def send_message_stream(
                 "metadata": {
                     "intent": intent,
                     "action_payload": action_payload,
+                    "routing": routing_payload,
                 }
             }
             
@@ -765,7 +1190,7 @@ async def send_message_stream(
             # ✅ STEP 4.5: Save to Redis history for recall (CRITICAL for conversation history)
             try:
                 from app.db.redis_client import add_message_to_history
-                await add_message_to_history(str(user_id), "user", request.message)
+                await add_message_to_history(str(user_id), "user", _raw_text)
                 await add_message_to_history(str(user_id), "assistant", full_response)
                 logger.info(f"✅ [Step] Messages saved to Redis history for recall")
             except Exception as e:
@@ -774,7 +1199,7 @@ async def send_message_stream(
             # ✅ STEP 5: Extract and save user details (background task - raw-only extraction)
             # This runs in parallel after streaming completes - doesn't block response
             logger.info(f"✅ [Step] Starting background extraction task (raw user input only)")
-            import asyncio
+
             from app.services.user_detail_extractor import extract_and_save_user_details_async
             from app.services.cache_service import cache_service
             
@@ -785,7 +1210,7 @@ async def send_message_stream(
                     # Extract details from RAW user message ONLY
                     extracted = await user_detail_extractor.extract_user_details(
                         str(user_id),
-                        request.message,
+                        _raw_text,
                         None  # STRICT: pass only raw user input
                     )
                     
@@ -795,7 +1220,7 @@ async def send_message_stream(
                         save_results = await user_detail_extractor.save_extracted_details(
                             str(user_id),
                             extracted,
-                            request.message
+                            _raw_text
                         )
                         
                         # ✅ MEMORY ACKNOWLEDGEMENT GUARD: Only acknowledge if all stores succeed

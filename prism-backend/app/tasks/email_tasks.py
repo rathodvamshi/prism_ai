@@ -205,14 +205,18 @@ def _init_sync_mongo_client():
         
         logger.debug(f"Connecting to MongoDB...")
         
-        # Initialize synchronous MongoDB client
+        # Initialize synchronous MongoDB client with improved timeout settings
         _sync_mongo_client = MongoClient(
             clean_uri,
-            serverSelectionTimeoutMS=10000,  # 10 second timeout
-            connectTimeoutMS=10000,
-            socketTimeoutMS=30000,
-            retryWrites=True,
-            retryReads=True,
+            serverSelectionTimeoutMS=30000,  # 30 seconds (match async client)
+            connectTimeoutMS=15000,          # 15 seconds for initial connection
+            socketTimeoutMS=45000,           # 45 seconds for socket operations
+            retryWrites=True,                # Enable write retries
+            retryReads=True,                 # Enable read retries
+            maxPoolSize=20,                  # Reduced pool size for Celery
+            minPoolSize=2,                   # Minimum connections
+            maxIdleTimeMS=300000,            # 5 minutes idle timeout
+            heartbeatFrequencyMS=15000,      # Check server status every 15s
         )
         
         logger.debug(f"MongoClient created, testing connection...")
@@ -260,6 +264,44 @@ except Exception as e:
     logger.warning(f"⚠️ MongoDB initialization deferred: {e}")
     logger.info("   Connection will be retried when tasks are executed")
 
+
+def _sync_send_otp_email(to_email: str, otp_code: str, subject: str = None) -> bool:
+    """
+    Synchronous version of OTP email sending for Celery task.
+    """
+    try:
+        from app.services.email_service import send_otp_email_direct
+        # Run async function in sync context
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(send_otp_email_direct(to_email, otp_code, subject))
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.error(f"Sync OTP email failed: {e}")
+        return False
+
+def _sync_send_email_notification(message: str) -> str:
+    """
+    Synchronous version of email notification sending for Celery task.
+    """
+    try:
+        from app.services.email_service import send_email_notification
+        # Run async function in sync context
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(send_email_notification(message))
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.error(f"Sync email notification failed: {e}")
+        return f"❌ Failed to send email: {str(e)}"
 
 def _sync_email_send(task_data: Dict[str, Any]) -> bool:
     """

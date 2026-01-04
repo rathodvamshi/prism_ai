@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { userAPI } from "@/lib/api";
+import { useAuthStore } from "./authStore";
 
 interface Profile {
   name: string;
@@ -25,7 +26,7 @@ interface ProfileState {
   stats: ProfileStats;
   isLoading: boolean;
   isSaving: boolean;
-  
+
   updateProfile: (updates: Partial<Profile>) => void;
   setAvatarUrl: (url: string) => void;
   setLoading: (loading: boolean) => void;
@@ -49,21 +50,25 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   stats: {},
   isLoading: false,
   isSaving: false,
-  
+
   updateProfile: (updates) =>
     set((state) => ({
       profile: { ...state.profile, ...updates },
     })),
-  
+
   setAvatarUrl: (url) =>
     set((state) => ({
       profile: { ...state.profile, avatarUrl: url },
     })),
-  
+
   setLoading: (loading) => set({ isLoading: loading }),
   setSaving: (saving) => set({ isSaving: saving }),
-  
+
   loadProfileFromBackend: async () => {
+    // Prevent fetching if not authenticated
+    if (!useAuthStore.getState().isAuthenticated) {
+      return;
+    }
     set({ isLoading: true });
     try {
       const result = await userAPI.getProfile();
@@ -81,7 +86,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       set({ isLoading: false });
     }
   },
-  
+
   saveProfileToBackend: async (updates) => {
     set({ isSaving: true });
     try {
@@ -94,7 +99,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         profile: { ...state.profile, ...data.profile },
         isSaving: false,
       }));
-      
+
       return data;
     } catch (error) {
       console.error('Error saving profile:', error);
@@ -102,7 +107,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       throw error;
     }
   },
-  
+
   resetProfile: () =>
     set({
       profile: {

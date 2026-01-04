@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
 import { ParticleCanvas } from "@/components/hero/ParticleCanvas";
+import { TechMarquee } from "@/components/hero/TechMarquee";
 import { HorizontalFeatures } from "@/components/hero/HorizontalFeatures";
 import { PrototypeShowcase } from "@/components/hero/PrototypeShowcase";
 import { ArrowRight, Sparkles } from "lucide-react";
@@ -45,6 +46,9 @@ const Hero = () => {
               Highlight. Understand. Organize your mind. Transform how you interact with AI 
               through intelligent conversations and visual knowledge mapping.
             </p>
+
+            {/* Inline marquee: circular queue animation below the hero paragraph */}
+            <TechMarquee variant="inline" />
 
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
               <Button variant="hero" size="xl" asChild>

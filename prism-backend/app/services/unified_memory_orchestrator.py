@@ -131,113 +131,90 @@ class UnifiedMemoryOrchestrator:
     # MEMORY FETCHING (Stop-on-Hit Logic)
     # ==========================================
     
-    async def fetch_memory(
+    # ==========================================
+    # HOLOGRAPHIC MEMORY RETRIEVAL (Gather-All Logic)
+    # ==========================================
+    
+    async def get_holographic_context(
         self,
         user_id: str,
         query: str,
         intent: str = "general"
-    ) -> Tuple[Optional[Dict], List[str]]:
+    ) -> Tuple[Dict[str, Any], List[str]]:
         """
-        🎯 FETCH MEMORY WITH STOP-ON-HIT LOGIC
+        💎 HOLOGRAPHIC MEMORY RETRIEVAL
+        
+        Fetches context from ALL layers in parallel:
+        1. Redis (Session) - Immediate context
+        2. MongoDB (Profile) - Core identity
+        3. Neo4j (Graph) - Deep relationships
+        4. Pinecone (Vector) - Semantic history
         
         Returns:
-            (memory_data, debug_logs)
-        
-        Debug logs show:
-        - Which source was queried
-        - Why it was queried
-        - What query was sent
-        - Whether memory was found
-        - Why search stopped
+            (context_dict, debug_logs)
         """
         debug_logs = []
         start_time = datetime.now()
         
-        debug_logs.append(f"[Memory Fetch START] user_id={user_id}, intent={intent}")
-        debug_logs.append(f"[Memory Fetch Query] '{query}'")
+        debug_logs.append(f"[Holographic Fetch START] user_id={user_id}, intent={intent}")
         
-        # Step 1: Check Redis (fastest, session-level)
-        redis_result = await self._fetch_from_redis(user_id, query)
-        debug_logs.append(
-            f"[Redis Query] time={redis_result.query_time_ms:.2f}ms, "
-            f"found={redis_result.found}, reason={redis_result.reason}"
+        # Launch parallel tasks
+        redis_task = self._fetch_from_redis(user_id, query)
+        mongo_task = self._fetch_from_mongodb(user_id, query, intent)
+        neo4j_task = self._fetch_from_neo4j(user_id, query)
+        pinecone_task = self._fetch_from_pinecone(user_id, query)
+        
+        # Wait for all results (gather)
+        results = await asyncio.gather(
+            redis_task, 
+            mongo_task, 
+            neo4j_task, 
+            pinecone_task, 
+            return_exceptions=True
         )
         
-        if redis_result.found:
-            debug_logs.append("[Memory Fetch STOP] Redis HIT - stopping further search")
-            total_time = (datetime.now() - start_time).total_seconds() * 1000
-            debug_logs.append(f"[Memory Fetch END] total_time={total_time:.2f}ms, source=Redis")
+        redis_res, mongo_res, neo4j_res, pinecone_res = results
+        
+        # Process results & build context
+        context = {
+            "session": {},
+            "profile": {},
+            "relationships": [],
+            "memories": []
+        }
+        
+        # 1. Redis (Session)
+        if isinstance(redis_res, MemoryFetchResult) and redis_res.found:
+            context["session"] = redis_res.data
+            debug_logs.append(f"✅ Redis: Found session context ({redis_res.query_time_ms:.1f}ms)")
+        elif isinstance(redis_res, Exception):
+            debug_logs.append(f"❌ Redis Error: {str(redis_res)}")
             
-            return {
-                "source": "Redis",
-                "type": "session",
-                "data": redis_result.data,
-                "timestamp": datetime.now().isoformat()
-            }, debug_logs
-        
-        # Step 2: Check MongoDB (structured + history)
-        mongo_result = await self._fetch_from_mongodb(user_id, query, intent)
-        debug_logs.append(
-            f"[MongoDB Query] time={mongo_result.query_time_ms:.2f}ms, "
-            f"found={mongo_result.found}, reason={mongo_result.reason}"
-        )
-        
-        if mongo_result.found:
-            debug_logs.append("[Memory Fetch STOP] MongoDB HIT - stopping further search")
-            total_time = (datetime.now() - start_time).total_seconds() * 1000
-            debug_logs.append(f"[Memory Fetch END] total_time={total_time:.2f}ms, source=MongoDB")
+        # 2. MongoDB (Profile)
+        if isinstance(mongo_res, MemoryFetchResult) and mongo_res.found:
+            context["profile"] = mongo_res.data
+            debug_logs.append(f"✅ MongoDB: Found profile data ({mongo_res.query_time_ms:.1f}ms)")
+        elif isinstance(mongo_res, Exception):
+            debug_logs.append(f"❌ MongoDB Error: {str(mongo_res)}")
             
-            return {
-                "source": "MongoDB",
-                "type": "structured",
-                "data": mongo_result.data,
-                "timestamp": datetime.now().isoformat()
-            }, debug_logs
-        
-        # Step 3: Check Neo4j (relationships + entities)
-        neo4j_result = await self._fetch_from_neo4j(user_id, query)
-        debug_logs.append(
-            f"[Neo4j Query] time={neo4j_result.query_time_ms:.2f}ms, "
-            f"found={neo4j_result.found}, reason={neo4j_result.reason}"
-        )
-        
-        if neo4j_result.found:
-            debug_logs.append("[Memory Fetch STOP] Neo4j HIT - stopping further search")
-            total_time = (datetime.now() - start_time).total_seconds() * 1000
-            debug_logs.append(f"[Memory Fetch END] total_time={total_time:.2f}ms, source=Neo4j")
+        # 3. Neo4j (Graph)
+        if isinstance(neo4j_res, MemoryFetchResult) and neo4j_res.found:
+            context["relationships"] = neo4j_res.data.get("relationships", [])
+            debug_logs.append(f"✅ Neo4j: Found {len(context['relationships'])} relationships ({neo4j_res.query_time_ms:.1f}ms)")
+        elif isinstance(neo4j_res, Exception):
+            debug_logs.append(f"❌ Neo4j Error: {str(neo4j_res)}")
             
-            return {
-                "source": "Neo4j",
-                "type": "relationship",
-                "data": neo4j_result.data,
-                "timestamp": datetime.now().isoformat()
-            }, debug_logs
-        
-        # Step 4: Check Pinecone (semantic similarity)
-        pinecone_result = await self._fetch_from_pinecone(user_id, query)
-        debug_logs.append(
-            f"[Pinecone Query] time={pinecone_result.query_time_ms:.2f}ms, "
-            f"found={pinecone_result.found}, reason={pinecone_result.reason}"
-        )
-        
-        if pinecone_result.found:
-            debug_logs.append("[Memory Fetch STOP] Pinecone HIT - all sources searched")
-            total_time = (datetime.now() - start_time).total_seconds() * 1000
-            debug_logs.append(f"[Memory Fetch END] total_time={total_time:.2f}ms, source=Pinecone")
+        # 4. Pinecone (Vector)
+        if isinstance(pinecone_res, MemoryFetchResult) and pinecone_res.found:
+            context["memories"] = pinecone_res.data.get("memories", [])
+            debug_logs.append(f"✅ Pinecone: Found {len(context['memories'])} semantic memories ({pinecone_res.query_time_ms:.1f}ms)")
+        elif isinstance(pinecone_res, Exception):
+            debug_logs.append(f"❌ Pinecone Error: {str(pinecone_res)}")
             
-            return {
-                "source": "Pinecone",
-                "type": "semantic",
-                "data": pinecone_result.data,
-                "timestamp": datetime.now().isoformat()
-            }, debug_logs
-        
-        # No memory found in any source
         total_time = (datetime.now() - start_time).total_seconds() * 1000
-        debug_logs.append("[Memory Fetch STOP] No relevant memory found in any source")
-        debug_logs.append(f"[Memory Fetch END] total_time={total_time:.2f}ms, source=None")
+        debug_logs.append(f"[Holographic Fetch END] Total time: {total_time:.1f}ms")
         
-        return None, debug_logs
+        return context, debug_logs
     
     async def _fetch_from_redis(self, user_id: str, query: str) -> MemoryFetchResult:
         """Fetch from Redis (session memory)"""
@@ -339,7 +316,10 @@ class UnifiedMemoryOrchestrator:
             )
     
     async def _fetch_from_neo4j(self, user_id: str, query: str) -> MemoryFetchResult:
-        """Fetch from Neo4j (relationships + entities)"""
+        """
+        Fetch from Neo4j (relationships + entities)
+        🧠 STRONG FEATURE: Recursive Retrieval (Graph Reasoning)
+        """
         start = datetime.now()
         
         try:
@@ -353,13 +333,22 @@ class UnifiedMemoryOrchestrator:
                     reason="Neo4j not available"
                 )
             
-            # Query Neo4j for user's relationships
+            # Query Neo4j for user's relationships AND related concepts (2-hop)
             async with self.neo4j._driver.session() as session:
                 result = await session.run(
                     """
-                    MATCH (u:User {id: $user_id})-[r]->(n)
-                    RETURN type(r) as relationship, n.name as target, n.value as value
-                    LIMIT 10
+                    MATCH (u:User {id: $user_id})-[r1]->(n)
+                    OPTIONAL MATCH (n)-[r2]->(related)
+                    WHERE NOT (u)-->(related) AND related IS NOT NULL
+                    RETURN 
+                        type(r1) as direct_rel, 
+                        n.name as direct_target, 
+                        n.value as value,
+                        type(r2) as indirect_rel,
+                        related.name as indirect_target,
+                        labels(n) as direct_labels
+                    ORDER BY r1.created_at DESC
+                    LIMIT 15
                     """,
                     user_id=user_id
                 )
@@ -368,21 +357,36 @@ class UnifiedMemoryOrchestrator:
                 query_time = (datetime.now() - start).total_seconds() * 1000
                 
                 if records:
-                    relationships = [
-                        {
-                            "type": record["relationship"],
-                            "target": record["target"],
-                            "value": record.get("value")
-                        }
-                        for record in records
-                    ]
+                    relationships = []
+                    seen_targets = set()
+                    
+                    for record in records:
+                        # Add direct relationship
+                        if record["direct_target"] not in seen_targets:
+                            relationships.append({
+                                "type": record["direct_rel"],
+                                "target": record["direct_target"],
+                                "value": record.get("value"),
+                                "depth": 1
+                            })
+                            seen_targets.add(record["direct_target"])
+                        
+                        # Add indirect relationship (Graph Reasoning)
+                        if record["indirect_target"] and record["indirect_target"] not in seen_targets:
+                            relationships.append({
+                                "type": "RELATED_VIA_" + record["direct_target"],
+                                "target": record["indirect_target"],
+                                "depth": 2,
+                                "reasoning": f"Because you like {record['direct_target']}"
+                            })
+                            seen_targets.add(record["indirect_target"])
                     
                     return MemoryFetchResult(
                         found=True,
                         source=MemorySource.NEO4J,
                         data={"relationships": relationships},
                         query_time_ms=query_time,
-                        reason=f"Found {len(relationships)} relationships in Neo4j"
+                        reason=f"Found {len(relationships)} relationships (including inferred ones)"
                     )
                 
                 return MemoryFetchResult(
@@ -475,75 +479,73 @@ class UnifiedMemoryOrchestrator:
     # MASTER PROMPT ENRICHMENT
     # ==========================================
     
+    # ==========================================
+    # MASTER PROMPT ENRICHMENT
+    # ==========================================
+    
     def enrich_master_prompt(
         self,
         base_prompt: str,
-        memory_data: Optional[Dict],
+        context: Dict[str, Any],
         debug_logs: List[str]
     ) -> Tuple[str, List[str]]:
         """
-        🎯 ENRICH MASTER PROMPT WITH MEMORY CONTEXT
+        🎯 ENRICH MASTER PROMPT WITH HOLOGRAPHIC CONTEXT
         
         Rules:
-        - Extract only relevant details from memory
+        - Inject context from ALL sources
         - Label clearly as [SYSTEM MEMORY CONTEXT]
-        - Never hallucinate or reuse stale data
-        - If no memory, proceed without injection
+        - Prioritize: Profile > Relationships > Memories > Session
         """
         debug_logs.append("[Master Prompt] Starting enrichment")
         
-        if not memory_data:
-            debug_logs.append("[Master Prompt] No memory to inject - using base prompt")
+        if not any(context.values()):
+            debug_logs.append("[Master Prompt] No context to inject - using base prompt")
             return base_prompt, debug_logs
         
         # Build memory context section
-        memory_context = "[SYSTEM MEMORY CONTEXT]\n"
-        memory_context += f"Source: {memory_data['source']}\n"
-        memory_context += f"Type: {memory_data['type']}\n"
-        memory_context += f"Retrieved: {memory_data['timestamp']}\n\n"
+        memory_block = "[SYSTEM MEMORY CONTEXT]\n"
         
-        # Format memory data based on source
-        data = memory_data['data']
-        
-        if memory_data['source'] == "Redis":
-            memory_context += "Session Memory:\n"
-            for key, value in data.items():
-                memory_context += f"  - {key}: {value}\n"
-        
-        elif memory_data['source'] == "MongoDB":
-            if data.get("name"):
-                memory_context += f"User Name: {data['name']}\n"
+        # 1. Core Profile (MongoDB)
+        if context.get("profile"):
+            profile = context["profile"]
+            memory_block += "👤 User Profile:\n"
+            if profile.get("name"):
+                memory_block += f"  - Name: {profile['name']}\n"
+            if profile.get("interests"):
+                memory_block += f"  - Interests: {', '.join(profile['interests'])}\n"
+            if profile.get("preferences"):
+                memory_block += f"  - Preferences: {', '.join(profile['preferences'])}\n"
+            memory_block += "\n"
             
-            if data.get("interests"):
-                memory_context += f"Interests: {', '.join(data['interests'])}\n"
+        # 2. Relationships (Neo4j)
+        if context.get("relationships"):
+            memory_block += "🕸️ Knowledge Graph:\n"
+            for rel in context["relationships"]:
+                memory_block += f"  - {rel['type']} → {rel['target']}\n"
+            memory_block += "\n"
             
-            if data.get("preferences"):
-                memory_context += f"Preferences: {', '.join(data['preferences'])}\n"
+        # 3. Semantic Memories (Pinecone)
+        if context.get("memories"):
+            memory_block += "🧠 Relevant Memories:\n"
+            for mem in context["memories"]:
+                memory_block += f"  - {mem['text']} (confidence: {mem['score']:.2f})\n"
+            memory_block += "\n"
             
-            if data.get("profile"):
-                memory_context += "Profile:\n"
-                for key, value in data['profile'].items():
-                    memory_context += f"  - {key}: {value}\n"
-        
-        elif memory_data['source'] == "Neo4j":
-            relationships = data.get("relationships", [])
-            memory_context += "Relationships:\n"
-            for rel in relationships:
-                memory_context += f"  - {rel['type']} → {rel['target']}\n"
-        
-        elif memory_data['source'] == "Pinecone":
-            memories = data.get("memories", [])
-            memory_context += "Relevant Memories:\n"
-            for mem in memories:
-                memory_context += f"  - {mem['text']} (relevance: {mem['score']:.2f})\n"
-        
-        memory_context += "\n[END SYSTEM MEMORY CONTEXT]\n\n"
+        # 4. Session Context (Redis)
+        if context.get("session"):
+            memory_block += "⚡ Session Context:\n"
+            for key, value in context["session"].items():
+                if key != "timestamp":
+                    memory_block += f"  - {key}: {value}\n"
+            memory_block += "\n"
+            
+        memory_block += "[END SYSTEM MEMORY CONTEXT]\n\n"
         
         # Inject memory context into prompt
-        enriched_prompt = memory_context + base_prompt
+        enriched_prompt = memory_block + base_prompt
         
-        debug_logs.append(f"[Master Prompt] Injected {len(memory_context)} chars from {memory_data['source']}")
-        debug_logs.append("[Master Prompt] Enrichment complete")
+        debug_logs.append(f"[Master Prompt] Injected {len(memory_block)} chars of holographic context")
         
         return enriched_prompt, debug_logs
     
@@ -801,6 +803,95 @@ class UnifiedMemoryOrchestrator:
                 memory_type=MemoryType.RELATIONSHIP,
                 reason=f"Neo4j storage failed: {str(e)}"
             )
+
+    async def delete_relationship(
+        self,
+        user_id: str,
+        target: str,
+        relationship_type: str
+    ) -> bool:
+        """
+        Delete a relationship from Neo4j
+        """
+        try:
+            if not self.neo4j.is_available:
+                return False
+            
+            async with self.neo4j._driver.session() as session:
+                await session.run(
+                    """
+                    MATCH (u:User {id: $user_id})-[r]->(n)
+                    WHERE type(r) = $type AND n.name = $target
+                    DELETE r
+                    """,
+                    user_id=user_id,
+                    type=relationship_type,
+                    target=target
+                )
+            
+            logger.info(f"🗑️ Deleted relationship: {relationship_type} -> {target}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete relationship: {e}")
+            return False
+
+    async def get_knowledge_graph(self, user_id: str) -> Dict[str, List[Any]]:
+        """
+        Get the full knowledge graph for a user (formatted for frontend visualization)
+        """
+        try:
+            if not self.neo4j.is_available:
+                return {"nodes": [], "links": []}
+            
+            async with self.neo4j._driver.session() as session:
+                result = await session.run(
+                    """
+                    MATCH (u:User {id: $user_id})-[r]->(n)
+                    RETURN 
+                        u.id as source, 
+                        type(r) as label, 
+                        n.name as target, 
+                        labels(n) as target_labels,
+                        id(n) as target_id
+                    LIMIT 100
+                    """,
+                    user_id=user_id
+                )
+                
+                records = await result.data()
+                
+                nodes = []
+                links = []
+                seen_nodes = set()
+                
+                # Always add the user node
+                nodes.append({"id": user_id, "name": "Me", "group": "user", "val": 20})
+                seen_nodes.add(user_id)
+                
+                for record in records:
+                    target_name = record["target"]
+                    target_id = f"node_{target_name}" # Simple ID generation
+                    
+                    if target_id not in seen_nodes:
+                        nodes.append({
+                            "id": target_id,
+                            "name": target_name,
+                            "group": record["target_labels"][0] if record["target_labels"] else "Entity",
+                            "val": 10
+                        })
+                        seen_nodes.add(target_id)
+                    
+                    links.append({
+                        "source": user_id,
+                        "target": target_id,
+                        "label": record["label"]
+                    })
+                
+                return {"nodes": nodes, "links": links}
+                
+        except Exception as e:
+            logger.error(f"Failed to get knowledge graph: {e}")
+            return {"nodes": [], "links": []}
     
     async def _store_to_pinecone(
         self,

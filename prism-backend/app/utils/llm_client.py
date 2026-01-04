@@ -178,3 +178,40 @@ Remember: Be their warm, energetic, caring companion! 🌟"""
         return {"status": "success", "response": chat_completion.choices[0].message.content}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+async def generate_chat_title(user_message: str, ai_response: str = "") -> str:
+    """
+    Generates a concise, 3-5 word title for the chat session.
+    """
+    try:
+        # Use a more specific prompt for punchy, magazine-style titles
+        system_prompt = (
+            "You are a master copywriter. Create a chat title based on the user's message."
+            "\nRULES:"
+            "\n1. Length: 2-5 words MAX."
+            "\n2. Style: Abstract, punchy, magazine header style. Avoid literal descriptions."
+            "\n3. Forbidden words: 'Intro', 'Guide', 'Question', 'Help', 'Chat', 'Conversation', 'About', 'Summary'."
+            "\n4. Example: instead of 'Question about Python Lists', use 'Python List Mastery' or 'The List Trap'."
+            "\n5. If input is simple (e.g. 'hi'), output 'New Beginning'."
+            "\n6. Output ONLY the title text. No quotes."
+        )
+
+        user_content = f"Message: {user_message}"
+        if ai_response:
+             user_content += f"\nContext: {ai_response[:200]}"
+
+        completion = await client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            model="llama-3.1-8b-instant", # Use fast model for instant feel
+            temperature=0.7,
+            max_tokens=15,
+        )
+        
+        title = completion.choices[0].message.content.strip().strip('"')
+        return title
+    except Exception as e:
+        print(f"Title generation failed: {e}")
+        return " ".join(user_message.split()[:4]) if user_message else "New Idea"

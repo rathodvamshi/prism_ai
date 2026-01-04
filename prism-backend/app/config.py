@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     PINECONE_ENVIRONMENT: str = ""              # Pinecone environment (gcp-starter, us-east-1, etc.) - leave empty for serverless
     PINECONE_INDEX_TYPE: str = "serverless"     # "serverless" (cloud-native) or "pod" (legacy)
     MONGO_URI: str = "mongodb://localhost:27017/prism"# MongoDB (users, tasks, analytics)
+    # Timezone for temporal grounding (e.g., Asia/Kolkata)
+    TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
     
     # --------------------------------------------------
     # Celery Configuration (Cloud-Native)
@@ -101,6 +103,16 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         """Check if running in development"""
         return self.ENVIRONMENT.lower() == "development"
+    
+    @property
+    def tzinfo(self):
+        """Return tzinfo from configured timezone."""
+        try:
+            import pytz
+            return pytz.timezone(self.TIMEZONE)
+        except Exception:
+            import datetime as _dt
+            return _dt.timezone.utc
 
     # --------------------------------------------------
     # Validation Methods

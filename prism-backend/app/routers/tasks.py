@@ -695,12 +695,25 @@ async def test_task_email(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Import email service
-    from app.services.email_service import send_professional_email
+    # Import Celery task
+    from app.tasks.email_tasks import send_reminder_email_task
+    from app.core.celery_app import CELERY_AVAILABLE, celery_app
 
     try:
-        # Send test email
-        await send_professional_email(task)
+        # Send test email via Celery (preferred) or direct (fallback)
+        if CELERY_AVAILABLE and celery_app:
+            # Send via Celery for consistency
+            celery_app.send_task(
+                "prism_tasks.send_reminder_email",
+                args=[task_id],
+                queue="email"
+            )
+            message = f"✅ Test email task queued for {task.get('user_email')} (via Celery)"
+        else:
+            # Fallback to direct sending
+            from app.services.email_service import send_professional_email
+            await send_professional_email(task)
+            message = f"✅ Test email sent directly to {task.get('user_email')} (Celery unavailable)"
         
         # Log the test
         now = datetime.utcnow()

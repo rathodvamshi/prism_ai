@@ -1,27 +1,3 @@
-# 💬 CHAT HISTORY OPERATIONS
-async def get_recent_history(user_id: str, limit: int = 10) -> str:
-    """Get recent chat history for a user from Redis."""
-    key = f"CHAT_HISTORY:{user_id}"
-    messages = await redis_client.lrange(key, -limit, -1)
-    history = []
-    for msg_json in messages:
-        try:
-            msg_data = json.loads(msg_json)
-            history.append(f"[{msg_data['role']}]: {msg_data['content']}")
-        except Exception:
-            continue
-    return "\n".join(history)
-
-async def add_message_to_history(user_id: str, role: str, content: str):
-    """Add a message to the user's chat history in Redis."""
-    key = f"CHAT_HISTORY:{user_id}"
-    message_data = {
-        "role": role,
-        "content": content,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    await redis_client.rpush(key, json.dumps(message_data))
-    await redis_client.ltrim(key, -100, -1)  # Keep last 100 messages
 """
 ⚡ REDIS CLOUD (Super Fast Cache)
 
@@ -618,12 +594,9 @@ class AdvancedRedisClient:
         """Get memory processing flag"""
         try:
             key = f"MEMORY_FLAG:{user_id}:{flag_type}"
-            data = await self.client.get(key)
-            return json.loads(data) if data else None
         except Exception as e:
             print(f"Error getting memory flag: {e}")
             return None
-    
     # CLEANUP OPERATIONS
     async def clear_user_memories(self, user_id: str) -> bool:
         """Clear all memory-related Redis entries for a user"""
@@ -647,3 +620,160 @@ class AdvancedRedisClient:
         except Exception as e:
             print(f"Error clearing user memories: {e}")
             return False
+
+# 📜 CHAT HISTORY MANAGEMENT
+async def add_message_to_history(user_id: str, role: str, content: str):
+    """
+    Add message to user's chat history in Redis.
+    Key: CHAT_HISTORY:{userId}
+    """
+    try:
+        key = f"CHAT_HISTORY:{user_id}"
+        message_data = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Push to list
+        await redis_client.rpush(key, json.dumps(message_data))
+        
+        # Keep last 100 messages (Extended from 50)
+        await redis_client.ltrim(key, -100, -1)
+        
+        # Set expiry (30 days - User requested long memory)
+        await redis_client.expire(key, 2592000)
+        
+    except Exception as e:
+        logger.error(f"Failed to add message to history: {e}")
+
+async def get_recent_history(user_id: str, limit: int = 10) -> str:
+    """
+    Get recent chat history formatted for LLM context.
+    Returns string:
+    User: hello
+    Assistant: hi
+    """
+    try:
+        key = f"CHAT_HISTORY:{user_id}"
+        # Get last N messages
+        messages = await redis_client.lrange(key, -limit, -1)
+        
+        formatted_history = []
+        for msg_json in messages:
+            try:
+                msg = json.loads(msg_json)
+                role = msg.get("role", "unknown").capitalize()
+                content = msg.get("content", "")
+                
+                # Normalize roles
+                if role.lower() in ["user", "human"]:
+                    role = "User"
+                elif role.lower() in ["assistant", "ai", "system"]:
+                    role = "Assistant"
+                    
+                formatted_history.append(f"{role}: {content}")
+            except json.JSONDecodeError:
+                continue
+                
+        return "\n\n".join(formatted_history)
+        
+    except Exception as e:
+        logger.error(f"Failed to get recent history: {e}")
+        return ""
+
+# 🧠 MINI-AGENT CONVERSATION MEMORY (MESSAGE-SCOPED)
+async def store_mini_agent_context(user_id: str, message_id: str, question: str, answer: str, ttl_minutes: int = 30):
+    """
+    Store mini-agent clarification for a specific message.
+    Key: MINI_AGENT:{user_id}:{message_id}
+    TTL: 30 minutes (conversation flow expires after inactivity)
+    """
+    try:
+        key = f"MINI_AGENT:{user_id}:{message_id}"
+        
+        # Get existing context or create new
+        existing_data = await redis_client.get(key)
+        if existing_data:
+            context = json.loads(existing_data)
+        else:
+            context = {
+                "message_id": message_id,
+                "clarifications": [],
+                "created_at": datetime.utcnow().isoformat()
+            }
+        
+        # Add new clarification
+        context["clarifications"].append({
+            "question": question,
+            "answer": answer,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        # Keep only last 5 clarifications
+        context["clarifications"] = context["clarifications"][-5:]
+        context["last_updated"] = datetime.utcnow().isoformat()
+        
+        # Store with TTL
+        await redis_client.setex(key, ttl_minutes * 60, json.dumps(context))
+        
+        logger.info(f"✅ Stored mini-agent context for message {message_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to store mini-agent context: {e}")
+        return False
+
+async def get_mini_agent_context(user_id: str, message_id: str) -> dict:
+    """
+    Get mini-agent conversation history for a specific message.
+    Returns: {"clarifications": [{"question": "...", "answer": "..."}], ...}
+    """
+    try:
+        key = f"MINI_AGENT:{user_id}:{message_id}"
+        data = await redis_client.get(key)
+        
+        if data:
+            context = json.loads(data)
+            logger.info(f"✅ Retrieved mini-agent context for message {message_id} ({len(context.get('clarifications', []))} clarifications)")
+            return context
+        
+        return {"clarifications": []}
+        
+    except Exception as e:
+        logger.error(f"Failed to get mini-agent context: {e}")
+        return {"clarifications": []}
+
+async def format_mini_agent_history(user_id: str, message_id: str) -> str:
+    """
+    Format mini-agent conversation history for LLM context.
+    Returns formatted string of previous Q&A pairs.
+    """
+    try:
+        context = await get_mini_agent_context(user_id, message_id)
+        clarifications = context.get("clarifications", [])
+        
+        if not clarifications:
+            return ""
+        
+        # Format as conversation
+        formatted = []
+        for clarification in clarifications:
+            q = clarification.get("question", "")
+            a = clarification.get("answer", "")
+            formatted.append(f"User: {q}\nAssistant: {a}")
+        
+        return "\n\n".join(formatted)
+        
+    except Exception as e:
+        logger.error(f"Failed to format mini-agent history: {e}")
+        return ""
+
+async def clear_mini_agent_context(user_id: str, message_id: str):
+    """Clear mini-agent conversation for a specific message"""
+    try:
+        key = f"MINI_AGENT:{user_id}:{message_id}"
+        await redis_client.delete(key)
+        logger.info(f"✅ Cleared mini-agent context for message {message_id}")
+    except Exception as e:
+        logger.error(f"Failed to clear mini-agent context: {e}")

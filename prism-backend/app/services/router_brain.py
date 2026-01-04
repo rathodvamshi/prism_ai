@@ -134,7 +134,7 @@ async def process_chat(request: ChatRequest):
             )
 
         elif intent == "email_service":
-            reply = await send_email_notification(request.message)
+            # Use Celery task for email notifications\n            try:\n                from app.tasks.email_tasks import send_email_notification_task\n                from app.core.celery_app import CELERY_AVAILABLE, celery_app\n                \n                if CELERY_AVAILABLE and celery_app:\n                    # Send via Celery task (preferred)\n                    celery_app.send_task(\n                        \"prism_tasks.send_email_notification\",\n                        args=[request.message],\n                        queue=\"email\"\n                    )\n                    reply = \"\u2705 Email notification queued successfully! It will be processed shortly.\"\n                else:\n                    # Fallback to direct sending if Celery unavailable\n                    reply = await send_email_notification(request.message)\n                    \n            except Exception as e:\n                reply = f\"\u274c Failed to queue email notification: {str(e)}\"
 
         else:
             reply = await generate_response(

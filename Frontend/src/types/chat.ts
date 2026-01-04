@@ -47,6 +47,8 @@ export interface Highlight {
 export interface MiniAgent {
   id: string;  // Frontend ID (maps to agentId from backend)
   messageId: string;  // The Main Agent message this Mini Agent is tied to
+  sessionId?: string; // The session ID this Mini Agent belongs to (optional for backwards compatibility)
+  title?: string; // Title of the Mini Agent thread
   selectedText: string;  // The text snippet (editable/removable in UI)
   messages: MiniAgentMessage[];  // Isolated conversation history
   createdAt: Date;

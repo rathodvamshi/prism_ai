@@ -46,8 +46,11 @@ class CreateMiniAgentThreadRequest(BaseModel):
     title: Optional[str] = None
 
 class AddMiniAgentMessageRequest(BaseModel):
-    threadId: str
     text: str
+    message_id: Optional[str] = None  # Message this question refers to
+
+class UpdateMiniAgentSnippetRequest(BaseModel):
+    selectedText: str
 
 class ShareConversationRequest(BaseModel):
     sessionId: str
@@ -58,5 +61,5 @@ class HighlightResponse(BaseModel):
     success: bool = True
 
 class MiniAgentResponse(BaseModel):
-    threads: List[MiniAgentThreadData]
+    miniAgents: List[MiniAgentThreadData]
     success: bool = True

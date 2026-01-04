@@ -543,7 +543,25 @@ async def process_request(
                 )
 
         elif intent == "email_service":
-            direct_reply = await send_email_notification(message)
+            # Use Celery task for email notifications
+            try:
+                from app.tasks.email_tasks import send_email_notification_task
+                from app.core.celery_app import CELERY_AVAILABLE, celery_app
+                
+                if CELERY_AVAILABLE and celery_app:
+                    # Send via Celery task (preferred)
+                    celery_app.send_task(
+                        "prism_tasks.send_email_notification",
+                        args=[message],
+                        queue="email"
+                    )
+                    direct_reply = "✅ Email notification queued successfully! It will be processed shortly."
+                else:
+                    # Fallback to direct sending if Celery unavailable
+                    direct_reply = await send_email_notification(message)
+                    
+            except Exception as e:
+                direct_reply = f"❌ Failed to queue email notification: {str(e)}"
 
         else:
             # general_chat: no extra context
@@ -553,12 +571,18 @@ async def process_request(
         direct_reply = f"I'm having trouble routing your request right now: {exc}"
         _agent_log("H3", "router_service.py:process_request", "exception", {"error": str(exc)})
 
+    # Unify legacy intent strings to canonical catalog
+    mapping = {
+        "task_management": "task_create",
+        "task_confirmation": "task_create_confirmation",
+    }
+    canonical_intent = mapping.get(intent, intent)
     result = {
-        "intent": intent,
+        "intent": canonical_intent,
         "context": _truncate(context_data) if isinstance(context_data, str) else _truncate(str(context_data)),
         "action_payload": action_payload,
         "direct_reply": direct_reply,
     }
-    _agent_log("H3", "router_service.py:process_request", "return", {"intent": intent, "has_direct_reply": bool(direct_reply), "has_action_payload": bool(action_payload)})
+    _agent_log("H3", "router_service.py:process_request", "return", {"intent": canonical_intent, "has_direct_reply": bool(direct_reply), "has_action_payload": bool(action_payload)})
     return result
 

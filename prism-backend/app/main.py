@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 from app.routers import health_llm
 from app.routers import highlights
 from app.routers import user, auth, chat, tasks
+from app.utils.preprocess import preprocess as safe_preprocess
 from app.utils.auth import get_current_user_from_session
 
 # Scheduler
@@ -64,12 +65,15 @@ async def lifespan(app: FastAPI):
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.config import settings as app_settings
         from app.services.user_resolution_service import initialize_user_resolution_service
-        from app.db.mongo_client import _sanitize_mongo_uri
+        from app.db.mongo_client import _sanitize_mongo_uri, db_instance
         
-        # Sanitize MongoDB URI to handle special characters in username/password
-        sanitized_uri = _sanitize_mongo_uri(app_settings.MONGO_URI)
-        mongo_client = AsyncIOMotorClient(sanitized_uri)
-        user_resolution_service = initialize_user_resolution_service(mongo_client)
+        # Reuse the global connection pool (Singleton)
+        # sanitized_uri = ... (not needed for existing client)
+        
+        if not db_instance.client:
+             raise RuntimeError("MongoDB client not initialized before User Resolution Service")
+
+        user_resolution_service = initialize_user_resolution_service(db_instance.client)
         
         # Enforce unique email index
         await user_resolution_service.ensure_unique_index()
@@ -256,6 +260,11 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
+# 🚀 SCALABILITY: GZip Compression
+# Compresses responses > 500 bytes (e.g. large chat history)
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 
 # Static files for audio/images (allow missing dir in dev)
 app.mount("/static", StaticFiles(directory="static", check_dir=False), name="static")
@@ -400,15 +409,21 @@ async def reconnect(user: dict = Depends(get_current_user_from_session)):
 async def send_message(message_data: dict, user: dict = Depends(get_current_user_from_session)):
     """Simple chat endpoint for testing authentication integration"""
     user_message = message_data.get("message", "")
+    pre = safe_preprocess(user_message)
+    working_text = pre["working_text"]
     user_id = user.user_id or "unknown"
     
     # Simple echo response with user context
     display_name = user.name or user.email or "User"
-    response = f"Hello {display_name}! You said: {user_message}"
+    response = f"Hello {display_name}! You said: {working_text}"
     
     return {
         "response": response,
         "user_id": user_id,
+        "preprocessing": {
+            "language_hint": pre.get("language_hint"),
+            "entities": pre.get("entities"),
+        },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -498,7 +513,7 @@ async def _startup():
         await db.user_tasks.create_index("taskId", unique=True)
 
         # Mini-agent threads: unique per user and thread
-        await db.miniagent_threads.create_index([
+        await db.mini_agent_threads.create_index([
             ("threadId", 1), ("user_id", 1)
         ], unique=True)
 
@@ -912,11 +927,8 @@ async def _startup():
 
 
         # Mini-agent threads: unique per user and thread
-
-        await db.miniagent_threads.create_index([
-
+        await db.mini_agent_threads.create_index([
             ("threadId", 1), ("user_id", 1)
-
         ], unique=True)
 
 

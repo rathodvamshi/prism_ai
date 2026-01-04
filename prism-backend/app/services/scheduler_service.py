@@ -6,7 +6,6 @@ from calendar import monthrange
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.db.mongo_client import tasks_collection
-from app.services.email_service import send_professional_email
 from app.services.pending_memory_service import sync_pending_graph_memories
 
 scheduler = AsyncIOScheduler()
@@ -36,16 +35,32 @@ async def _execute_task(task: dict):
         return
     
     print(f"🔔 Executing task {task_id}: {description}")
-    print(f"📧 Sending email to: {user_email}")
+    print(f"📧 Scheduling email via Celery for: {user_email}")
     
-    # Send email notification
+    # Schedule email via Celery (immediate execution)
     email_success = False
     try:
-        await send_professional_email(task)
-        email_success = True
-        print(f"✅ Email sent successfully for task {task_id}")
+        from app.tasks.email_tasks import send_reminder_email_task
+        from app.core.celery_app import CELERY_AVAILABLE, celery_app
+        
+        if CELERY_AVAILABLE and celery_app:
+            # Send immediately via Celery
+            celery_app.send_task(
+                "prism_tasks.send_reminder_email",
+                args=[str(task_id)],
+                queue="email"
+            )
+            email_success = True
+            print(f"✅ Email task queued successfully for task {task_id}")
+        else:
+            # Fallback to direct sending if Celery unavailable
+            from app.services.email_service import send_professional_email
+            await send_professional_email(task)
+            email_success = True
+            print(f"✅ Email sent directly for task {task_id} (Celery unavailable)")
+            
     except Exception as e:
-        print(f"❌ Email send failed for task {task_id}: {e}")
+        print(f"❌ Email scheduling failed for task {task_id}: {e}")
         # Log error but continue with task completion
         await tasks_collection.update_one(
             {"_id": task_id},

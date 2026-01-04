@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 interface HighlightsPanelProps {
   highlights: Highlight[];
@@ -25,8 +26,9 @@ export const HighlightsPanel = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [panelWidth, setPanelWidth] = useState(320); // Default 320px (20rem)
+  const [panelWidth, setPanelWidth] = useState(350); // Default 350px
   const [isResizing, setIsResizing] = useState(false);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -36,7 +38,7 @@ export const HighlightsPanel = ({
     if (color.startsWith('#')) {
       return color;
     }
-    
+
     // Legacy color name mapping (for backwards compatibility)
     const colorMap: Record<string, string> = {
       yellow: "#FFD93D",
@@ -53,7 +55,7 @@ export const HighlightsPanel = ({
       amber: "#FDE68A",
       mint: "#A7F3D0",
     };
-    
+
     return colorMap[color.toLowerCase()] || "#FFD93D"; // Default to yellow if not found
   };
 
@@ -68,6 +70,24 @@ export const HighlightsPanel = ({
   const handleStartEdit = (highlight: Highlight) => {
     setEditingId(highlight.id);
     setNoteText(highlight.note || "");
+  };
+
+  const handleDeleteHighlight = async (highlightId: string) => {
+    // Add to deleting set for loading state
+    setDeletingIds(prev => new Set(prev).add(highlightId));
+    
+    try {
+      await onDeleteHighlight(highlightId);
+      // The highlight will be removed from the list via store update
+      // No need to manually remove from deletingIds as component will re-render
+    } catch (error) {
+      // Remove from deleting set if error occurs
+      setDeletingIds(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(highlightId);
+        return newSet;
+      });
+    }
   };
 
   useEffect(() => {
@@ -85,10 +105,11 @@ export const HighlightsPanel = ({
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
-      
+
       const newWidth = window.innerWidth - e.clientX;
-      // Min width: 280px, Max width: 600px
-      const clampedWidth = Math.max(280, Math.min(600, newWidth));
+      // Min width: 300px, Max width: 50% of screen or 600px
+      const maxWidth = Math.min(600, window.innerWidth * 0.5);
+      const clampedWidth = Math.max(300, Math.min(maxWidth, newWidth));
       setPanelWidth(clampedWidth);
     };
 
@@ -113,9 +134,9 @@ export const HighlightsPanel = ({
       if (!searchQuery) return true;
       const query = searchQuery.toLowerCase();
       // Search by text content or color
-      return h.text.toLowerCase().includes(query) || 
-             h.color.toLowerCase().includes(query) ||
-             getDisplayColor(h.color).toLowerCase().includes(query);
+      return h.text.toLowerCase().includes(query) ||
+        h.color.toLowerCase().includes(query) ||
+        getDisplayColor(h.color).toLowerCase().includes(query);
     })
     .reverse(); // Reverse to show newest first
 
@@ -205,7 +226,7 @@ export const HighlightsPanel = ({
                   <div className="flex items-start gap-2 mb-3">
                     <div
                       className="flex-1 px-3 py-2 rounded-lg text-sm font-medium leading-relaxed shadow-sm"
-                      style={{ 
+                      style={{
                         backgroundColor: getDisplayColor(highlight.color),
                         color: '#000000',
                         border: '1px solid rgba(0,0,0,0.1)'
@@ -213,20 +234,24 @@ export const HighlightsPanel = ({
                     >
                       {highlight.text}
                     </div>
-                    
+
                     {/* Delete Highlight Button */}
                     <TooltipProvider delayDuration={200}>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <button
-                            onClick={() => onDeleteHighlight(highlight.id)}
-                            className="p-1.5 rounded-lg hover:bg-destructive/20 text-destructive transition-colors shrink-0"
+                            onClick={() => handleDeleteHighlight(highlight.id)}
+                            disabled={deletingIds.has(highlight.id)}
+                            className="p-1.5 rounded-lg hover:bg-destructive/20 text-destructive transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className={cn(
+                              "w-3.5 h-3.5",
+                              deletingIds.has(highlight.id) && "animate-pulse"
+                            )} />
                           </button>
                         </TooltipTrigger>
                         <TooltipContent side="left" className="text-xs py-1 px-2">
-                          Delete
+                          {deletingIds.has(highlight.id) ? "Deleting..." : "Delete"}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
@@ -318,3 +343,5 @@ export const HighlightsPanel = ({
     </AnimatePresence>
   );
 };
+
+export default HighlightsPanel;

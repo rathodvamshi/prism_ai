@@ -35,11 +35,11 @@ class ConnectionPoolConfig:
     # MongoDB Connection Pool
     MONGODB_MIN_POOL_SIZE = 10
     MONGODB_MAX_POOL_SIZE = 100
-    MONGODB_MAX_IDLE_TIME_MS = 60000  # 60 seconds
-    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 5000  # 5 seconds
+    MONGODB_MAX_IDLE_TIME_MS = 300000  # 5 minutes
+    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 30000  # 30 seconds
     
     # Redis Connection Pool
-    REDIS_MAX_CONNECTIONS = 50
+    REDIS_MAX_CONNECTIONS = 100
     REDIS_SOCKET_TIMEOUT = 5  # seconds
     REDIS_SOCKET_CONNECT_TIMEOUT = 5  # seconds
     REDIS_SOCKET_KEEPALIVE = True

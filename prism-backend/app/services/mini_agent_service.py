@@ -233,15 +233,46 @@ Think deeply about their confusion, then respond in a SHORT, SWEET, CLEAR way.
 
 Your thoughtful response:"""
             
+            
             # Call AI with dynamically generated system prompt
             logger.info(f"🤔 Sub-Brain thinking about: {actual_question[:50]}...")
+            logger.info(f"📤 System prompt length: {len(system_prompt)} chars")
+            logger.info(f"📤 User prompt length: {len(user_prompt)} chars")
+            logger.info(f"📤 System prompt preview: {system_prompt[:200]}...")
+            logger.info(f"📤 User prompt preview: {user_prompt[:200]}...")
+            
+            print(f"\n{'='*60}")
+            print(f"🤖 CALLING GROQ LLM FOR MINI-AGENT")
+            print(f"{'='*60}")
+            print(f"System Prompt: {system_prompt[:300]}...")
+            print(f"User Prompt: {user_prompt[:300]}...")
+            print(f"{'='*60}\n")
+            
             response = await groq_llm_response(user_prompt, system_prompt)
             
+            print(f"\n{'='*60}")
+            print(f"✅ GROQ LLM RESPONSE RECEIVED")
+            print(f"{'='*60}")
+            print(f"Response type: {type(response)}")
+            print(f"Response length: {len(response) if response else 0}")
+            print(f"Response preview: {response[:200] if response else 'EMPTY!'}")
+            print(f"{'='*60}\n")
+            
+            # Validate response is not empty
+            if not response or not response.strip():
+                logger.error(f"❌ LLM returned empty response!")
+                logger.error(f"❌ System prompt was: {system_prompt[:500]}")
+                logger.error(f"❌ User prompt was: {user_prompt[:500]}")
+                raise Exception("LLM returned empty response")
+            
             logger.info(f"✅ Sub-Brain generated response for message {message_id}")
+            logger.info(f"✅ Response length: {len(response)} characters")
             return response
             
         except Exception as e:
             logger.error(f"❌ Error in Sub-Brain response generation: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             raise Exception(f"Sub-Brain processing failed: {str(e)}")
     
     @staticmethod

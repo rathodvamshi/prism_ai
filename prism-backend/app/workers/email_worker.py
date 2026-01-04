@@ -13,7 +13,7 @@ from app.db.redis_client import (
     EMAIL_LOCK_KEY_TEMPLATE,
 )
 from app.db.mongo_client import tasks_collection
-from app.services.email_service import send_professional_email, send_otp_email_direct
+from app.services.email_service import send_otp_email_direct
 from app.config import settings
 
 # Backwards-compatible aliases matching the product brief
@@ -113,20 +113,65 @@ async def process_task(task_id: str):
             await redis_client.zrem(QUEUE_SCHEDULED, task_id)
             return
 
-        print(f"📧 Sending Reminder for: {task.get('description')}")
-        await send_professional_email(task)
-
-        # 🚀 Part 15: Atomic update - only update if status is still "pending"
-        result = await tasks_collection.update_one(
-            {"_id": task["_id"], "status": "pending"},  # Atomic check: only update if still pending
-            {
-                "$set": {
-                    "email_status": "sent",
-                    "email_sent_at": datetime.now(timezone.utc),
-                    "status": "completed",
-                }
-            },
-        )
+        print(f"📧 Scheduling email via Celery for: {task.get('description')}")
+        
+        # Use Celery task for consistency (immediate execution)
+        try:
+            from app.tasks.email_tasks import send_reminder_email_task
+            from app.core.celery_app import CELERY_AVAILABLE, celery_app
+            
+            if CELERY_AVAILABLE and celery_app:
+                # Send immediately via Celery
+                celery_app.send_task(
+                    "prism_tasks.send_reminder_email",
+                    args=[task_id],
+                    queue="email"
+                )
+                print(f"✅ Email task queued for {task_id}")
+                
+                # Mark as email_queued (Celery will update to sent when complete)
+                await tasks_collection.update_one(
+                    {"_id": task["_id"], "status": "pending"},
+                    {
+                        "$set": {
+                            "email_status": "queued",
+                            "email_queued_at": datetime.now(timezone.utc),
+                            # Don't mark as completed yet - let Celery do that
+                        }
+                    },
+                )
+                
+            else:
+                # Fallback to direct sending if Celery unavailable
+                from app.services.email_service import send_professional_email
+                await send_professional_email(task)
+                
+                # Mark as completed immediately for direct sending
+                await tasks_collection.update_one(
+                    {"_id": task["_id"], "status": "pending"},
+                    {
+                        "$set": {
+                            "email_status": "sent",
+                            "email_sent_at": datetime.now(timezone.utc),
+                            "status": "completed",
+                        }
+                    },
+                )
+                
+        except Exception as e:
+            print(f"❌ Email processing failed for {task_id}: {e}")
+            # Mark as failed
+            await tasks_collection.update_one(
+                {"_id": task["_id"]},
+                {
+                    "$set": {
+                        "email_status": "failed",
+                        "email_error": str(e),
+                        "status": "failed",
+                        "updated_at": datetime.now(timezone.utc)
+                    }
+                },
+            )
 
         if result.modified_count > 0:
             print(f"✅ Task {task_id} marked as sent")

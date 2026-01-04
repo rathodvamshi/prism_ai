@@ -236,7 +236,6 @@ async def simple_login(payload: LoginRequest, response: Response, request: Reque
             httponly=True,
             secure=cookie_secure,
             samesite=cookie_samesite,  # type: ignore[arg-type]
-            domain="127.0.0.1",
             path="/",
             max_age=60 * 60 * 24 * getattr(settings, "SESSION_EXPIRE_DAYS", 30)
         )
@@ -596,24 +595,37 @@ async def send_otp_email(email: str, otp: str):
             print("⚠️ Email sending skipped - No sender email configured")
             return {"success": False, "error": "Sender email not configured"}
         
-        # ☁️ Use the professional email service for OTP
-        from app.services.email_service import send_otp_email_direct
-        
+        # ☁️ Use Celery task for OTP email sending
         try:
-            # Use the dedicated OTP email function
-            email_sent = await send_otp_email_direct(
-                to_email=email,
-                otp_code=otp,
-                subject="PRISM AI Verification Code"
-            )
+            from app.tasks.email_tasks import send_otp_email_task
+            from app.core.celery_app import CELERY_AVAILABLE, celery_app
             
-            if email_sent:
-                logger.info(f"✅ OTP email sent successfully to {email}")
-                print(f"✅ Email sent successfully to {email} via SendGrid")
-                return {"success": True, "message": f"Email sent successfully to {email}"}
+            if CELERY_AVAILABLE and celery_app:
+                # Send OTP via Celery task (preferred)
+                celery_app.send_task(
+                    "prism_tasks.send_otp_email",
+                    args=[email, otp, "PRISM AI Verification Code"],
+                    queue="email"
+                )
+                logger.info(f"✅ OTP email task queued successfully for {email}")
+                print(f"✅ OTP email queued for {email} via Celery")
+                return {"success": True, "message": f"OTP email queued for {email}"}
             else:
-                logger.warning(f"⚠️ OTP email service returned False for {email}")
-                return {"success": False, "error": "Email service returned False"}
+                # Fallback to direct sending if Celery unavailable
+                from app.services.email_service import send_otp_email_direct
+                email_sent = await send_otp_email_direct(
+                    to_email=email,
+                    otp_code=otp,
+                    subject="PRISM AI Verification Code"
+                )
+                
+                if email_sent:
+                    logger.info(f"✅ OTP email sent directly to {email} (Celery unavailable)")
+                    print(f"✅ Email sent directly to {email} via SendGrid")
+                    return {"success": True, "message": f"Email sent directly to {email}"}
+                else:
+                    logger.warning(f"⚠️ OTP email service returned False for {email}")
+                    return {"success": False, "error": "Email service returned False"}
                 
         except Exception as service_error:
             logger.error(f"❌ OTP email service error: {service_error}")
@@ -772,7 +784,6 @@ async def verify_otp(payload: OTPVerify, response: Response, request: Request):
             httponly=True,
             secure=cookie_secure,
             samesite=cookie_samesite,  # type: ignore[arg-type]
-            domain="127.0.0.1",
             path="/",
             max_age=60 * 60 * 24 * getattr(settings, "SESSION_EXPIRE_DAYS", 30)
         )

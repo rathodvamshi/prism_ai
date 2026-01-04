@@ -34,9 +34,13 @@ import {
   Wand2,
   Keyboard,
   Sparkles,
+  Brain,
+  Bell,
+  Lock,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useCodeBeautifier } from "@/hooks/useCodeBeautifier";
+import { MemoryManager } from "@/components/settings/MemoryManager";
 
 
 interface SettingsModalProps {
@@ -57,7 +61,7 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
     isEnabled: beautifierEnabled,
     toggle: toggleBeautifier,
   } = useCodeBeautifier();
-  
+
   const [tab, setTab] = useState<string>(defaultTab);
   const tabsRef = useRef<HTMLDivElement>(null);
   const [apiKey, setApiKey] = useState("");
@@ -147,30 +151,42 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
               ref={tabsRef}
               className="w-full flex overflow-x-auto no-scrollbar gap-2 p-1 -mx-1 snap-x snap-mandatory scroll-smooth sm:grid sm:grid-cols-6 sm:gap-1 sm:p-0 sm:mx-0"
             >
-            <TabsTrigger value="general" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <User className="w-3.5 h-3.5 mr-1" />
-              General
-            </TabsTrigger>
-            <TabsTrigger value="api" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <Key className="w-3.5 h-3.5 mr-1" />
-              API
-            </TabsTrigger>
-            <TabsTrigger value="subscription" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <CreditCard className="w-3.5 h-3.5 mr-1" />
-              Plan
-            </TabsTrigger>
-            <TabsTrigger value="export" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <Download className="w-3.5 h-3.5 mr-1" />
-              Export
-            </TabsTrigger>
-            <TabsTrigger value="language" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <Globe className="w-3.5 h-3.5 mr-1" />
-              Language
-            </TabsTrigger>
-            <TabsTrigger value="beautifier" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
-              <Sparkles className="w-3.5 h-3.5 mr-1" />
-              Code
-            </TabsTrigger>
+              <TabsTrigger value="general" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <User className="w-3.5 h-3.5 mr-1" />
+                General
+              </TabsTrigger>
+              <TabsTrigger value="api" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Key className="w-3.5 h-3.5 mr-1" />
+                API
+              </TabsTrigger>
+              <TabsTrigger value="subscription" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <CreditCard className="w-3.5 h-3.5 mr-1" />
+                Plan
+              </TabsTrigger>
+              <TabsTrigger value="memory" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Brain className="w-3.5 h-3.5 mr-1" />
+                Memory
+              </TabsTrigger>
+              <TabsTrigger value="notifications" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Bell className="w-3.5 h-3.5 mr-1" />
+                Notifs
+              </TabsTrigger>
+              <TabsTrigger value="export" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Download className="w-3.5 h-3.5 mr-1" />
+                Export
+              </TabsTrigger>
+              <TabsTrigger value="language" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Globe className="w-3.5 h-3.5 mr-1" />
+                Language
+              </TabsTrigger>
+              <TabsTrigger value="beautifier" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Sparkles className="w-3.5 h-3.5 mr-1" />
+                Code
+              </TabsTrigger>
+              <TabsTrigger value="privacy" className="text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Lock className="w-3.5 h-3.5 mr-1" />
+                Privacy
+              </TabsTrigger>
             </TabsList>
             {/* Edge fades for mobile */}
             <div className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-card to-transparent sm:hidden" />
@@ -371,6 +387,26 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
             </div>
           </TabsContent>
 
+          <TabsContent value="memory" className="space-y-4 mt-4">
+            <MemoryManager />
+          </TabsContent>
+
+          <TabsContent value="notifications" className="space-y-4 mt-4">
+            <div className="p-4 sm:p-5 bg-secondary/50 rounded-xl border border-border">
+              <h4 className="font-medium text-sm mb-2">Notifications</h4>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">Message notifications</span>
+                  <Switch />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">Weekly summary</span>
+                  <Switch />
+                </div>
+              </div>
+            </div>
+          </TabsContent>
+
           <TabsContent value="export" className="space-y-4 mt-4">
             <div className="p-4 sm:p-5 bg-secondary/50 rounded-xl border border-border">
               <h4 className="font-medium text-sm mb-2">Export Your Data</h4>
@@ -450,8 +486,8 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
                           {beautifierSettings.indentSize} spaces
                         </span>
                       </div>
-                      <Select 
-                        value={beautifierSettings.indentSize.toString()} 
+                      <Select
+                        value={beautifierSettings.indentSize.toString()}
                         onValueChange={(value) => updateBeautifierSettings({ indentSize: parseInt(value) })}
                       >
                         <SelectTrigger>
@@ -473,8 +509,8 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
                           {beautifierSettings.maxLineLength} chars
                         </span>
                       </div>
-                      <Select 
-                        value={beautifierSettings.maxLineLength?.toString() || "80"} 
+                      <Select
+                        value={beautifierSettings.maxLineLength?.toString() || "80"}
                         onValueChange={(value) => updateBeautifierSettings({ maxLineLength: parseInt(value) })}
                       >
                         <SelectTrigger>
@@ -522,7 +558,7 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
                       <User className="w-4 h-4" />
                       <h4 className="font-medium text-sm">Statistics</h4>
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <div className="space-y-1">
                         <div className="text-muted-foreground text-xs">Total Blocks</div>
@@ -573,23 +609,23 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
                       <Sparkles className="w-4 h-4 text-yellow-500" />
                       <h4 className="font-medium text-sm">Live Preview</h4>
                     </div>
-                    
+
                     <div className="space-y-3">
                       <div>
                         <div className="text-xs text-muted-foreground mb-1">BEFORE (Messy AI Output)</div>
                         <pre className="text-xs bg-muted/50 p-2 rounded overflow-auto font-mono">
-{`function test(x,y){
+                          {`function test(x,y){
 if(x>y)return x+y;
 else{let r=x*y;
 for(let i=0;i<10;i++){r+=i;}
 return r;}}`}
                         </pre>
                       </div>
-                      
+
                       <div>
                         <div className="text-xs text-muted-foreground mb-1">AFTER ✨ (Auto-Beautified)</div>
                         <pre className="text-xs bg-green-500/10 border border-green-500/20 p-2 rounded overflow-auto font-mono">
-{`function test(x, y) {
+                          {`function test(x, y) {
   if (x > y) return x + y;
   else {
     let r = x * y;
@@ -607,6 +643,23 @@ return r;}}`}
               )}
             </AnimatePresence>
           </TabsContent>
+
+          <TabsContent value="privacy" className="space-y-4 mt-4">
+            <div className="p-4 sm:p-5 bg-secondary/50 rounded-xl border border-border">
+              <h4 className="font-medium text-sm mb-2">Privacy</h4>
+              <p className="text-xs text-muted-foreground mb-4">Control what data is stored and how it is used.</p>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">Store chat history</span>
+                  <Switch />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">Personalization</span>
+                  <Switch />
+                </div>
+              </div>
+            </div>
+          </TabsContent>
         </Tabs>
 
         {/* Danger Zone */}
@@ -617,6 +670,8 @@ return r;}}`}
           </Button>
         </div>
       </DialogContent>
-    </Dialog>
+    </Dialog >
   );
 };
+
+export default SettingsModal;

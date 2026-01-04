@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Paperclip,
   ChevronDown,
@@ -47,16 +47,36 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
   const driveInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
 
-  // Auto-resize textarea smoothly
-  useEffect(() => {
-    if (textareaRef.current) {
-      // Reset height to get accurate scrollHeight
-      textareaRef.current.style.height = "auto";
-      const newHeight = Math.min(textareaRef.current.scrollHeight, 200);
-      textareaRef.current.style.height = `${newHeight}px`;
-      textareaRef.current.style.transition = "height 0.1s ease-out";
-    }
-  }, [input]);
+  // Auto-resize when text reaches width and grows up to 200px
+  const autoResize = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    // Reset height to get accurate scrollHeight
+    textarea.style.height = "auto";
+
+    // Calculate new height - starts growing when text wraps
+    const minHeight = 52;
+    const maxHeight = 200;
+
+    // Get the scroll height (actual content height)
+    let newHeight = Math.max(textarea.scrollHeight, minHeight);
+
+    // Clamp to max height
+    newHeight = Math.min(newHeight, maxHeight);
+
+    // Apply the height
+    textarea.style.height = `${newHeight}px`;
+  }, []);
+
+  // Handle input changes with auto-resize
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    // Trigger resize after state update
+    requestAnimationFrame(() => {
+      autoResize();
+    });
+  }, [autoResize]);
 
   // Clear and focus on new session
   useEffect(() => {
@@ -65,30 +85,37 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
       setAttachments([]);
       if (textareaRef.current) {
         textareaRef.current.focus();
-        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = "52px";
       }
     }
   }, [resetSignal]);
 
+  // Initial setup
+  useEffect(() => {
+    autoResize();
+  }, [autoResize]);
+
   const handleSubmit = () => {
     if ((!input.trim() && attachments.length === 0) || isLoading) return;
+
     onSend(input, attachments);
     setInput("");
+
+    // Clean up attachment URLs
     attachments.forEach((a) => {
       if (a.url?.startsWith("blob:")) URL.revokeObjectURL(a.url);
       if (a.thumbUrl?.startsWith("blob:")) URL.revokeObjectURL(a.thumbUrl);
     });
     setAttachments([]);
-    
-    // Smoothly reset textarea height
+
+    // Reset textarea height and focus
     if (textareaRef.current) {
-      textareaRef.current.style.transition = "height 0.15s ease-out";
-      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = "52px";
       textareaRef.current.focus();
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
@@ -110,7 +137,7 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
         // @ts-ignore
         return await createImageBitmap(blob);
       }
-    } catch {}
+    } catch { }
     return new Promise<HTMLImageElement>((resolve, reject) => {
       const img = document.createElement('img');
       img.onload = () => resolve(img);
@@ -188,158 +215,212 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
     setViewerOpen(true);
   };
 
+  const viewAttachment = (index: number) => {
+    openViewer(index);
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="shrink-0 p-2 sm:p-3 md:p-4 bg-background border-t border-transparent"
+      className="shrink-0 bg-background/95 backdrop-blur-sm sticky bottom-0 left-0 right-0 z-10 w-full"
     >
-      <div className="max-w-3xl mx-auto w-full">
+      <div className="w-full max-w-[800px] mx-auto px-4 lg:px-0 pb-4">
         {/* Attachment Previews */}
         {attachments.length > 0 && (
-          <div className="mb-2">
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">Attachments ({attachments.length})</span>
-              <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => {
-                attachments.forEach((a) => { if (a.url.startsWith("blob:")) URL.revokeObjectURL(a.url); });
-                setAttachments([]);
-              }}>Clear all</button>
+          <div className="mb-2 px-1">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground/80">Attachments ({attachments.length})</span>
+              <button
+                type="button"
+                className="text-xs text-muted-foreground hover:text-destructive transition-colors px-2 py-0.5 rounded-full hover:bg-muted"
+                onClick={() => {
+                  attachments.forEach((a) => { if (a.url.startsWith("blob:")) URL.revokeObjectURL(a.url); });
+                  setAttachments([]);
+                }}
+              >
+                Clear all
+              </button>
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-1.5 sm:gap-2">
-            {attachments.map((a, i) => (
-              <div key={a.id} className="relative group">
-                {a.type === "image" ? (
-                  <button type="button" onClick={() => openViewer(i)} className="block w-full aspect-square overflow-hidden rounded-lg bg-secondary">
-                    <img src={a.url} alt={a.name} className="w-full h-full object-cover" />
+            <div className="flex gap-2 pb-2 overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/20">
+              {attachments.map((a) => (
+                <div key={a.id} className="relative group shrink-0">
+                  {a.type === "image" ? (
+                    <button type="button" onClick={() => viewAttachment(attachments.findIndex(x => x.id === a.id))} className="relative overflow-hidden rounded-xl border border-border/50 shadow-sm transition-transform active:scale-95">
+                      <img src={a.url} alt={a.name} className="w-16 h-16 object-cover" />
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+                    </button>
+                  ) : (
+                    <div className="w-16 h-16 rounded-xl bg-card border border-border/50 shadow-sm flex flex-col items-center justify-center p-1 gap-1 text-center">
+                      <File className="w-5 h-5 text-muted-foreground" />
+                      <span className="text-[9px] text-muted-foreground/80 leading-tight line-clamp-2 px-0.5 break-all">{a.name}</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                    className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-destructive text-destructive-foreground text-[10px] flex items-center justify-center shadow-sm opacity-0 group-hover:opacity-100 transition-opacity scale-90 hover:scale-100"
+                    aria-label="Remove"
+                  >
+                    ×
                   </button>
-                ) : (
-                  <div className="w-full aspect-square rounded-lg bg-secondary border border-border flex items-center justify-center text-[10px] text-muted-foreground p-2 text-center break-words">
-                    <File className="w-4 h-4 mb-1" />
-                    <span className="line-clamp-3">{a.name}</span>
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
-                  className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-background border border-border text-foreground text-[10px] flex items-center justify-center shadow-card"
-                  aria-label="Remove attachment"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+                </div>
+              ))}
             </div>
           </div>
         )}
-        <div
-          className="relative bg-card rounded-xl sm:rounded-2xl shadow-soft overflow-hidden"
-          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
-          onDrop={(e) => { e.preventDefault(); onPickFiles(e.dataTransfer.files); }}
-        >
-          <div className="flex items-end gap-1.5 sm:gap-2 p-1.5 sm:p-2">
-            {/* Left Actions */}
-            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-              {/* Hidden pickers */}
-              <input ref={galleryInputRef} type="file" multiple className="hidden" accept="image/*" onChange={(e) => onPickFiles(e.target.files)} />
-              <input ref={filesInputRef} type="file" multiple className="hidden" onChange={(e) => onPickFiles(e.target.files)} accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip,application/x-zip-compressed,application/x-7z-compressed,text/plain,application/json" />
-              <input ref={cameraInputRef} type="file" className="hidden" accept="image/*" capture="environment" onChange={(e) => onPickFiles(e.target.files)} />
-              <input ref={driveInputRef} type="file" multiple className="hidden" onChange={(e) => onPickFiles(e.target.files)} />
 
-              {/* Attachments menu */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon-sm" className="text-muted-foreground">
-                    <Paperclip className="w-4 h-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem className="gap-2" onClick={() => galleryInputRef.current?.click()}>
-                    <Image className="w-4 h-4" />
-                    Gallery
-                  </DropdownMenuItem>
-                  <DropdownMenuItem className="gap-2" onClick={() => filesInputRef.current?.click()}>
-                    <File className="w-4 h-4" />
-                    Files
-                  </DropdownMenuItem>
-                  <DropdownMenuItem className="gap-2" onClick={() => cameraInputRef.current?.click()}>
-                    <Mic className="w-4 h-4" />
-                    Camera
-                  </DropdownMenuItem>
-                  <DropdownMenuItem className="gap-2" onClick={() => driveInputRef.current?.click()}>
-                    <Cloud className="w-4 h-4" />
-                    Drive
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+        {/* Responsive Input Container */}
+        <div className="relative group w-full">
+          <div
+            className={cn(
+              "relative flex flex-col w-full rounded-2xl sm:rounded-3xl border border-border/60 bg-secondary/30 backdrop-blur-md shadow-sm transition-all duration-200",
+              // On hover/focus: slightly stronger border and shadow
+              "hover:border-primary/20 hover:shadow-md hover:bg-secondary/40",
+              input || attachments.length > 0 ? "border-primary/30 bg-secondary/50 shadow-md" : ""
+            )}
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+            onDrop={(e) => { e.preventDefault(); onPickFiles(e.dataTransfer.files); }}
+          >
+            {/* Auto-Growing Textarea */}
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder="Message Prism..."
+              rows={1}
+              disabled={isLoading}
+              className="w-full min-h-[52px] max-h-[200px] bg-transparent border-0 outline-none resize-none px-4 py-3.5 text-base text-foreground placeholder:text-muted-foreground/50 scrollbar-thin scrollbar-thumb-muted"
+            />
 
-              {/* Model Selector (hidden on mobile; shown on desktop) */}
-              {!isMobile && (
+            {/* Icons Bar */}
+            <div className="flex items-center justify-between px-2 pb-2">
+              <div className="flex items-center gap-0.5">
+                {/* Add Attachment Button */}
+                <DropdownMenu>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors">
+                            <div className="relative">
+                              <span className="absolute -inset-2 bg-primary/10 rounded-full opacity-0 hover:opacity-100 transition-opacity" />
+                              <svg className="w-5 h-5 relative z-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                              </svg>
+                            </div>
+                          </Button>
+                        </DropdownMenuTrigger>
+                      </TooltipTrigger>
+                      <TooltipContent>Add attachments</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                  <DropdownMenuContent align="start" className="w-56 p-1.5 rounded-xl border border-border/50 bg-popover/95 backdrop-blur-xl shadow-xl animate-in fade-in zoom-in-95 duration-100">
+                    <DropdownMenuItem className="gap-3 rounded-lg py-2.5 px-3 cursor-pointer focus:bg-accent/50" onClick={() => galleryInputRef.current?.click()}>
+                      <div className="w-8 h-8 rounded-full bg-blue-500/10 flex items-center justify-center text-blue-500">
+                        <Image className="w-4 h-4" />
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-medium text-sm">Gallery</span>
+                        <span className="text-[10px] text-muted-foreground">Upload images</span>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="gap-3 rounded-lg py-2.5 px-3 cursor-pointer focus:bg-accent/50" onClick={() => filesInputRef.current?.click()}>
+                      <div className="w-8 h-8 rounded-full bg-purple-500/10 flex items-center justify-center text-purple-500">
+                        <File className="w-4 h-4" />
+                      </div>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="font-medium text-sm">Files</span>
+                        <span className="text-[10px] text-muted-foreground">PDF, Docs, spreadsheets</span>
+                      </div>
+                    </DropdownMenuItem>
+                    {!isMobile && (
+                      <DropdownMenuItem className="gap-3 rounded-lg py-2.5 px-3 cursor-pointer focus:bg-accent/50" onClick={() => driveInputRef.current?.click()}>
+                        <div className="w-8 h-8 rounded-full bg-green-500/10 flex items-center justify-center text-green-500">
+                          <Cloud className="w-4 h-4" />
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="font-medium text-sm">Drive</span>
+                          <span className="text-[10px] text-muted-foreground">Connect Google Drive</span>
+                        </div>
+                      </DropdownMenuItem>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+
+                {/* Model Selector Pill */}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="gap-1 text-xs text-muted-foreground"
-                    >
+                    <button className="flex items-center gap-1.5 px-3 py-1.5 ml-1 rounded-full text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all border border-transparent hover:border-border/40">
+                      <span className="w-2 h-2 rounded-full bg-primary/80 animate-pulse" />
                       {selectedModel.name}
-                      <ChevronDown className="w-3 h-3" />
-                    </Button>
+                      <ChevronDown className="w-3 h-3 opacity-50" />
+                    </button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
+                  <DropdownMenuContent align="start" className="w-56 p-1 rounded-xl shadow-xl">
                     {models.map((model) => (
                       <DropdownMenuItem
                         key={model.id}
                         onClick={() => handleModelSelect(model)}
                         className={cn(
-                          "gap-2",
-                          !model.available && "opacity-60"
+                          "gap-2.5 py-2.5 rounded-lg cursor-pointer",
+                          selectedModel.id === model.id ? "bg-accent/50" : ""
                         )}
+                        disabled={!model.available}
                       >
-                        {model.available ? (
-                          <Check className="w-4 h-4 text-success" />
-                        ) : (
-                          <Lock className="w-4 h-4 text-muted-foreground" />
-                        )}
-                        {model.name}
+                        <div className={cn(
+                          "w-4 h-4 rounded-full border flex items-center justify-center",
+                          selectedModel.id === model.id ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/30"
+                        )}>
+                          {selectedModel.id === model.id && <div className="w-2 h-2 rounded-full bg-current" />}
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className={cn("text-xs font-medium", !model.available && "opacity-50")}>{model.name}</span>
+                          {!model.available && <span className="text-[10px] text-muted-foreground">Coming soon</span>}
+                        </div>
+                        {model.available && selectedModel.id === model.id && <Check className="w-3.5 h-3.5 ml-auto text-primary" />}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-              )}
-            </div>
+              </div>
 
-            {/* Textarea */}
-            <Textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Message PRISM..."
-              className="flex-1 min-h-[36px] sm:min-h-[40px] max-h-[160px] sm:max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:ring-offset-0 py-2 sm:py-2.5 text-sm sm:text-base px-1"
-              rows={1}
-            />
+              <div className="flex items-center gap-2">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-9 w-9 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                      >
+                        <Mic className="w-4 h-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Voice input</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
 
-            {/* Right Actions */}
-            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-              <Button variant="ghost" size="icon-sm" className="text-muted-foreground h-8 w-8 sm:h-9 sm:w-9">
-                <Mic className="w-4 h-4" />
-              </Button>
-              <Button
-                size="icon-sm"
-                onClick={handleSubmit}
-                disabled={(!input.trim() && attachments.length === 0) || isLoading}
-                className={cn(
-                  "transition-all h-8 w-8 sm:h-9 sm:w-9",
-                  (input.trim() || attachments.length > 0) && "bg-primary shadow-soft"
-                )}
-              >
-                <Send className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-              </Button>
+                <Button
+                  size="icon"
+                  className={cn(
+                    "h-9 w-9 rounded-full shadow-md transition-all duration-300",
+                    (input.trim() || attachments.length > 0)
+                      ? "bg-primary text-primary-foreground hover:bg-primary/90 hover:scale-105 hover:shadow-lg"
+                      : "bg-muted text-muted-foreground hover:bg-muted/80 cursor-not-allowed"
+                  )}
+                  onClick={handleSubmit}
+                  disabled={!input.trim() && attachments.length === 0 || isLoading}
+                >
+                  <Send className={cn("w-4 h-4", (input.trim() || attachments.length > 0) && "ml-0.5")} />
+                </Button>
+              </div>
             </div>
           </div>
         </div>
 
-        <p className="text-[10px] sm:text-xs text-muted-foreground text-center mt-1.5 sm:mt-2 px-2">
+        <p className="text-[9px] sm:text-xs text-muted-foreground text-center px-2 sm:px-3 py-1 sm:py-2 mb-1.5 sm:mb-3">
           PRISM can make mistakes. Consider checking important information.
         </p>
       </div>
@@ -350,10 +431,10 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
           <div className="relative w-full h-full flex items-center justify-center">
             <button type="button" className="absolute top-3 right-3 z-10 text-white/90 text-xl" onClick={() => setViewerOpen(false)}>×</button>
             <button type="button" className="absolute left-3 top-1/2 -translate-y-1/2 text-white/80 text-2xl" onClick={() => setViewerIndex((i) => Math.max(0, i - 1))}>‹</button>
-            <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-white/80 text-2xl" onClick={() => setViewerIndex((i) => Math.min(attachments.filter(a=>a.type==='image').length - 1, i + 1))}>›</button>
+            <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-white/80 text-2xl" onClick={() => setViewerIndex((i) => Math.min(attachments.filter(a => a.type === 'image').length - 1, i + 1))}>›</button>
             <div className="flex flex-col items-center gap-3">
               <img
-                src={attachments.filter(a=>a.type==='image')[viewerIndex]?.url}
+                src={attachments.filter(a => a.type === 'image')[viewerIndex]?.url}
                 alt="preview"
                 style={{ transform: `scale(${zoom})` }}
                 className="max-h-[80vh] w-auto object-contain rounded"

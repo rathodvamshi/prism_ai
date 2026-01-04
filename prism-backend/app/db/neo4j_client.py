@@ -20,6 +20,7 @@ from neo4j import AsyncGraphDatabase
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
+import asyncio
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,13 @@ def create_neo4j_driver():
     """Create Neo4j driver with proper error handling and optimized connection settings"""
     try:
         if not settings.NEO4J_URI or settings.NEO4J_URI == "neo4j://localhost:7687":
-            logger.warning("Neo4j URI not configured, using None driver")
-            return None
+            # Check if it's actually localhost or just default
+            if "localhost" in settings.NEO4J_URI and not settings.is_development:
+                 logger.warning("⚠️ Neo4j URI is set to localhost in non-dev environment.")
+            
+            if not settings.NEO4J_URI:
+                logger.warning("Neo4j URI not configured, using None driver")
+                return None
         
         # Enhanced connection settings for Neo4j Aura
         return AsyncGraphDatabase.driver(
@@ -45,34 +51,11 @@ def create_neo4j_driver():
         )
     except Exception as e:
         logger.error(f"Failed to create Neo4j driver: {e}")
-        logger.warning("Neo4j operations will be disabled")
-        logger.info("💡 Troubleshooting tips:")
-        logger.info("   1. Check if Neo4j Aura database is running")
-        logger.info("   2. Verify your IP is whitelisted in Neo4j Aura")
-        logger.info("   3. Test connection: python test_neo4j_connection.py")
         return None
 
 class Neo4jClient:
     """
     🔌 SINGLETON Neo4j client with connection pooling.
-    
-    ✅ MANDATORY PATTERNS:
-    - Only ONE driver instance exists (singleton)
-    - Reuses connections from pool (max 50)
-    - Sessions are created/closed per operation
-    
-    ❌ NEVER DO THIS:
-    ```python
-    # BAD - Creates new driver per request ❌
-    driver = GraphDatabase.driver(uri, auth=auth)
-    ```
-    
-    ✅ ALWAYS DO THIS:
-    ```python
-    # GOOD - Use global singleton ✅
-    from app.db.neo4j_client import neo4j_client
-    await neo4j_client.query(cypher)
-    ```
     """
     
     _instance = None
@@ -112,6 +95,10 @@ class Neo4jClient:
             return True
         except Exception as e:
             logger.error(f"❌ Neo4j connectivity verification failed: {e}")
+            if "getaddrinfo failed" in str(e):
+                logger.critical("🚨 DNS RESOLUTION FAILED: Check NEO4J_URI in .env")
+                logger.critical(f"   Current URI: {settings.NEO4J_URI}")
+                logger.critical("   Ensure the Instance ID (e.g. 46945710) is correct.")
             logger.info("💡 Run: python test_neo4j_connection.py for detailed diagnostics")
             return False
     
@@ -125,7 +112,6 @@ class Neo4jClient:
         if not self._driver:
             return []
         
-        import asyncio
         last_error = None
         
         for attempt in range(max_retries):
@@ -142,7 +128,7 @@ class Neo4jClient:
         
         # Only log once if all retries fail (reduces noise)
         if last_error:
-            logger.debug(f"Neo4j query unavailable after {max_retries} attempts, using fallback")
+            logger.debug(f"Neo4j query unavailable after {max_retries} attempts: {last_error}")
         return []
 
 # Global Neo4j client instance
@@ -171,6 +157,9 @@ class GraphMemoryService:
         Create or update user node in graph.
         🟢 Rule: Uses MERGE to avoid duplicates
         """
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MERGE (u:User {id: $user_id})
         SET u.email = $email,
@@ -192,12 +181,54 @@ class GraphMemoryService:
         except Exception as e:
             print(f"❌ Error creating user node: {e}")
             return False
-    
+
+    async def add_dynamic_relationship(self, user_id: str, target: str, relationship_type: str, target_label: str = "Entity") -> bool:
+        """
+        Add a dynamic relationship between User and an Entity.
+        Allows flexible types like DISLIKES, KNOWS, LIVES_IN, etc.
+        """
+        if not neo4j_client.is_available:
+            return False
+
+        # Sanitize relationship type (uppercase, alphanumeric + underscore)
+        safe_rel_type = "".join(c for c in relationship_type.upper() if c.isalnum() or c == '_')
+        if not safe_rel_type:
+            safe_rel_type = "RELATED_TO"
+            
+        safe_label = "".join(c for c in target_label if c.isalnum())
+        if not safe_label:
+            safe_label = "Entity"
+
+        query = f"""
+        MERGE (u:User {{id: $user_id}})
+        MERGE (t:{safe_label} {{name: $target}})
+        MERGE (u)-[r:{safe_rel_type}]->(t)
+        SET r.createdAt = $timestamp,
+            r.updatedAt = $timestamp,
+            r.source = 'holographic_extractor'
+        RETURN u, r, t
+        """
+        
+        try:
+            await query_graph(query, {
+                "user_id": user_id,
+                "target": target,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            print(f"✅ Dynamic relationship added: {user_id} -[{safe_rel_type}]-> {target}")
+            return True
+        except Exception as e:
+            print(f"❌ Error adding dynamic relationship: {e}")
+            return False
+
     async def add_user_interest(self, user_id: str, interest: str, category: str = "interest") -> bool:
         """
         Add interest/hobby relationship for user.
         Example: (User) ---LIKES---> (AI)
         """
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MERGE (u:User {id: $user_id})
         MERGE (i:Interest {name: $interest, category: $category})
@@ -232,6 +263,9 @@ class GraphMemoryService:
         Add task relationship for user.
         Example: (User) ---HAS_TASK---> (Task)
         """
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MERGE (u:User {id: $user_id})
         MERGE (t:Task {taskId: $task_id})
@@ -259,6 +293,9 @@ class GraphMemoryService:
     
     async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
         """Update task status in graph"""
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MATCH (u:User {id: $user_id})-[:HAS_TASK]->(t:Task {taskId: $task_id})
         SET t.status = $status,
@@ -284,6 +321,9 @@ class GraphMemoryService:
     
     async def get_user_interests(self, user_id: str) -> List[str]:
         """Get all interests/hobbies for a user"""
+        if not neo4j_client.is_available:
+            return []
+
         query = """
         MATCH (u:User {id: $user_id})-[:LIKES]->(i:Interest)
         RETURN i.name as interest, i.category as category
@@ -301,6 +341,9 @@ class GraphMemoryService:
     
     async def get_user_tasks(self, user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get tasks for user, optionally filtered by status"""
+        if not neo4j_client.is_available:
+            return []
+
         base_query = "MATCH (u:User {id: $user_id})-[:HAS_TASK]->(t:Task)"
         
         if status:
@@ -333,6 +376,9 @@ class GraphMemoryService:
         Get complete user summary from graph.
         Perfect for AI context building.
         """
+        if not neo4j_client.is_available:
+            return {}
+
         query = """
         MATCH (u:User {id: $user_id})
         OPTIONAL MATCH (u)-[:LIKES]->(i:Interest)
@@ -381,6 +427,9 @@ class GraphMemoryService:
         """
         Update or create the user's node and set the name property.
         """
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MERGE (u:User {id: $user_id})
         SET u.name = $name,
@@ -404,6 +453,9 @@ class GraphMemoryService:
         Add or update a primitive property directly on the User node.
         Example: key="location", value="New York" sets u.location = "New York".
         """
+        if not neo4j_client.is_available:
+            return False
+
         # Safely interpolate property key by restricting to alphanumeric and underscore
         safe_key = "".join(ch for ch in key if ch.isalnum() or ch == "_")
         if not safe_key:
@@ -431,6 +483,9 @@ class GraphMemoryService:
         Find interests related to user's current interests.
         Useful for recommendations.
         """
+        if not neo4j_client.is_available:
+            return []
+
         query = """
         MATCH (u:User {id: $user_id})-[:LIKES]->(userInterest:Interest)
         MATCH (otherUser:User)-[:LIKES]->(userInterest)
@@ -454,6 +509,9 @@ class GraphMemoryService:
     
     async def delete_user_graph_data(self, user_id: str) -> bool:
         """Delete all graph data for a user"""
+        if not neo4j_client.is_available:
+            return False
+
         query = """
         MATCH (u:User {id: $user_id})
         OPTIONAL MATCH (u)-[r]->(n)
@@ -467,68 +525,6 @@ class GraphMemoryService:
         except Exception as e:
             print(f"[Neo4j] Error deleting user graph data: {e}")
             return False
-    
-    async def get_graph_stats(self) -> Dict[str, Any]:
-        """Get overall graph statistics"""
-        query = """
-        MATCH (n)
-        RETURN 'node' AS kind, coalesce(head(labels(n)), 'Unknown') AS type, count(*) AS count
-        UNION ALL
-        MATCH ()-[r]->()
-        RETURN 'relationship' AS kind, type(r) AS type, count(*) AS count
-        """
-        
-        try:
-            result = await query_graph(query)
-            stats = {
-                "nodes": {},
-                "relationships": {},
-                "total_nodes": 0,
-                "total_relationships": 0
-            }
-            for record in result:
-                if record.get("kind") == "node":
-                    label = record["type"]
-                    stats["nodes"][label] = record["count"]
-                    stats["total_nodes"] += record["count"]
-                elif record.get("kind") == "relationship":
-                    rel_type = record["type"]
-                    stats["relationships"][rel_type] = record["count"]
-                    stats["total_relationships"] += record["count"]
-            return stats
-        except Exception as e:
-            print(f"[Neo4j] Error getting graph stats: {e}")
-            return {}
-
-# Global instance
-graph_memory = GraphMemoryService()
-
-# 🎀 PINECONE CLIENT PLACEHOLDER (Vector Memory)
-# TODO: Implement when Pinecone is available
-
-class PineconeClient:
-    """Pinecone client for vector memory operations (placeholder)"""
-    
-    def __init__(self):
-        # TODO: Initialize Pinecone client when available
-        pass
-    
-    async def get_user_memories(self, user_id: str) -> list:
-        """Get vector memories for user"""
-        # TODO: Implement Pinecone query
-        return []
-    
-    async def add_memory(self, user_id: str, memory_text: str) -> bool:
-        """Add vector memory to Pinecone"""
-        # TODO: Implement Pinecone upsert
-        return True
-    
-    async def search_similar_memories(self, user_id: str, query: str, top_k: int = 5) -> list:
-        """Search for similar memories"""
-        # TODO: Implement semantic search
-        return []
-
-# 🎯 CONVENIENCE FUNCTIONS FOR EASY USE
 
 async def create_user_in_graph(user_id: str, email: str, name: str) -> bool:
     """Simple function to create user in graph"""
@@ -561,6 +557,31 @@ async def get_user_context_summary(user_id: str) -> str:
         context_parts.append(f"Tasks: {summary['pending_tasks']} pending, {summary['completed_tasks']} completed")
     
     return " | ".join(context_parts)
+
+# 🎀 PINECONE CLIENT PLACEHOLDER (Vector Memory)
+# TODO: Implement when Pinecone is available
+
+class PineconeClient:
+    """Pinecone client for vector memory operations (placeholder)"""
+    
+    def __init__(self):
+        # TODO: Initialize Pinecone client when available
+        pass
+    
+    async def get_user_memories(self, user_id: str) -> list:
+        """Get vector memories for user"""
+        # TODO: Implement Pinecone query
+        return []
+    
+    async def add_memory(self, user_id: str, memory_text: str) -> bool:
+        """Add vector memory to Pinecone"""
+        # TODO: Implement Pinecone upsert
+        return True
+    
+    async def search_similar_memories(self, user_id: str, query: str, top_k: int = 5) -> list:
+        """Search for similar memories"""
+        # TODO: Implement semantic search
+        return []
 
 # 🧠 ADVANCED NEO4J CLIENT FOR AI MEMORY MANAGEMENT
 
@@ -727,58 +748,6 @@ class AdvancedNeo4jClient:
             print(f"Error removing weak relationships: {e}")
             return False
 
-    async def add_interest_relationship(self, user_id: str, interest: str, category: str = "interest") -> bool:
-        """
-        Backwards-compatible alias for adding an interest relationship.
-        Matches older callers expecting `add_interest_relationship`.
-        """
-        return await self.add_user_interest(user_id, interest, category)
-
-    async def update_user_name(self, user_id: str, name: str) -> bool:
-        """
-        Update or create the user's node and set the name property.
-        """
-        query = """
-        MERGE (u:User {id: $user_id})
-        SET u.name = $name,
-            u.updatedAt = $timestamp
-        RETURN u
-        """
-        try:
-            await query_graph(query, {
-                "user_id": user_id,
-                "name": name,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            print(f"✅ User name set for {user_id} -> {name}")
-            return True
-        except Exception as e:
-            print(f"❌ Error updating user name: {e}")
-            return False
-
-    async def add_user_property(self, user_id: str, key: str, value: Any) -> bool:
-        """
-        Add or update a primitive property directly on the User node.
-        Example: key="location", value="New York" sets u.location = "New York".
-        """
-        # Safely interpolate property key by restricting to alphanumeric and underscore
-        safe_key = "".join(ch for ch in key if ch.isalnum() or ch == "_")
-        if not safe_key:
-            return False
-        query = f"""
-        MERGE (u:User {{id: $user_id}})
-        SET u.{safe_key} = $value,
-            u.updatedAt = $timestamp
-        RETURN u
-        """
-        try:
-            await query_graph(query, {
-                "user_id": user_id,
-                "value": value,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            print(f"✅ User property set: {user_id}.{safe_key} -> {value}")
-            return True
-        except Exception as e:
-            print(f"❌ Error setting user property {safe_key}: {e}")
-            return False
+# Create global instances
+neo4j_client = Neo4jClient()
+graph_memory = GraphMemoryService()

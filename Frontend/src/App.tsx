@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { ProtectedRoute, PublicRoute } from "@/components/ProtectedRoute";
 import { useAuthStore } from "@/stores/authStore";
+import { useChatStore } from "@/stores/chatStore";
+import { useProfileStore } from "@/stores/profileStore";
 import { lazyLoad } from "@/lib/lazyLoad";
 
 // ⚡ CRITICAL: Load immediately (blocking)
@@ -21,38 +23,40 @@ const NotFound = lazyLoad(() => import("./pages/NotFound"));
 const queryClient = new QueryClient();
 
 const router = createBrowserRouter([
-  { 
-    path: "/", 
-    element: <PublicRoute><Hero /></PublicRoute> 
+  {
+    path: "/",
+    element: <PublicRoute><Hero /></PublicRoute>
   },
-  { 
-    path: "/auth", 
-    element: <PublicRoute><Auth /></PublicRoute> 
+  {
+    path: "/auth",
+    element: <PublicRoute><Auth /></PublicRoute>
   },
-  { 
-    path: "/chat", 
-    element: <ProtectedRoute><Chat /></ProtectedRoute> 
+  {
+    path: "/chat",
+    element: <ProtectedRoute><Chat /></ProtectedRoute>
   },
-  { 
-    path: "/chat/:sessionId", 
-    element: <ProtectedRoute><Chat /></ProtectedRoute> 
+  {
+    path: "/chat/:sessionId",
+    element: <ProtectedRoute><Chat /></ProtectedRoute>
   },
-  { 
-    path: "/settings", 
-    element: <ProtectedRoute><Settings /></ProtectedRoute> 
+  {
+    path: "/settings",
+    element: <ProtectedRoute><Settings /></ProtectedRoute>
   },
-  { 
-    path: "/profile", 
-    element: <ProtectedRoute><Profile /></ProtectedRoute> 
+  {
+    path: "/profile",
+    element: <ProtectedRoute><Profile /></ProtectedRoute>
   },
-  { 
-    path: "*", 
-    element: <NotFound /> 
+  {
+    path: "*",
+    element: <NotFound />
   },
 ]);
 
 const App = () => {
-  const { checkAuth, authLoading } = useAuthStore();
+  const { checkAuth, authLoading, isAuthenticated } = useAuthStore();
+  const { loadChatsFromBackend } = useChatStore();
+  const { loadProfileFromBackend } = useProfileStore();
 
   // Initialize auth state on app startup
   useEffect(() => {
@@ -60,6 +64,14 @@ const App = () => {
       checkAuth();
     }
   }, [checkAuth, authLoading]);
+
+  // Load user data when authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadChatsFromBackend();
+      loadProfileFromBackend();
+    }
+  }, [isAuthenticated, loadChatsFromBackend, loadProfileFromBackend]);
 
   return (
     <QueryClientProvider client={queryClient}>

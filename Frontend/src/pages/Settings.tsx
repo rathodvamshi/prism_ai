@@ -11,8 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft, Camera, CheckCircle, CreditCard, Download, Globe, Key, Loader2, Save, User } from "lucide-react";
-
+import { ArrowLeft, Bell, Brain, Camera, CheckCircle, CreditCard, Download, Globe, Key, Loader2, Lock, Save, Sparkles, User } from "lucide-react";
+import { MemoryManager } from "@/components/settings/MemoryManager";
 
 const MobileSettings = () => {
   const navigate = useNavigate();
@@ -102,7 +102,7 @@ const MobileSettings = () => {
     <div className="md:hidden flex flex-col min-h-dvh bg-background overflow-x-hidden">
       {/* Header */}
       <div className="relative h-12 px-2 flex items-center border-b border-border bg-card">
-        <Button variant="ghost" size="icon-sm" className="absolute left-1" onClick={() => navigate("/chat") }>
+        <Button variant="ghost" size="icon-sm" className="absolute left-1" onClick={() => navigate("/chat")}>
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="w-full text-center text-lg font-bold">Settings</h1>
@@ -112,14 +112,39 @@ const MobileSettings = () => {
       <div className="px-2 py-2 border-b border-border bg-card/80">
         <Tabs value={tab} onValueChange={setTab}>
           <div ref={tabsRef} className="w-full overflow-x-auto no-scrollbar scroll-smooth">
-            <TabsList className="inline-flex mx-auto gap-2 px-4 py-1 whitespace-nowrap">
-              <TabsTrigger value="general" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">General</TabsTrigger>
-              <TabsTrigger value="api" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">API</TabsTrigger>
-              <TabsTrigger value="subscription" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">Plan</TabsTrigger>
-              <TabsTrigger value="notifications" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">Notifications</TabsTrigger>
-              <TabsTrigger value="export" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">Export</TabsTrigger>
-              <TabsTrigger value="language" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">Language</TabsTrigger>
-              <TabsTrigger value="privacy" className="text-sm px-3 py-2 whitespace-nowrap data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">Privacy</TabsTrigger>
+            <TabsList className="h-10 items-center justify-center rounded-md bg-muted text-muted-foreground w-full flex overflow-x-auto no-scrollbar gap-2 p-1 -mx-1 snap-x snap-mandatory scroll-smooth sm:grid sm:grid-cols-8 sm:gap-1 sm:p-0 sm:mx-0">
+              <TabsTrigger value="general" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <User className="w-3.5 h-3.5 mr-1" />
+                General
+              </TabsTrigger>
+              <TabsTrigger value="api" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Key className="w-3.5 h-3.5 mr-1" />
+                API
+              </TabsTrigger>
+              <TabsTrigger value="subscription" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <CreditCard className="w-3.5 h-3.5 mr-1" />
+                Plan
+              </TabsTrigger>
+              <TabsTrigger value="memory" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Brain className="w-3.5 h-3.5 mr-1" />
+                Memory
+              </TabsTrigger>
+              <TabsTrigger value="notifications" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Bell className="w-3.5 h-3.5 mr-1" />
+                Notifs
+              </TabsTrigger>
+              <TabsTrigger value="export" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Download className="w-3.5 h-3.5 mr-1" />
+                Export
+              </TabsTrigger>
+              <TabsTrigger value="language" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Globe className="w-3.5 h-3.5 mr-1" />
+                Lang
+              </TabsTrigger>
+              <TabsTrigger value="privacy" className="inline-flex items-center justify-center rounded-sm px-3 py-1.5 font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-xs whitespace-nowrap snap-start data-[state=active]:bg-secondary data-[state=active]:text-foreground data-[state=active]:shadow-sm text-muted-foreground">
+                <Lock className="w-3.5 h-3.5 mr-1" />
+                Privacy
+              </TabsTrigger>
             </TabsList>
           </div>
         </Tabs>
@@ -250,6 +275,10 @@ const MobileSettings = () => {
                     </div>
                   </div>
                 </div>
+              </TabsContent>
+
+              <TabsContent value="memory" className="space-y-4">
+                <MemoryManager />
               </TabsContent>
 
               <TabsContent value="notifications" className="space-y-4">

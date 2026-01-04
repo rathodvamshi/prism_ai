@@ -2,23 +2,22 @@
 🎯 MEMORY-ENHANCED CHAT ROUTER (SIMPLIFIED)
 
 Focuses on the core memory management functionality without external dependencies.
-"""
-
-from fastapi import APIRouter, HTTPException, Body, Depends, status
-from app.models.chat_models import ChatRequest, ChatResponse
-from app.models.perfect_models import SendMessageRequest
-from app.db.mongo_client import users_collection
-from app.services.advanced_memory_manager import memory_manager
-from app.services.user_memory_manager import user_memory_manager, get_user_ai_context, save_user_conversation
-from app.utils.llm_client import get_llm_response as groq_llm_response
-from app.utils.auth import get_verified_user, SecurityUtils
-from app.models.user_models import User
-from pydantic import BaseModel
-from datetime import datetime
 from typing import Dict, Any, List
 from bson import ObjectId
 import json
 import logging
+import re
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends, status, Body
+
+from app.services.advanced_memory_manager import memory_manager
+from app.services.user_memory_manager import user_memory_manager, get_user_ai_context, save_user_conversation
+from app.services.unified_memory_orchestrator import unified_memory_orchestrator, MemoryType, MemorySource
+from app.services.main_brain import generate_response as main_brain_generate_response
+from app.utils.auth import get_verified_user, SecurityUtils
+from app.models.user_models import User
+from app.db.mongo_client import users_collection
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -327,20 +326,6 @@ async def clear_memory(current_user: User = Depends(get_verified_user)):
         return {
             "message": "Memory cleared successfully",
             "cleared_at": datetime.now().isoformat(),
-            "success": True
-        }
-        
-    except Exception as e:
-        logger.error(f"Error clearing memory: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to clear memory"
-        )
-
-# Import the enhanced main brain system
-from app.services.main_brain import generate_response as main_brain_generate_response
-
-# Helper function for LLM calls - now uses the enhanced main brain!
 async def get_llm_response(prompt: str, user_id: str = "unknown") -> str:
     """Enhanced LLM response using the energetic, personalized main brain system"""
     return await main_brain_generate_response(
@@ -397,10 +382,22 @@ async def send_chat(request: SendChatRequest):
         # Process any memory updates
         if "[MEMORY_UPDATE]" in ai_response:
             try:
+                # 1. Extract Thinking Data (if present) before splitting
+                # main_brain appends it at the very end
+                thinking_data_match = re.search(r"<!--THINKING_DATA:.*?-->", ai_response, re.DOTALL)
+                thinking_data_block = thinking_data_match.group(0) if thinking_data_match else ""
+
+                # 2. Process Memory Update (Standard logic)
                 await memory_manager.process_memory_update_instructions(user_id, ai_response)
                 print("✅ Memory updates processed successfully")
-                # Clean the response
+                
+                # 3. Clean the response (removes everything after [MEMORY_UPDATE])
                 ai_response = ai_response.split("[MEMORY_UPDATE]")[0].strip()
+                
+                # 4. Re-append Thinking Data if it was found and not already present (it was likely removed by split)
+                if thinking_data_block and thinking_data_block not in ai_response:
+                    ai_response += "\n\n" + thinking_data_block
+                    
             except Exception as e:
                 print(f"⚠️ Memory update failed: {e}")
         
@@ -473,13 +470,24 @@ Respond naturally based on the user's memory and context:
         
         # Step 5: Extract memory updates if present
         memory_updates = {}
+        # Step 5: Extract memory updates if present
+        memory_updates = {}
         if "[MEMORY_UPDATE]" in ai_response:
             try:
+                # 1. Extract Thinking Data (if present) before splitting
+                thinking_data_match = re.search(r"<!--THINKING_DATA:.*?-->", ai_response, re.DOTALL)
+                thinking_data_block = thinking_data_match.group(0) if thinking_data_match else ""
+
                 parts = ai_response.split("[MEMORY_UPDATE]")
                 clean_response = parts[0].strip()
                 memory_instruction_text = parts[1].split("[/MEMORY_UPDATE]")[0].strip()
                 memory_updates = json.loads(memory_instruction_text)
+                
+                # Re-append thinking data to the clean response
                 ai_response = clean_response
+                if thinking_data_block and thinking_data_block not in ai_response:
+                    ai_response += "\n\n" + thinking_data_block
+                
                 print(f"📝 Memory updates extracted: {list(memory_updates.keys())}")
             except Exception as e:
                 print(f"⚠️ Error parsing memory updates: {e}")
@@ -694,9 +702,565 @@ async def update_user_profile(request: UpdateProfileRequest):
         
     except Exception as e:
         print(f"❌ Error updating profile for {request.email}: {e}")
+                "user_memory_loaded": bool(user_memory),
+                "memory_context_length": len(memory_context),
+                "memory_updates_applied": list(memory_updates.keys()) if memory_updates else [],
+                "memory_stats": {
+                    "profile": bool(user_memory.get('profile')),
+                    "structured_memories": len(user_memory.get('structured_memory', [])),
+                    "conversations": len(user_memory.get('conversations', [])),
+                    "temp_memory": bool(user_memory.get('temp_memory')),
+                    "graph_relationships": len(user_memory.get('graph_relationships', [])),
+                }
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Memory-enhanced chat error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": f"Memory processing failed: {str(e)}"
+        }
+
+# Memory testing endpoints
+@router.get("/memory-test/{user_id}")
+async def test_user_memory(user_id: str):
+    """Test endpoint to check user memory loading"""
+    try:
+        print(f"🧪 Testing memory for user: {user_id}")
+        
+        # Load user memory
+        user_memory = await memory_manager.load_user_memory(user_id)
+        
+        # Build context
+        memory_context = memory_manager.build_context_for_model(user_memory)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "memory_stats": {
+                "profile_loaded": bool(user_memory.get('profile')),
+                "structured_memories": len(user_memory.get('structured_memory', [])),
+                "tasks": len(user_memory.get('tasks', [])),
+                "conversations": len(user_memory.get('conversations', [])),
+                "temp_memory": bool(user_memory.get('temp_memory')),
+                "session_state": bool(user_memory.get('session_state')),
+                "vector_memories": len(user_memory.get('vector_memories', [])),
+                "graph_relationships": len(user_memory.get('graph_relationships', [])),
+                "interests": len(user_memory.get('interests', []))
+            },
+            "context_preview": memory_context[:500] + "..." if len(memory_context) > 500 else memory_context
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Memory test failed: {str(e)}"
+        }
+
+@router.post("/memory-update/{user_id}")
+async def manual_memory_update(user_id: str, updates: Dict[str, Any] = Body(...)):
+    """Manual memory update endpoint for testing"""
+    try:
+        print(f"🛠️ Manual memory update for user: {user_id}")
+        
+        results = await memory_manager.process_memory_update_instructions(user_id, updates)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "update_results": results,
+            "instructions_processed": list(updates.keys())
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Manual memory update failed: {str(e)}"
+        }
+
+# Simple test endpoint
+@router.get("/test")
+async def test_endpoint():
+    """Simple test to verify router is working"""
+    return {
+        "status": "Memory-enhanced chat router is working!",
+        "timestamp": datetime.now().isoformat(),
+        "features": [
+            "Memory loading from all databases",
+            "Context injection into AI prompts", 
+            "Memory update processing",
+            "Conversation saving",
+            "User validation and access control"
+        ]
+    }
+
+# Create a separate users router for user profile endpoints
+users_router = APIRouter(
+    prefix="/users",
+    tags=["Users"]
+)
+
+@users_router.get("/profile")
+async def get_user_profile(email: str):
+    """Get user profile by email"""
+    try:
+        print(f"📋 Fetching user profile for: {email}")
+        
+        # Find user in MongoDB
+        user = await users_collection.find_one({"email": email})
+        
+        if not user:
+            # Return default profile structure if user doesn't exist
+            return {
+                "email": email,
+                "name": email.split("@")[0],
+                "username": None,
+                "hobby": [],
+                "role": None,
+                "interests": [],
+                "responseStyle": None,
+                "profilePicUrl": None,
+                "createdAt": datetime.utcnow().isoformat()
+            }
+        
+        # Convert MongoDB document to API response
+        profile = {
+            "email": user.get("email", email),
+            "name": user.get("name", email.split("@")[0]),
+            "username": user.get("username"),
+            "hobby": user.get("hobby", []),
+            "role": user.get("role"),
+            "interests": user.get("interests", []),
+            "responseStyle": user.get("responseStyle"),
+            "profilePicUrl": user.get("profilePicUrl"),
+            "createdAt": user.get("createdAt", datetime.utcnow()).isoformat() if isinstance(user.get("createdAt"), datetime) else user.get("createdAt")
+        }
+        
+        print(f"✅ Profile found for {email}")
+        return profile
+        
+    except Exception as e:
+        print(f"❌ Error fetching profile for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user profile: {str(e)}")
+
+class UpdateProfileRequest(BaseModel):
+    email: str
+    username: str = None
+    hobby: list = []
+    role: str = None
+    interests: list = []
+    responseStyle: str = None
+    profilePicUrl: str = None
+
+@users_router.put("/profile")
+async def update_user_profile(request: UpdateProfileRequest):
+    """Update user profile"""
+    try:
+        print(f"📝 Updating user profile for: {request.email}")
+        
+        # Build update document
+        update_data = {
+            "email": request.email,
+            "updatedAt": datetime.utcnow()
+        }
+        
+        if request.username is not None:
+            update_data["username"] = request.username
+        if request.hobby:
+            update_data["hobby"] = request.hobby
+        if request.role is not None:
+            update_data["role"] = request.role
+        if request.interests:
+            update_data["interests"] = request.interests
+        if request.responseStyle is not None:
+            update_data["responseStyle"] = request.responseStyle
+        if request.profilePicUrl is not None:
+            update_data["profilePicUrl"] = request.profilePicUrl
+        
+        # Update or insert user
+        result = await users_collection.update_one(
+            {"email": request.email},
+            {"$set": update_data},
+            upsert=True
+        )
+        
+        print(f"✅ Profile updated for {request.email}")
+        return {
+            "success": True,
+            "message": "Profile updated successfully",
+            "modified_count": result.modified_count,
+            "upserted": result.upserted_id is not None
+        }
+        
+    except Exception as e:
+        print(f"❌ Error updating profile for {request.email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")
+
+                "memory_updates_applied": list(memory_updates.keys()) if memory_updates else [],
+                "memory_stats": {
+                    "profile": bool(user_memory.get('profile')),
+                    "structured_memories": len(user_memory.get('structured_memory', [])),
+                    "conversations": len(user_memory.get('conversations', [])),
+                    "temp_memory": bool(user_memory.get('temp_memory')),
+                    "graph_relationships": len(user_memory.get('graph_relationships', [])),
+                }
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Memory-enhanced chat error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": f"Memory processing failed: {str(e)}"
+        }
+
+# Memory testing endpoints
+@router.get("/memory-test/{user_id}")
+async def test_user_memory(user_id: str):
+    """Test endpoint to check user memory loading"""
+    try:
+        print(f"🧪 Testing memory for user: {user_id}")
+        
+        # Load user memory
+        user_memory = await memory_manager.load_user_memory(user_id)
+        
+        # Build context
+        memory_context = memory_manager.build_context_for_model(user_memory)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "memory_stats": {
+                "profile_loaded": bool(user_memory.get('profile')),
+                "structured_memories": len(user_memory.get('structured_memory', [])),
+                "tasks": len(user_memory.get('tasks', [])),
+                "conversations": len(user_memory.get('conversations', [])),
+                "temp_memory": bool(user_memory.get('temp_memory')),
+                "session_state": bool(user_memory.get('session_state')),
+                "vector_memories": len(user_memory.get('vector_memories', [])),
+                "graph_relationships": len(user_memory.get('graph_relationships', [])),
+                "interests": len(user_memory.get('interests', []))
+            },
+            "context_preview": memory_context[:500] + "..." if len(memory_context) > 500 else memory_context
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Memory test failed: {str(e)}"
+        }
+
+@router.post("/memory-update/{user_id}")
+async def manual_memory_update(user_id: str, updates: Dict[str, Any] = Body(...)):
+    """Manual memory update endpoint for testing"""
+    try:
+        print(f"🛠️ Manual memory update for user: {user_id}")
+        
+        results = await memory_manager.process_memory_update_instructions(user_id, updates)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "update_results": results,
+            "instructions_processed": list(updates.keys())
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Manual memory update failed: {str(e)}"
+        }
+
+# Simple test endpoint
+@router.get("/test")
+async def test_endpoint():
+    """Simple test to verify router is working"""
+    return {
+        "status": "Memory-enhanced chat router is working!",
+        "timestamp": datetime.now().isoformat(),
+        "features": [
+            "Memory loading from all databases",
+            "Context injection into AI prompts", 
+            "Memory update processing",
+            "Conversation saving",
+            "User validation and access control"
+        ]
+    }
+
+# Create a separate users router for user profile endpoints
+users_router = APIRouter(
+    prefix="/users",
+    tags=["Users"]
+)
+
+@users_router.get("/profile")
+async def get_user_profile(email: str):
+    """Get user profile by email"""
+    try:
+        print(f"📋 Fetching user profile for: {email}")
+        
+        # Find user in MongoDB
+        user = await users_collection.find_one({"email": email})
+        
+        if not user:
+            # Return default profile structure if user doesn't exist
+            return {
+                "email": email,
+                "name": email.split("@")[0],
+                "username": None,
+                "hobby": [],
+                "role": None,
+                "interests": [],
+                "responseStyle": None,
+                "profilePicUrl": None,
+                "createdAt": datetime.utcnow().isoformat()
+            }
+        
+        # Convert MongoDB document to API response
+        profile = {
+            "email": user.get("email", email),
+            "name": user.get("name", email.split("@")[0]),
+            "username": user.get("username"),
+            "hobby": user.get("hobby", []),
+            "role": user.get("role"),
+            "interests": user.get("interests", []),
+            "responseStyle": user.get("responseStyle"),
+            "profilePicUrl": user.get("profilePicUrl"),
+            "createdAt": user.get("createdAt", datetime.utcnow()).isoformat() if isinstance(user.get("createdAt"), datetime) else user.get("createdAt")
+        }
+        
+        print(f"✅ Profile found for {email}")
+        return profile
+        
+    except Exception as e:
+        print(f"❌ Error fetching profile for {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch user profile: {str(e)}")
+
+class UpdateProfileRequest(BaseModel):
+    email: str
+    username: str = None
+    hobby: list = []
+    role: str = None
+    interests: list = []
+    responseStyle: str = None
+    profilePicUrl: str = None
+
+@users_router.put("/profile")
+async def update_user_profile(request: UpdateProfileRequest):
+    """Update user profile"""
+    try:
+        print(f"📝 Updating user profile for: {request.email}")
+        
+        # Build update document
+        update_data = {
+            "email": request.email,
+            "updatedAt": datetime.utcnow()
+        }
+        
+        if request.username is not None:
+            update_data["username"] = request.username
+        if request.hobby:
+            update_data["hobby"] = request.hobby
+        if request.role is not None:
+            update_data["role"] = request.role
+        if request.interests:
+            update_data["interests"] = request.interests
+        if request.responseStyle is not None:
+            update_data["responseStyle"] = request.responseStyle
+        if request.profilePicUrl is not None:
+            update_data["profilePicUrl"] = request.profilePicUrl
+        
+        # Update or insert user
+        result = await users_collection.update_one(
+            {"email": request.email},
+            {"$set": update_data},
+            upsert=True
+        )
+        
+        print(f"✅ Profile updated for {request.email}")
+        return {
+            "success": True,
+            "message": "Profile updated successfully",
+            "modified_count": result.modified_count,
+            "upserted": result.upserted_id is not None
+        }
+        
+    except Exception as e:
+        print(f"❌ Error updating profile for {request.email}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")
 
 @users_router.get("/test")
 async def test_users_endpoint():
     """Test endpoint for users router"""
     return {"status": "Users router is working!", "timestamp": datetime.now().isoformat()}
+
+@router.post("/consolidate")
+async def trigger_consolidation(current_user: User = Depends(get_verified_user)):
+    """
+    🧠 TRIGGER MEMORY CONSOLIDATION
+    
+    Manually triggers the 'Sleep on it' process:
+    1. Analyzes recent conversations
+    2. Extracts new facts
+    3. Commits to long-term graph memory
+    """
+    try:
+        from app.services.memory_consolidation_service import consolidation_service
+        
+        user_id = current_user.user_id
+        result = await consolidation_service.consolidate_user_memory(user_id)
+        
+        return {
+            "success": True,
+            "message": "Memory consolidation complete",
+            "stats": result
+        }
+    except Exception as e:
+        logger.error(f"Consolidation failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Consolidation failed: {str(e)}"
+        )
+
+# ============================================================================
+# 🧠 MEMORY MANAGEMENT ENDPOINTS (Graph Visualization & Editing)
+# ============================================================================
+
+@router.get("/memory/graph")
+async def get_memory_graph(current_user: User = Depends(get_verified_user)):
+    """
+    Get complete user knowledge graph for visualization.
+    Returns nodes and links formatted for force-directed graphs.
+    """
+    try:
+        user_id = current_user.user_id
+        # ✅ Unified Architecture: Use Orchestrator
+        graph_data = await unified_memory_orchestrator.get_knowledge_graph(user_id)
+        
+        return {
+            "success": True,
+            "data": graph_data,
+            "stats": {
+                "nodes": len(graph_data["nodes"]),
+                "links": len(graph_data["links"])
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting memory graph: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get memory graph: {str(e)}"
+        )
+
+class MemoryItemRequest(BaseModel):
+    target: str
+    relationship: str
+    category: str = "Entity"
+
+@router.post("/memory/relationship")
+async def add_memory_relationship(
+    request: MemoryItemRequest,
+    current_user: User = Depends(get_verified_user)
+):
+    """
+    Manually add a relationship to the knowledge graph.
+    Example: User -[LIKES]-> "Quantum Computing"
+    """
+    try:
+        user_id = current_user.user_id
+        
+        # ✅ Unified Architecture: Use Orchestrator
+        result, logs = await unified_memory_orchestrator.store_memory(
+            user_id=user_id,
+            memory_content=(request.relationship, request.target),
+            memory_type=MemoryType.RELATIONSHIP,
+            metadata={"source": "manual_ui", "label": request.category}
+        )
+        
+        if result.success:
+            return {"success": True, "message": f"Added: {request.relationship} -> {request.target}"}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed: {result.reason}")
+            
+    except Exception as e:
+        logger.error(f"Error adding memory relationship: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add relationship: {str(e)}"
+        )
+
+@router.delete("/memory/relationship")
+async def delete_memory_relationship(
+    request: MemoryItemRequest,
+    current_user: User = Depends(get_verified_user)
+):
+    """
+    Delete a specific relationship from the knowledge graph.
+    """
+    try:
+        user_id = current_user.user_id
+        
+        # ✅ Unified Architecture: Use Orchestrator
+        success = await unified_memory_orchestrator.delete_relationship(
+            user_id=user_id,
+            target=request.target,
+            relationship_type=request.relationship
+        )
+        
+        if success:
+            return {"success": True, "message": f"Deleted: {request.relationship} -> {request.target}"}
+        else:
+            return {"success": False, "message": "Relationship not found or could not be deleted"}
+            
+    except Exception as e:
+        logger.error(f"Error deleting memory relationship: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete relationship: {str(e)}"
+        )
+
+from app.services.behavior_engine import behavior_engine
+import json
+
+@router.post("/interaction_mode")
+async def set_interaction_mode(
+    request: dict = Body(...),
+    current_user: User = Depends(get_verified_user)
+):
+    """
+    Set a temporary interaction anchor (Mock API for now, real implementation would fetch from UI).
+    Expected payload: {
+        "relationship_style": "romantic" | "friend" | "professional",
+        "assistant_nickname": "str",
+        "user_nickname": "str",
+        "emotional_mode": "str"
+    }
+    """
+    try:
+        user_id = current_user.user_id
+        
+        # Validate/Sanitize inputs
+        anchor_data = {
+            "relationship_style": request.get("relationship_style", "standard"),
+            "assistant_nickname": request.get("assistant_nickname", "Prism"),
+            "user_nickname": request.get("user_nickname", "User"),
+            "emotional_mode": request.get("emotional_mode", "warm")
+        }
+        
+        behavior_engine.set_interaction_anchor(user_id, anchor_data)
+        
+        return {"success": True, "message": "Interaction mode set", "mode": anchor_data}
+    except Exception as e:
+        logger.error(f"Error setting interaction mode: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/interaction_mode")
+async def clear_interaction_mode(current_user: User = Depends(get_verified_user)):
+    """Clear the current interaction anchor."""
+    behavior_engine.clear_interaction_anchor(current_user.user_id)
+    return {"success": True, "message": "returned to normal mode"}

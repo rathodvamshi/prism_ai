@@ -1,3 +1,6 @@
+
+import os
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from urllib.parse import quote_plus, unquote_plus, urlsplit, urlunsplit
 from app.config import settings
@@ -91,11 +94,34 @@ db_instance = MongoDB()
 
 
 def _build_client() -> AsyncIOMotorClient:
-    return AsyncIOMotorClient(
-        _sanitize_mongo_uri(settings.MONGO_URI),
-        minPoolSize=10,
-        maxPoolSize=100,
-    )
+    from app.db.connection_pool import ConnectionPoolConfig
+    
+    # Determine if we need SSL based on URI
+    sanitized_uri = _sanitize_mongo_uri(settings.MONGO_URI)
+    needs_ssl = any(x in sanitized_uri for x in ['mongodb+srv://', 'ssl=true', 'mongodb.net'])
+    
+    client_options = {
+        'minPoolSize': ConnectionPoolConfig.MONGODB_MIN_POOL_SIZE,
+        'maxPoolSize': ConnectionPoolConfig.MONGODB_MAX_POOL_SIZE,
+        'maxIdleTimeMS': ConnectionPoolConfig.MONGODB_MAX_IDLE_TIME_MS,
+        'serverSelectionTimeoutMS': ConnectionPoolConfig.MONGODB_SERVER_SELECTION_TIMEOUT_MS,
+        'connectTimeoutMS': 30000,  # Increased to 30 seconds for Atlas (was 15000)
+        'socketTimeoutMS': 30000,   # 30 seconds for socket operations
+        'retryWrites': True,        # Enable write retries
+        'retryReads': True,         # Enable read retries
+        'heartbeatFrequencyMS': 10000,  # Check server status every 10s
+    }
+    
+    # Enhanced SSL configuration for Atlas
+    if needs_ssl:
+        import ssl
+        client_options.update({
+            'tls': True,
+            'tlsAllowInvalidCertificates': True,  # Allow invalid certificates (dev only)
+            'tlsAllowInvalidHostnames': True,
+        })
+    
+    return AsyncIOMotorClient(sanitized_uri, **client_options)
 
 
 # Create default client (eager) for backwards compatibility; can be replaced via connect_to_mongo
@@ -137,20 +163,107 @@ users_global_collection = db.users_global
 
 async def connect_to_mongo():
     """
-    Establish pooled MongoDB connection (singleton).
+    Establish pooled MongoDB connection (singleton) with retry logic.
     """
+    import asyncio
+    from pymongo.errors import ServerSelectionTimeoutError, NetworkTimeout, OperationFailure, ConfigurationError
+    
     global client, db, users_collection, sessions_collection, auth_sessions_collection, tasks_collection, memory_collection, mini_agents_collection, users_global_collection
-    db_instance.client = _build_client()
-    client = db_instance.client
-    db = client.prism_db
-    users_collection = db.users
-    sessions_collection = db.sessions
-    auth_sessions_collection = db.auth_sessions
-    tasks_collection = db.tasks
-    memory_collection = db.memory
-    mini_agents_collection = db.mini_agents
-    users_global_collection = db.users_global
-    print("✅ MongoDB Connection Pool Created")
+    
+    max_retries = 3
+    retry_delay = 5  # seconds
+    
+    print(f"📍 MongoDB URI: {settings.MONGO_URI[:50]}..." if settings.MONGO_URI else "❌ No MONGO_URI configured")
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 MongoDB connection attempt {attempt + 1}/{max_retries}...")
+            
+            # Create client with sanitized URI
+            sanitized_uri = _sanitize_mongo_uri(settings.MONGO_URI)
+            if sanitized_uri != settings.MONGO_URI:
+                print("🔧 URI sanitized (password encoded)")
+            
+            # REUSE GLOBAL CLIENT if available, otherwise build new
+            if not client:
+                 db_instance.client = _build_client()
+                 client = db_instance.client
+            else:
+                 # Ensure db_instance tracks it
+                 db_instance.client = client
+            
+            # Test connection with timeout
+            print("📋 Testing connection with ping...")
+            await asyncio.wait_for(client.admin.command('ping'), timeout=10)
+            
+            # Get server info for verification
+            print("📊 Retrieving server information...")
+            server_info = await asyncio.wait_for(
+                client.admin.command('serverStatus'), 
+                timeout=10
+            )
+            
+            db = client.prism_db
+            users_collection = db.users
+            sessions_collection = db.sessions
+            auth_sessions_collection = db.auth_sessions
+            tasks_collection = db.tasks
+            memory_collection = db.memory
+            mini_agents_collection = db.mini_agents
+            users_global_collection = db.users_global
+            
+            print(f"✅ MongoDB Connected Successfully!")
+            print(f"   Server Version: {server_info.get('version', 'Unknown')}")
+            print(f"   Database: prism_db")
+            print(f"   Host: {server_info.get('host', 'Unknown')}")
+            return
+            
+        except asyncio.TimeoutError:
+            error_msg = f"Connection timeout (attempt {attempt + 1})"
+            print(f"⚠️ {error_msg}")
+            
+            if attempt == 0:  # First attempt, provide detailed guidance
+                print("💡 Troubleshooting tips:")
+                print("   - Check internet connection")
+                print("   - Verify MongoDB Atlas cluster is running")
+                print("   - Check network access list (IP whitelist)")
+                print("   - Verify username and password in MONGO_URI")
+                
+        except (ServerSelectionTimeoutError, NetworkTimeout) as e:
+            error_msg = f"Network/server selection error: {str(e)[:100]}..."
+            print(f"⚠️ MongoDB connection attempt {attempt + 1} failed: {error_msg}")
+            
+        except OperationFailure as e:
+            if "authentication failed" in str(e).lower():
+                print(f"❌ Authentication failed - check username/password in MONGO_URI")
+                print("💡 Ensure password special characters are URL-encoded (@ becomes %40)")
+            else:
+                print(f"❌ MongoDB operation failed: {e}")
+            # Don't retry auth failures
+            break
+            
+        except ConfigurationError as e:
+            print(f"❌ MongoDB configuration error: {e}")
+            print("💡 Check MONGO_URI format and parameters")
+            # Don't retry config errors
+            break
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)[:100]}..."
+            print(f"❌ MongoDB connection attempt {attempt + 1} failed: {error_msg}")
+            
+        # Cleanup and retry logic
+        if db_instance.client:
+            db_instance.client.close()
+            db_instance.client = None
+            
+        if attempt < max_retries - 1:
+            print(f"🔄 Retrying in {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
+        else:
+            print(f"❌ MongoDB connection failed after {max_retries} attempts")
+            print("🔧 Run 'python test_mongodb_connection.py' for detailed diagnostics")
+            raise ConnectionError("Failed to connect to MongoDB after maximum retries")
 
 
 async def close_mongo():
@@ -312,7 +425,7 @@ async def initialize_indexes():
         # ============================================================
         print("\n📊 Highlights Collection:")
         
-        highlights_collection = db.message_highlights
+        highlights_collection = db.highlights
         
         # Compound index: userId + sessionId
         await highlights_collection.create_index([
@@ -321,13 +434,17 @@ async def initialize_indexes():
         ])
         print("  ✅ (userId, sessionId) - Session highlights query")
         
-        # uniqueKey index for duplicate prevention
-        await highlights_collection.create_index("uniqueKey", unique=True)
-        print("  ✅ uniqueKey (unique) - Prevent duplicate highlights")
+        # highlightId index for duplicate prevention (Primary Key)
+        await highlights_collection.create_index("highlightId", unique=True)
+        print("  ✅ highlightId (unique) - Prevent duplicate highlights")
         
         # sessionId index for session's highlights
         await highlights_collection.create_index("sessionId")
         print("  ✅ sessionId - All session highlights")
+        
+        # messageId index for message highlights lookups
+        await highlights_collection.create_index("messageId")
+        print("  ✅ messageId - Message highlights")
         
         # ============================================================
         # USERS_GLOBAL COLLECTION INDEXES
