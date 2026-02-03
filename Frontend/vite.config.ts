@@ -54,7 +54,8 @@ export default defineConfig(({ mode }) => ({
   build: {
     commonjsOptions: {
       transformMixedEsModules: true,
-      include: [/react-window/, /react-virtualized-auto-sizer/],
+      // Broaden CJS handling to avoid interop issues with JSX/runtime
+      include: [/node_modules/, /react-window/, /react-virtualized-auto-sizer/],
     },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
@@ -62,5 +63,7 @@ export default defineConfig(({ mode }) => ({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+    // Ensure single React instance to avoid export mismatch issues
+    dedupe: ["react", "react-dom"],
   },
 }));
