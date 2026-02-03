@@ -24,20 +24,43 @@ logger = logging.getLogger(__name__)
 # ☁️ Cloud-Native Pinecone Configuration
 # Supports both serverless (recommended) and pod-based indexes
 
-# Initialize Pinecone conditionally
 pc = None
-try:
-    if settings.PINECONE_API_KEY:
-        pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-        logger.info("✅ Pinecone initialized successfully")
-    else:
-        logger.warning("⚠️ Pinecone API key not provided, vector memory disabled")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize Pinecone: {e}")
-    pc = None
+embedding_model = None
 
-# Initialize FastEmbed for embeddings (local, fast, free)
-embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+def _init_pinecone_if_enabled():
+    """Initialize Pinecone only when feature is enabled and API key exists"""
+    global pc
+    if pc is not None:
+        return pc
+    if not settings.ENABLE_VECTOR_MEMORY:
+        logger.info("ℹ️ Vector memory disabled via ENABLE_VECTOR_MEMORY=false")
+        pc = None
+        return None
+    try:
+        if settings.PINECONE_API_KEY:
+            pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+            logger.info("✅ Pinecone initialized successfully")
+        else:
+            logger.info("ℹ️ PINECONE_API_KEY not set; Pinecone disabled")
+            pc = None
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Pinecone: {e}")
+        pc = None
+    return pc
+
+def _get_embedding_model():
+    """Lazily load the embedding model to reduce startup memory."""
+    global embedding_model
+    if embedding_model is not None:
+        return embedding_model
+    if not settings.ENABLE_VECTOR_MEMORY:
+        return None
+    try:
+        embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+        return embedding_model
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize TextEmbedding: {e}")
+        return None
 
 # Index configuration (cloud-native)
 INDEX_NAME = settings.PINECONE_INDEX_NAME or "prism-memory"
@@ -51,18 +74,28 @@ class VectorMemoryService:
     
     def __init__(self):
         self.index = None
-        self._initialize_index()
+        # Initialize index only if vector memory is enabled
+        if settings.ENABLE_VECTOR_MEMORY:
+            self._initialize_index()
+        else:
+            self.index = None
     
     def _initialize_index(self):
         """☁️ Initialize or connect to Pinecone index (cloud-native)"""
         try:
-            if pc is None:
+            if _init_pinecone_if_enabled() is None:
                 logger.warning("⚠️ Pinecone client not available, vector memory disabled")
                 self.index = None
                 return
                 
             # Check if index exists
-            existing_indexes = [index.name for index in pc.list_indexes()]
+            existing_indexes = []
+            try:
+                existing_indexes = [index.name for index in pc.list_indexes()]
+            except Exception as e:
+                logger.error(f"❌ Pinecone list_indexes failed: {e}")
+                self.index = None
+                return
             
             if INDEX_NAME not in existing_indexes:
                 logger.info(f"🚀 Creating Pinecone index: {INDEX_NAME}")
@@ -109,7 +142,10 @@ class VectorMemoryService:
     def _generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for text using FastEmbed"""
         try:
-            embeddings = list(embedding_model.embed([text]))
+            model = _get_embedding_model()
+            if model is None:
+                return [0.0] * VECTOR_DIMENSION
+            embeddings = list(model.embed([text]))
             return embeddings[0].tolist()  # Convert numpy array to list
         except Exception as e:
             print(f"[ERROR] Embedding generation error: {e}")

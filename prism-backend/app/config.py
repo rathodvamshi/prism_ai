@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     MONGO_URI: str = "mongodb://localhost:27017/prismdb"# MongoDB (users, tasks, analytics)
     # Timezone for temporal grounding (e.g., Asia/Kolkata)
     TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
+    # Feature Flags (for low-memory environments like Render Starter)
+    ENABLE_VECTOR_MEMORY: bool = True           # Disable to avoid fastembed/onnxruntime memory usage
     
     # --------------------------------------------------
     # Celery Configuration (Cloud-Native)
