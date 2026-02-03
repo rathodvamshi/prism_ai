@@ -10,7 +10,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: python -m gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
+    startCommand: python -m gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 1 --timeout 120
     healthCheckPath: /health
     plan: starter
     envVars:
@@ -18,8 +18,6 @@ services:
         value: production
       - key: PYTHONPATH
         value: /opt/render/project/src/prism-backend
-      - key: PORT
-        value: 8000
       
       # Persistence & Memory
       - key: MONGO_URI
@@ -80,6 +78,34 @@ services:
         value: /opt/render/project/src/prism-backend
       
       # Worker needs DB access for task updates
+      - key: MONGO_URI
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # 🕒 Celery Beat (Periodic Scheduler)
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: prism-celery-beat
+    runtime: python
+    rootDir: ./prism-backend
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: python -m celery -A app.core.celery_app beat --loglevel=info
+    plan: starter
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: PYTHONPATH
+        value: /opt/render/project/src/prism-backend
       - key: MONGO_URI
         sync: false
       - key: CELERY_BROKER_URL
