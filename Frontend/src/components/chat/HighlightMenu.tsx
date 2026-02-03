@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Bot, ClipboardCopy, Volume2, Trash2, Check, Palette } from "lucide-react";
+import { Bot, ClipboardCopy, Volume2, Trash2, Check, Palette, MessageSquarePlus } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface HighlightMenuProps {
@@ -12,6 +12,7 @@ interface HighlightMenuProps {
   onHighlight: (color: string) => void;
   onDeleteHighlight?: () => void;
   onCreateMiniAgent: () => void;
+  onAskFlow?: () => void; // 🆕 Ask Flow - Fill input with selected text
   onSpeak: () => void;
   onCopy: () => void;
   hasMiniAgent?: boolean;
@@ -67,10 +68,10 @@ const AdvancedColorPickerContent = ({ onColorSelect }: { onColorSelect: (color: 
     const rect = colorAreaRef.current.getBoundingClientRect();
     const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
     const y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
-    
+
     const newSaturation = (x / rect.width) * 100;
     const newBrightness = 100 - (y / rect.height) * 100;
-    
+
     setSaturation(newSaturation);
     setBrightness(newBrightness);
   };
@@ -202,6 +203,7 @@ export const HighlightMenu = ({
   onHighlight,
   onDeleteHighlight,
   onCreateMiniAgent,
+  onAskFlow, // 🆕 Ask Flow handler
   onSpeak,
   onCopy,
   hasMiniAgent,
@@ -210,32 +212,32 @@ export const HighlightMenu = ({
   const [copied, setCopied] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [calculatedPos, setCalculatedPos] = useState<{ x: number; y: number; showAbove: boolean } | null>(null);
-  
+
   // CLEAN POSITIONING - Always above with minimal gap
   useEffect(() => {
     if (!menuRef.current) return;
-    
+
     const popup = menuRef.current;
     const popupWidth = popup.offsetWidth;
     const gap = 8; // 8px gap above selected text
-    
+
     const viewportWidth = window.innerWidth;
-    
+
     // Always position above: popup bottom at (selection.top - gap)
     const finalY = position.y - gap;
-    
+
     // Center horizontally on selection
     let finalX = position.x;
-    
+
     // Prevent overflow (left/right)
     const minX = popupWidth / 2 + 8;
     const maxX = viewportWidth - popupWidth / 2 - 8;
     if (finalX < minX) finalX = minX;
     if (finalX > maxX) finalX = maxX;
-    
+
     setCalculatedPos({ x: finalX, y: finalY, showAbove: true });
   }, [position, showColorPicker, menuRef.current]);
-  
+
   // Top 5 most used colors
   const topColors = [
     { name: "yellow", hex: "#FFD93D" },
@@ -244,7 +246,7 @@ export const HighlightMenu = ({
     { name: "red", hex: "#FF4B4B" },
     { name: "purple", hex: "#C36BFF" },
   ];
-  
+
   const handleCopy = () => {
     onCopy();
     setCopied(true);
@@ -273,61 +275,94 @@ export const HighlightMenu = ({
         transform: "translate(-50%, -100%)", // Always above: bottom of popup at pos.y
       }}
     >
-      {/* Main Menu Content */}
+      {/* Main Menu Content - Horizontal Layout */}
       <div className="p-2.5">
-        {/* Top Toolbar - Copy, Sub-Brain, Speak, Delete */}
+        {/* Top Toolbar - Actions */}
         <div className="flex items-center gap-1 pb-2 mb-2 border-b border-white/10">
+          {/* Copy */}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <button onClick={handleCopy} className="p-1.5 rounded-lg hover:bg-white/10 transition-all">
-                  {copied ? <Check className="w-4 h-4 text-green-400" /> : <ClipboardCopy className="w-4 h-4 text-white/80" />}
+                <button onClick={handleCopy} className="p-1.5 rounded-lg hover:bg-white/10 transition-all text-white/80 hover:text-white">
+                  {copied ? <Check className="w-4 h-4 text-green-400" /> : <ClipboardCopy className="w-4 h-4" />}
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">Copy</TooltipContent>
             </Tooltip>
           </TooltipProvider>
+
+          {/* 🆕 ASK FLOW - Professional contextual questioning */}
+          {onAskFlow && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => {
+                      onAskFlow();
+                      onClose();
+                    }}
+                    className="p-1.5 rounded-lg bg-gradient-to-br from-indigo-500/20 to-purple-500/20 hover:from-indigo-500/30 hover:to-purple-500/30 border border-indigo-400/30 transition-all shadow-sm hover:shadow-md group"
+                  >
+                    <MessageSquarePlus className="w-4 h-4 text-indigo-300 group-hover:text-indigo-200" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs bg-gradient-to-r from-indigo-600 to-purple-600 border-none text-white">
+                  <div className="flex items-center gap-1.5">
+                    <MessageSquarePlus className="w-3 h-3" />
+                    <span className="font-semibold">Ask Flow</span>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+
+          {/* Sub-Brain */}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <button 
-                  onClick={onCreateMiniAgent} 
-                  className={`p-1.5 rounded-lg transition-all ${
-                    hasMiniAgent 
-                      ? 'bg-primary/20 hover:bg-primary/30 cursor-pointer' 
-                      : 'hover:bg-white/10'
-                  }`}
-                  title={hasMiniAgent ? 'Update snippet (Sub-Brain exists)' : 'Open Sub-Brain'}
+                <button
+                  onClick={onCreateMiniAgent}
+                  className={`p-1.5 rounded-lg transition-all ${hasMiniAgent
+                    ? 'bg-primary/20 hover:bg-primary/30 cursor-pointer'
+                    : 'hover:bg-white/10 text-white/80 hover:text-white'
+                    }`}
                 >
-                  <Bot className={`w-4 h-4 ${hasMiniAgent ? 'text-primary animate-pulse' : 'text-primary'}`} />
+                  <Bot className={`w-4 h-4 ${hasMiniAgent ? 'text-primary animate-pulse' : 'currentColor'}`} />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">
-                {hasMiniAgent ? 'Update snippet' : '🧠 Sub-Brain'}
+                {hasMiniAgent ? 'Update snippet' : 'Sub-Brain'}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
+
+          {/* Speak */}
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <button onClick={onSpeak} className="p-1.5 rounded-lg hover:bg-white/10 transition-all">
-                  <Volume2 className="w-4 h-4 text-white/80" />
+                <button onClick={onSpeak} className="p-1.5 rounded-lg hover:bg-white/10 transition-all text-white/80 hover:text-white">
+                  <Volume2 className="w-4 h-4" />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="bottom" className="text-xs">Speak</TooltipContent>
             </Tooltip>
           </TooltipProvider>
+
+          {/* Delete Highlight (Separator if needed) */}
           {isHighlighted && onDeleteHighlight && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button onClick={onDeleteHighlight} className="p-1.5 rounded-lg hover:bg-white/10 transition-all">
-                    <Trash2 className="w-4 h-4 text-red-400" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">Delete</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <>
+              <div className="w-px h-4 bg-white/10 mx-1" />
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button onClick={onDeleteHighlight} className="p-1.5 rounded-lg hover:bg-white/10 transition-all text-red-300 hover:text-red-200">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">Delete</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </>
           )}
         </div>
 
@@ -349,7 +384,7 @@ export const HighlightMenu = ({
               </Tooltip>
             </TooltipProvider>
           ))}
-          
+
           {/* Color Picker Icon */}
           <TooltipProvider>
             <Tooltip>

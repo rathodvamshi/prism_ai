@@ -94,46 +94,247 @@ db_instance = MongoDB()
 
 
 def _build_client() -> AsyncIOMotorClient:
+    """
+    🛡️ HARDENED MongoDB Client Builder
+    
+    Configured for maximum stability on Windows + Atlas:
+    - Extended timeouts to handle network jitter
+    - Conservative pool sizes to reduce background maintenance
+    - Reduced heartbeat frequency to minimize network chatter
+    - Aggressive retry policies
+    - Complete log suppression for non-fatal pool errors
+    """
     from app.db.connection_pool import ConnectionPoolConfig
+    import logging
+    
+    # ==========================================================================
+    # 🔇 AGGRESSIVE LOG SUPPRESSION (CRITICAL for clean logs)
+    # Suppress ALL non-fatal PyMongo background thread logs
+    # ==========================================================================
+    for logger_name in [
+        'pymongo',
+        'pymongo.pool',
+        'pymongo.topology',
+        'pymongo.connection',
+        'pymongo.serverSelection',
+        'pymongo.command',
+        'pymongo.monitor',
+        'motor',
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.CRITICAL)
     
     # Determine if we need SSL based on URI
     sanitized_uri = _sanitize_mongo_uri(settings.MONGO_URI)
     needs_ssl = any(x in sanitized_uri for x in ['mongodb+srv://', 'ssl=true', 'mongodb.net'])
     
+    # ==========================================================================
+    # 🛡️ HARDENED CLIENT OPTIONS
+    # ==========================================================================
     client_options = {
+        # Connection Pool Settings (conservative to reduce background churn)
         'minPoolSize': ConnectionPoolConfig.MONGODB_MIN_POOL_SIZE,
         'maxPoolSize': ConnectionPoolConfig.MONGODB_MAX_POOL_SIZE,
         'maxIdleTimeMS': ConnectionPoolConfig.MONGODB_MAX_IDLE_TIME_MS,
+        
+        # Timeout Settings (generous to handle network jitter)
         'serverSelectionTimeoutMS': ConnectionPoolConfig.MONGODB_SERVER_SELECTION_TIMEOUT_MS,
-        'connectTimeoutMS': 30000,  # Increased to 30 seconds for Atlas (was 15000)
-        'socketTimeoutMS': 30000,   # 30 seconds for socket operations
-        'retryWrites': True,        # Enable write retries
-        'retryReads': True,         # Enable read retries
-        'heartbeatFrequencyMS': 10000,  # Check server status every 10s
+        'connectTimeoutMS': ConnectionPoolConfig.MONGODB_CONNECT_TIMEOUT_MS,
+        'socketTimeoutMS': ConnectionPoolConfig.MONGODB_SOCKET_TIMEOUT_MS,
+        'waitQueueTimeoutMS': ConnectionPoolConfig.MONGODB_WAIT_QUEUE_TIMEOUT_MS,
+        
+        # Heartbeat & Monitoring (reduced frequency = less noise)
+        'heartbeatFrequencyMS': ConnectionPoolConfig.MONGODB_HEARTBEAT_FREQUENCY_MS,
+        'localThresholdMS': ConnectionPoolConfig.MONGODB_LOCAL_THRESHOLD_MS,
+        
+        # Retry Policies (automatic retry on transient failures)
+        'retryWrites': True,
+        'retryReads': True,
+        
+        # Connection Settings
+        'directConnection': False,  # Allow replica set discovery
+        'appname': 'PRISM-AI-Studio',  # Identify in Atlas monitoring
     }
     
     # Enhanced SSL configuration for Atlas
     if needs_ssl:
-        import ssl
         client_options.update({
             'tls': True,
-            'tlsAllowInvalidCertificates': True,  # Allow invalid certificates (dev only)
+            'tlsAllowInvalidCertificates': True,  # Dev only - Atlas uses valid certs
             'tlsAllowInvalidHostnames': True,
         })
     
     return AsyncIOMotorClient(sanitized_uri, **client_options)
 
 
-# Create default client (eager) for backwards compatibility; can be replaced via connect_to_mongo
-client: AsyncIOMotorClient = _build_client()
-db = client.prism_db
+# =============================================================================
+# 🚀 LAZY CLIENT INITIALIZATION
+# =============================================================================
+# CRITICAL: Do NOT block startup on DNS failures or network issues
+# The app should start and handle DB errors gracefully per-request
+# =============================================================================
+
+_client: AsyncIOMotorClient | None = None
+_db = None
+_init_logged = False  # Prevent log spam
+
+def _get_client() -> AsyncIOMotorClient:
+    """
+    Get or create MongoDB client lazily.
+    
+    This is NON-BLOCKING and will not fail startup.
+    Connection errors are handled per-request with retries.
+    """
+    global _client, _init_logged
+    
+    if _client is None:
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            _client = _build_client()
+            if not _init_logged:
+                logger.info("✅ MongoDB client initialized (lazy)")
+                _init_logged = True
+        except Exception as e:
+            # Log once, but don't crash - let per-request handling deal with it
+            if not _init_logged:
+                logger.warning(f"⚠️ MongoDB client init deferred: {e}")
+                _init_logged = True
+            raise
+    
+    return _client
+
+def _get_db():
+    """Get or create database instance lazily."""
+    global _db
+    if _db is None:
+        try:
+            uri_path = urlsplit(settings.MONGO_URI).path.strip("/")
+            db_name = uri_path if uri_path else "prismdb"
+        except:
+            db_name = "prismdb"
+        _db = _get_client()[db_name]
+    return _db
+
+# Backwards-compatible properties using lazy loading
+class _LazyClient:
+    """Proxy that lazily initializes MongoDB client on first access."""
+    def __getattr__(self, name):
+        return getattr(_get_client(), name)
+    def __getitem__(self, name):
+        return _get_client()[name]
+
+class _LazyDB:
+    """Proxy that lazily initializes database on first access."""
+    def __getattr__(self, name):
+        return getattr(_get_db(), name)
+    def __getitem__(self, name):
+        return _get_db()[name]
+
+# Create lazy proxies for backwards compatibility
+client = _LazyClient()
+db = _LazyDB()
 
 def get_database():
 	"""
 	Returns the main MongoDB database instance.
 	Usage: db = get_database()
 	"""
-	return db
+	return _get_db()
+
+
+# ============================================================================
+# MONGODB RETRY HELPER - Handles connection issues gracefully
+# ============================================================================
+import asyncio
+import logging
+from functools import wraps
+from pymongo.errors import AutoReconnect, ServerSelectionTimeoutError, NetworkTimeout
+
+_retry_logger = logging.getLogger(__name__)
+
+async def mongo_retry(
+    operation,
+    max_retries: int = 3,
+    base_delay: float = 0.3,
+    fallback=None,
+    log_errors: bool = True
+):
+    """
+    Execute a MongoDB operation with automatic retry on connection errors.
+    
+    Args:
+        operation: Async callable (lambda or function)
+        max_retries: Number of retry attempts
+        base_delay: Initial delay between retries (doubles each retry)
+        fallback: Value to return if all retries fail (None raises exception)
+        log_errors: Whether to log errors
+    
+    Returns:
+        Result of operation, or fallback value if all retries fail
+    
+    Usage:
+        result = await mongo_retry(
+            lambda: collection.find_one({"user_id": user_id}),
+            fallback={}
+        )
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            return await operation()
+        except (AutoReconnect, ServerSelectionTimeoutError, NetworkTimeout) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                if log_errors:
+                    # Only warn on subsequent retries, debug on first
+                    level = logging.WARNING if attempt > 0 else logging.DEBUG
+                    _retry_logger.log(
+                        level,
+                        f"⚠️ MongoDB retry {attempt + 1}/{max_retries} "
+                        f"after {type(e).__name__}, waiting {delay:.1f}s..."
+                    )
+                await asyncio.sleep(delay)
+            continue
+        except Exception as e:
+            # Non-retryable error
+            if log_errors:
+                _retry_logger.error(f"❌ MongoDB error (non-retryable): {e}")
+            if fallback is not None:
+                return fallback
+            raise
+    
+    # All retries exhausted
+    if log_errors:
+        _retry_logger.error(f"❌ MongoDB operation failed after {max_retries} retries: {last_error}")
+    
+    if fallback is not None:
+        return fallback
+    raise last_error
+
+
+def with_mongo_retry(max_retries: int = 3, fallback=None):
+    """
+    Decorator for MongoDB operations with automatic retry.
+    
+    Usage:
+        @with_mongo_retry(fallback={})
+        async def get_user(user_id: str):
+            return await users_collection.find_one({"_id": user_id})
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            return await mongo_retry(
+                lambda: func(*args, **kwargs),
+                max_retries=max_retries,
+                fallback=fallback
+            )
+        return wrapper
+    return decorator
+
 
 # 🧱 PERFECT DATABASE COLLECTIONS (As per requirements)
 # Each collection has unique indexes to prevent duplicates
@@ -148,8 +349,8 @@ sessions_collection = db.sessions
 # IMPORTANT: Do NOT mix chat sessions with auth sessions.
 auth_sessions_collection = db.auth_sessions
 
-# 📌 tasks collection - User tasks stored separately for performance
-tasks_collection = db.tasks
+# 📌 user_tasks collection - User tasks stored separately for performance
+tasks_collection = db.user_tasks
 
 # 📌 memory collection - Structured memory facts and preferences
 memory_collection = db.memory
@@ -160,6 +361,16 @@ mini_agents_collection = db.mini_agents
 # 📌 users_global collection - Historical global user data (never deleted)
 users_global_collection = db.users_global
 
+# 📌 media_cache collection - YouTube video cache to reduce API calls
+# Stores: video_id, query, title, artist, thumbnail, channel, duration
+# TTL: 30 days (videos rarely change)
+media_cache_collection = db.media_cache
+
+# 📌 user_media_library collection - User's played media history
+# Stores per-user: video_id, play_count, last_played, is_favorite, added_at
+# Index: (user_id, video_id) unique
+user_media_library_collection = db.user_media_library
+
 
 async def connect_to_mongo():
     """
@@ -168,7 +379,7 @@ async def connect_to_mongo():
     import asyncio
     from pymongo.errors import ServerSelectionTimeoutError, NetworkTimeout, OperationFailure, ConfigurationError
     
-    global client, db, users_collection, sessions_collection, auth_sessions_collection, tasks_collection, memory_collection, mini_agents_collection, users_global_collection
+    global client, db, users_collection, sessions_collection, auth_sessions_collection, tasks_collection, memory_collection, mini_agents_collection, users_global_collection, media_cache_collection, user_media_library_collection
     
     max_retries = 3
     retry_delay = 5  # seconds
@@ -177,15 +388,28 @@ async def connect_to_mongo():
     
     for attempt in range(max_retries):
         try:
-            print(f"🔄 MongoDB connection attempt {attempt + 1}/{max_retries}...")
+            if attempt > 0:
+                print(f"🔄 MongoDB connection retry {attempt + 1}/{max_retries}...")
             
             # Create client with sanitized URI
             sanitized_uri = _sanitize_mongo_uri(settings.MONGO_URI)
-            if sanitized_uri != settings.MONGO_URI:
-                print("🔧 URI sanitized (password encoded)")
             
-            # REUSE GLOBAL CLIENT if available, otherwise build new
-            if not client:
+            # REUSE GLOBAL CLIENT if available AND active
+            # Fixes "Cannot use MongoClient after close" on reloads
+            should_create_new = True
+            if client:
+                try:
+                    # Check if client represents an active topology
+                    # Just checking 'client' object isn't enough, it might be closed
+                    # accessing topology property usually works to check state
+                    if client.delegate and client.delegate._topology and not client.delegate._topology._opened:
+                         should_create_new = True
+                    else:
+                         should_create_new = False
+                except:
+                    should_create_new = True
+
+            if should_create_new:
                  db_instance.client = _build_client()
                  client = db_instance.client
             else:
@@ -193,77 +417,80 @@ async def connect_to_mongo():
                  db_instance.client = client
             
             # Test connection with timeout
-            print("📋 Testing connection with ping...")
-            await asyncio.wait_for(client.admin.command('ping'), timeout=10)
+            # Only print verbose logs on first attempt or final success
+            if attempt == 0:
+                print("📋 Connecting to MongoDB...")
+            
+            await asyncio.wait_for(client.admin.command('ping'), timeout=20)
             
             # Get server info for verification
-            print("📊 Retrieving server information...")
-            server_info = await asyncio.wait_for(
-                client.admin.command('serverStatus'), 
-                timeout=10
-            )
+
             
-            db = client.prism_db
+
+            try:
+                server_info = await asyncio.wait_for(client.admin.command('buildInfo'), timeout=20)
+            except Exception:
+                server_info = {}
+
+            # get database name from uri or default to prismdb
+            try:
+                uri_path = urlsplit(settings.MONGO_URI).path.strip("/")
+                db_name = uri_path if uri_path else "prismdb"
+            except Exception:
+                db_name = "prismdb"
+
+            db = client[db_name]
             users_collection = db.users
             sessions_collection = db.sessions
             auth_sessions_collection = db.auth_sessions
-            tasks_collection = db.tasks
+            tasks_collection = db.user_tasks
             memory_collection = db.memory
             mini_agents_collection = db.mini_agents
             users_global_collection = db.users_global
+            media_cache_collection = db.media_cache
+            user_media_library_collection = db.user_media_library
             
-            print(f"✅ MongoDB Connected Successfully!")
-            print(f"   Server Version: {server_info.get('version', 'Unknown')}")
-            print(f"   Database: prism_db")
-            print(f"   Host: {server_info.get('host', 'Unknown')}")
+            print(f"✅ MongoDB Connected Successfully! (v{server_info.get('version', 'Unknown')})")
             return
             
         except asyncio.TimeoutError:
-            error_msg = f"Connection timeout (attempt {attempt + 1})"
-            print(f"⚠️ {error_msg}")
+            if attempt == max_retries - 1:
+                print(f"⚠️ Connection timeout (final attempt). Check network/IP whitelist.")
             
-            if attempt == 0:  # First attempt, provide detailed guidance
-                print("💡 Troubleshooting tips:")
-                print("   - Check internet connection")
-                print("   - Verify MongoDB Atlas cluster is running")
-                print("   - Check network access list (IP whitelist)")
-                print("   - Verify username and password in MONGO_URI")
-                
         except (ServerSelectionTimeoutError, NetworkTimeout) as e:
-            error_msg = f"Network/server selection error: {str(e)[:100]}..."
-            print(f"⚠️ MongoDB connection attempt {attempt + 1} failed: {error_msg}")
+            if attempt == 0:
+                print(f"⚠️ Connection check failed. Retrying...")
             
         except OperationFailure as e:
             if "authentication failed" in str(e).lower():
-                print(f"❌ Authentication failed - check username/password in MONGO_URI")
-                print("💡 Ensure password special characters are URL-encoded (@ becomes %40)")
+                print(f"❌ Authentication failed - check username/password")
             else:
                 print(f"❌ MongoDB operation failed: {e}")
-            # Don't retry auth failures
             break
             
         except ConfigurationError as e:
             print(f"❌ MongoDB configuration error: {e}")
-            print("💡 Check MONGO_URI format and parameters")
-            # Don't retry config errors
             break
             
         except Exception as e:
-            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)[:100]}..."
-            print(f"❌ MongoDB connection attempt {attempt + 1} failed: {error_msg}")
+            print(f"❌ Connection error: {type(e).__name__}: {str(e)[:100]}")
             
-        # Cleanup and retry logic
+        # Cleanup and retry logic - MUST reset BOTH global and instance variables
         if db_instance.client:
-            db_instance.client.close()
+            try:
+                db_instance.client.close()
+            except Exception:
+                pass  # Ignore close errors
             db_instance.client = None
+        
+        # 🔧 FIX: Also reset the global client variable so retry creates a new client
+        client = None
             
         if attempt < max_retries - 1:
-            print(f"🔄 Retrying in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
         else:
-            print(f"❌ MongoDB connection failed after {max_retries} attempts")
-            print("🔧 Run 'python test_mongodb_connection.py' for detailed diagnostics")
-            raise ConnectionError("Failed to connect to MongoDB after maximum retries")
+            print(f"❌ MongoDB connection failed after {max_retries} attempts.")
+            raise ConnectionError("Failed to connect to MongoDB")
 
 
 async def close_mongo():
@@ -370,6 +597,13 @@ async def initialize_indexes():
             ("due_date", 1)
         ])
         print("  ✅ (status, due_date) - Scheduler scan index")
+        
+        # Compound index: userId + due_date (for "all tasks" query)
+        await tasks_collection.create_index([
+            ("userId", 1),
+            ("due_date", 1)
+        ])
+        print("  ✅ (userId, due_date) - User tasks custom sort index")
         
         # userId index for user's all tasks
         await tasks_collection.create_index("userId")

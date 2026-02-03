@@ -39,7 +39,7 @@ export const ActionCard = ({
   // Auto-dismissed state
   if (state === ActionCardState.AUTO_DISMISSED) {
     return (
-      <motion.div 
+      <motion.div
         className="mt-2 text-[11px] sm:text-xs"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -58,7 +58,7 @@ export const ActionCard = ({
   // Rescheduling prompt
   if (state === ActionCardState.RESCHEDULING) {
     return (
-      <motion.div 
+      <motion.div
         className="mt-2 sm:mt-3 w-full rounded-md sm:rounded-lg border border-blue-200 dark:border-blue-800/40 bg-blue-50/60 dark:bg-blue-950/30 p-2.5 sm:p-3 text-xs sm:text-sm shadow-sm"
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -69,9 +69,22 @@ export const ActionCard = ({
     );
   }
 
+  // Cancelled state - simple text (modified per request)
+  if (state === ActionCardState.CANCELLED) {
+    return (
+      <motion.div
+        className="mt-2 text-xs sm:text-sm font-medium text-red-600 dark:text-red-400"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+      >
+        ❌ Failed to create task. (Creation cancelled)
+      </motion.div>
+    );
+  }
+
   // Main card for all other states
   return (
-    <motion.div 
+    <motion.div
       className="mt-2 sm:mt-3 w-full rounded-md sm:rounded-lg border border-border bg-card/60 p-2.5 sm:p-3 text-xs sm:text-sm flex flex-col gap-1.5 sm:gap-2 shadow-sm"
       initial={{ opacity: 0, y: 10, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -81,23 +94,11 @@ export const ActionCard = ({
       <div className="font-semibold flex items-center gap-1.5 sm:gap-2">
         <Calendar className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-primary" />
         <span>
-          {state === ActionCardState.CONFIRMED ? "✅ Reminder Created" : 
-           state === ActionCardState.CANCELLED ? "❌ Cancelled" :
-           state === ActionCardState.TIME_PASSED ? "⏰ Time Passed" :
-           "📋 New Reminder"}
+          {state === ActionCardState.CONFIRMED ? "✅ Reminder Created" :
+            state === ActionCardState.TIME_PASSED ? "⏰ Time Passed" :
+              "📋 New Reminder"}
         </span>
       </div>
-
-      {/* Content based on state */}
-      {state === ActionCardState.CANCELLED && (
-        <motion.div
-          className="text-[11px] sm:text-xs text-muted-foreground bg-muted/30 rounded p-2 border border-border/40"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-        >
-          <p>❌ You chose not to set this reminder. Feel free to ask me again with a different time!</p>
-        </motion.div>
-      )}
 
       {state === ActionCardState.TIME_PASSED && (
         <motion.div
@@ -147,14 +148,14 @@ export const ActionCard = ({
 
       {state === ActionCardState.CONFIRMED && (
         <>
-          <motion.div 
+          <motion.div
             className="mt-0.5 sm:mt-1 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/40 rounded-lg p-3 sm:p-4 shadow-sm"
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.4, ease: "easeOut" }}
           >
             <div className="flex items-start gap-2 mb-2">
-              <motion.div 
+              <motion.div
                 className="flex-shrink-0 w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-green-500 flex items-center justify-center shadow-md"
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
@@ -169,14 +170,14 @@ export const ActionCard = ({
                   {isDuplicate ? "⚠️ Already Scheduled" : "🎉 Perfect! Your reminder is all set."}
                 </p>
                 <p className="text-[11px] sm:text-xs text-green-600/80 dark:text-green-400/80">
-                  {isDuplicate 
+                  {isDuplicate
                     ? "This reminder already exists. No duplicate created."
                     : "I'll send an email to your registered address when it's time."
                   }
                 </p>
               </div>
             </div>
-            
+
             <div className="space-y-2 mt-3 pt-3 border-t border-green-200/50 dark:border-green-800/30">
               <div className="flex items-start gap-2">
                 <span className="text-base sm:text-lg">📝</span>
@@ -185,7 +186,7 @@ export const ActionCard = ({
                   <p className="text-xs sm:text-sm font-medium text-foreground">{taskDescription}</p>
                 </div>
               </div>
-              
+
               <div className="flex items-start gap-2">
                 <span className="text-base sm:text-lg">⏰</span>
                 <div className="flex-1">
@@ -193,7 +194,7 @@ export const ActionCard = ({
                   <p className="text-xs sm:text-sm font-medium text-foreground">{dueDateHumanReadable || dueDate}</p>
                 </div>
               </div>
-              
+
               <div className="flex items-start gap-2">
                 <span className="text-base sm:text-lg">📧</span>
                 <div className="flex-1">
@@ -203,8 +204,8 @@ export const ActionCard = ({
               </div>
             </div>
           </motion.div>
-          
-          <motion.div 
+
+          <motion.div
             className="flex items-center justify-between mt-2 px-1"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}

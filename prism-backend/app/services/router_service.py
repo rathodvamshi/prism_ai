@@ -26,9 +26,10 @@ except Exception:  # pragma: no cover
     deep_research = None
 
 try:  # pragma: no cover
-    from app.services.media_service import play_video  # type: ignore
+    from app.services.media_play_service import media_play_service  # type: ignore
 except Exception:  # pragma: no cover
-    play_video = None
+    media_play_service = None
+
 
 
 def _truncate(text: str, limit: int = 4000) -> str:
@@ -81,11 +82,11 @@ async def decide_intent(message: str, previous_ai_message: Optional[str] = None)
             _agent_log("H3", "router_service.py:decide_intent", "task_mode_lock", {"reason": "previous_ai_asked_time"})
             return "task_management"
 
-    # 1) YouTube / media playback
-    if ("play" in msg or "watch" in msg) and any(
-        k in msg for k in ["song", "video", "youtube", "music"]
-    ):
-        return "youtube_play"
+    # 1) YouTube / media playback - Match "play X", "watch X", "listen X"
+    if ("play" in msg or "watch" in msg or "listen" in msg):
+        # Exclude task/reminder commands
+        if not any(x in msg for x in ["remind", "schedule", "task", "todo", "role", "game"]):
+            return "youtube_play"
 
     # 2) Deep research for complex buying / planning / comparison queries
     # Prefer phrase-based triggers to avoid overusing slow deep research.
@@ -212,26 +213,50 @@ async def process_request(
 
     try:
         if intent == "youtube_play":
-            if play_video is None:
+            if media_play_service is None:
                 direct_reply = "Media service is unavailable right now."
             else:
-                video_json = await play_video(message)
-                # If nothing useful found, gracefully fall back to general chat
-                if not video_json or not isinstance(video_json, dict) or not video_json.get("url"):
-                    intent = "general_chat"
-                    action_payload = None
-                    context_data = ""
-                else:
-                    action_payload = {
-                        "type": "youtube",
-                        "payload": video_json,
+                # Use new hybrid intent pipeline
+                media_response = await media_play_service.process_media_request(
+                    user_input=message,
+                    mode="redirect",  # Default to redirect mode (safe, fast, zero cost)
+                    user_id=user_id
+                )
+                
+                # Build action payload for frontend
+                action_payload = {
+                    "type": "media_play",
+                    "payload": {
+                        "mode": media_response.mode,  # "link" or "video"
+                       "url": media_response.url,
+                        "video_id": media_response.video_id,
+                        "query": media_response.query,
+                        "message": media_response.message,
+                        "cached": media_response.cached,
+                        "source": media_response.source,
                     }
-                    title = video_json.get("title", "")
-                    url = video_json.get("url", "")
-                    context_data = (
-                        "System: User wants to play a video.\n"
-                        f"Title: {title}\nURL: {url}\nFull payload: {video_json}"
-                    )
+                }
+                
+                # Provide context to LLM so it can respond about the song/video
+                query = media_response.query
+                artist = getattr(media_response, 'artist', None) or "the artist"
+                
+                # Give LLM context to generate a nice response
+                context_data = f"""The user wants to play: "{query}"
+                
+Status: {'Found and playing the exact video!' if media_response.video_id else 'Searching on YouTube...'}
+Action: Auto-opening YouTube with {'autoplay enabled' if media_response.video_id and '&autoplay=1' in media_response.url else 'search results'}
+
+Please respond in a friendly, enthusiastic way telling the user about this song/video. 
+Keep it brief (1-2 sentences). Be excited and mention the artist if known.
+Example: "Great choice! '{query}' is an amazing track. Opening it on YouTube now, enjoy! 🎵"
+"""
+                
+                logger.info(
+                    f"🎵 Media play action created: {media_response.source} "
+                    f"(cached={media_response.cached}, video_id={bool(media_response.video_id)})"
+                )
+
 
         elif intent == "deep_research":
             # Deep research: try rich service, fall back to simple web search or empty context

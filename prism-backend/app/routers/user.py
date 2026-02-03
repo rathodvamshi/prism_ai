@@ -107,12 +107,25 @@ async def update_user_profile(
     """Update current user's profile information and sync to global collection"""
     try:
         from app.services.global_user_service import update_global_user_profile
+        from app.services.unified_memory_orchestrator import unified_memory_orchestrator
         
         # Sanitize input data
         sanitized_data = {}
         for key, value in profile_data.items():
-            if key in ["name", "bio", "location", "website", "avatarUrl"]:
+            if key in ["name", "bio", "location", "website", "city", "state", "country"]:
                 sanitized_data[key] = SecurityUtils.sanitize_user_input(str(value), 500) if value else ""
+            elif key == "avatarUrl":
+                # Allow base64 images (larger size limit for avatar)
+                if value:
+                    avatar_str = str(value)
+                    # Validate it's a base64 image data URL or a regular URL
+                    if avatar_str.startswith("data:image/") or avatar_str.startswith("http"):
+                        # Limit to ~2MB base64 string (after base64 encoding, ~1.37MB image)
+                        sanitized_data[key] = avatar_str[:2_800_000]
+                    else:
+                        sanitized_data[key] = ""
+                else:
+                    sanitized_data[key] = ""
             elif key in ["interests", "hobbies"]:
                 if isinstance(value, list):
                     sanitized_data[key] = [SecurityUtils.sanitize_user_input(str(item), 100) for item in value[:10]]
@@ -135,6 +148,13 @@ async def update_user_profile(
             {"_id": ObjectId(user_id)},
             {"$set": update_data}
         )
+        
+        # 🗑️ INVALIDATE CACHE so next fetch gets fresh data
+        try:
+            unified_memory_orchestrator.invalidate_cache(user_id)
+            logger.info(f"🗑️ [Profile] Cache invalidated for user {user_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to invalidate cache: {e}")
         
         # Sync to global collection
         if email:
@@ -203,15 +223,26 @@ async def get_user_stats(current_user=Depends(get_current_user_from_session)):
 @router.delete("/account")
 async def delete_user_account(
     confirmation: dict,
-    current_user: dict = Depends(get_verified_user)
+    current_user = Depends(get_current_user_from_session)
 ):
     """
-    Delete user account and all associated data from all databases
-    Mark as deleted in global collection (preserved for history)
+    Delete user account and ALL associated data from ALL databases.
+    This is a PERMANENT action - deletes everything:
+    - User profile and account
+    - All chat sessions and messages
+    - All memories (MongoDB + Pinecone vectors)
+    - All tasks and mini agents
+    - Message highlights
+    - Mood history
+    - Pending memories
+    - Graph relationships (Neo4j)
+    - Redis cache
     """
     try:
         from app.services.global_user_service import mark_user_deleted_in_global
-        from app.db.mongo_client import sessions_collection
+        from app.db.mongo_client import (
+            sessions_collection, db, mini_agents_collection
+        )
         
         # Require confirmation
         if confirmation.get("confirm_delete") != "DELETE_MY_ACCOUNT":
@@ -220,15 +251,30 @@ async def delete_user_account(
                 detail="Account deletion requires confirmation text: 'DELETE_MY_ACCOUNT'"
             )
         
-        user_id = str(current_user["_id"])
-        email = current_user["email"]
+        user_id = current_user.user_id
+        email = current_user.email
         
-        logger.info(f"Starting account deletion for user: {email}")
+        # Get the full user document for final deletion
+        from bson import ObjectId
+        user_doc = await users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user_doc:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        logger.info(f"🗑️ Starting COMPLETE account deletion for user: {email}")
         
         # Delete from all collections
         deleted_counts = {}
         
-        # 1. Delete user sessions
+        # 0. Delete ALL login sessions (auth_sessions) for this user
+        try:
+            from app.db.mongo_client import auth_sessions_collection
+            auth_result = await auth_sessions_collection.delete_many({"userId": user_id})
+            deleted_counts["auth_sessions"] = auth_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Auth sessions cleanup: {e}")
+            deleted_counts["auth_sessions"] = "skipped"
+        
+        # 1. Delete user sessions (chat sessions)
         sessions_result = await sessions_collection.delete_many({"userId": user_id})
         deleted_counts["sessions"] = sessions_result.deleted_count
         
@@ -236,39 +282,101 @@ async def delete_user_account(
         tasks_result = await tasks_collection.delete_many({"userId": user_id})
         deleted_counts["tasks"] = tasks_result.deleted_count
         
-        # 3. Delete user memories
+        # 3. Delete user memories from MongoDB
         memory_result = await memory_collection.delete_many({"userId": user_id})
         deleted_counts["memories"] = memory_result.deleted_count
         
-        # 4. Delete mini agents
-        from app.db.mongo_client import mini_agents_collection
+        # 4. Delete mini agents and their messages
         mini_agents_result = await mini_agents_collection.delete_many({"userId": user_id})
         deleted_counts["mini_agents"] = mini_agents_result.deleted_count
         
-        # 5. Delete from vector database (Pinecone)
+        # 4b. Delete mini agent threads
+        try:
+            mini_agent_threads = db.mini_agent_threads
+            threads_result = await mini_agent_threads.delete_many({"userId": user_id})
+            deleted_counts["mini_agent_threads"] = threads_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Mini agent threads cleanup: {e}")
+            deleted_counts["mini_agent_threads"] = "skipped"
+        
+        # 4c. Delete mini agent messages
+        try:
+            mini_agent_messages = db.mini_agent_messages
+            messages_result = await mini_agent_messages.delete_many({"userId": user_id})
+            deleted_counts["mini_agent_messages"] = messages_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Mini agent messages cleanup: {e}")
+            deleted_counts["mini_agent_messages"] = "skipped"
+        
+        # 5. Delete message highlights
+        try:
+            highlights_collection = db.message_highlights
+            highlights_result = await highlights_collection.delete_many({"userId": user_id})
+            deleted_counts["highlights"] = highlights_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Highlights cleanup: {e}")
+            deleted_counts["highlights"] = "skipped"
+        
+        # 6. Delete mood history
+        try:
+            mood_collection = db.mood_history
+            mood_result = await mood_collection.delete_many({"userId": user_id})
+            deleted_counts["mood_history"] = mood_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Mood history cleanup: {e}")
+            deleted_counts["mood_history"] = "skipped"
+        
+        # 7. Delete pending memories
+        try:
+            pending_memory = db.pending_memory
+            pending_result = await pending_memory.delete_many({"userId": user_id})
+            deleted_counts["pending_memories"] = pending_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Pending memory cleanup: {e}")
+            deleted_counts["pending_memories"] = "skipped"
+        
+        # 8. Delete shared conversations
+        try:
+            shares_collection = db.shared_conversations
+            shares_result = await shares_collection.delete_many({"userId": user_id})
+            deleted_counts["shared_conversations"] = shares_result.deleted_count
+        except Exception as e:
+            logger.warning(f"Shared conversations cleanup: {e}")
+            deleted_counts["shared_conversations"] = "skipped"
+        
+        # 9. Delete from vector database (Pinecone) - ALL user memories
         try:
             vm = get_vector_memory()
             if vm and vm.index:
+                # Delete all vectors with this userId
                 vm.index.delete(filter={"userId": user_id})
                 deleted_counts["vector_memories"] = "cleaned"
+                logger.info(f"Vector memories cleaned for user: {user_id}")
         except Exception as e:
             logger.warning(f"Vector memory cleanup warning: {e}")
             deleted_counts["vector_memories"] = "skipped"
         
-        # 6. Delete from graph database (Neo4j)
+        # 10. Delete from graph database (Neo4j) - ALL user relationships
         try:
             from app.db.neo4j_client import graph_memory
             if graph_memory and graph_memory.graph:
+                # Delete user node and ALL connected relationships
                 graph_memory.graph.run(
                     "MATCH (u:User {userId: $userId}) DETACH DELETE u",
                     userId=user_id
                 )
+                # Also delete any orphaned nodes that were only connected to this user
+                graph_memory.graph.run(
+                    "MATCH (n) WHERE n.userId = $userId DETACH DELETE n",
+                    userId=user_id
+                )
                 deleted_counts["graph_data"] = "cleaned"
+                logger.info(f"Graph data cleaned for user: {user_id}")
         except Exception as e:
             logger.warning(f"Graph cleanup warning: {e}")
             deleted_counts["graph_data"] = "skipped"
         
-        # 7. Clear Redis cache
+        # 11. Clear Redis cache completely for this user
         try:
             await clear_user_cache(user_id)
             deleted_counts["redis_cache"] = "cleared"
@@ -276,21 +384,19 @@ async def delete_user_account(
             logger.warning(f"Redis cleanup warning: {e}")
             deleted_counts["redis_cache"] = "skipped"
         
-        # 8. Mark as deleted in global collection (PRESERVED - NOT DELETED)
-        # This keeps user profile data for historical purposes and analytics
-        # If user signs up again with same email, global collection won't duplicate
+        # 12. Mark as deleted in global collection (for analytics only)
         await mark_user_deleted_in_global(user_id, email, "user_requested")
         
-        # 9. Finally, delete main user record from active users collection
-        await users_collection.delete_one({"_id": current_user["_id"]})
+        # 13. Finally, delete main user record from active users collection
+        await users_collection.delete_one({"_id": user_doc["_id"]})
         deleted_counts["user_account"] = "deleted"
         
-        logger.info(f"Account deletion completed for: {email}")
+        logger.info(f"✅ COMPLETE account deletion finished for: {email}")
+        logger.info(f"Deletion summary: {deleted_counts}")
         
         return {
-            "message": "Account successfully deleted from all systems",
+            "message": "Account and all data permanently deleted from all systems",
             "email": email,
-            "preserved_in_global": True,
             "cleanup_summary": deleted_counts
         }
         

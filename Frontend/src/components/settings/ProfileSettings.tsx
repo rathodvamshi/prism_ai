@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
+import { API_URL } from "@/lib/api";
 import { LoadingSpinner } from "@/components/chat/LoadingSkeletons";
 import { motion, AnimatePresence } from "framer-motion";
 import { Camera, Save, Loader2, User, Trash2, AlertCircle, CheckCircle2 } from "lucide-react";
@@ -27,7 +28,7 @@ export const ProfileSettings = () => {
   const { logout } = useAuthStore();
   const { toast } = useToast();
   const navigate = useNavigate();
-  
+
   const [formData, setFormData] = useState({
     name: "",
     bio: "",
@@ -58,7 +59,7 @@ export const ProfileSettings = () => {
 
   // Check if form has changes
   useEffect(() => {
-    const changed = 
+    const changed =
       formData.name !== profile.name ||
       formData.bio !== profile.bio ||
       formData.location !== profile.location ||
@@ -95,18 +96,18 @@ export const ProfileSettings = () => {
         ...formData,
         avatarUrl: avatarPreview || "",
       };
-      
+
       await saveProfileToBackend(updates);
-      
+
       // Show success animation
       setShowSuccess(true);
       setTimeout(() => setShowSuccess(false), 2000);
-      
+
       toast({
         title: "Profile Updated",
         description: "Your changes have been saved successfully",
       });
-      
+
       setHasChanges(false);
     } catch (error) {
       toast({
@@ -130,8 +131,7 @@ export const ProfileSettings = () => {
     setIsDeleting(true);
     try {
       const token = localStorage.getItem('prism_auth_token');
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
-      const response = await fetch(`${apiUrl}/users/account`, {
+      const response = await fetch(`${API_URL}/users/account`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -250,7 +250,7 @@ export const ProfileSettings = () => {
               placeholder="Your name"
             />
           </div>
-          
+
           <div className="space-y-2">
             <Label htmlFor="location">Location</Label>
             <Input

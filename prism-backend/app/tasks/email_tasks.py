@@ -208,22 +208,24 @@ def _init_sync_mongo_client():
         # Initialize synchronous MongoDB client with improved timeout settings
         _sync_mongo_client = MongoClient(
             clean_uri,
-            serverSelectionTimeoutMS=30000,  # 30 seconds (match async client)
-            connectTimeoutMS=15000,          # 15 seconds for initial connection
-            socketTimeoutMS=45000,           # 45 seconds for socket operations
+            serverSelectionTimeoutMS=60000,  # 60 seconds (match async client)
+            connectTimeoutMS=60000,          # 60 seconds for initial connection
+            socketTimeoutMS=60000,           # 60 seconds for socket operations
             retryWrites=True,                # Enable write retries
             retryReads=True,                 # Enable read retries
             maxPoolSize=20,                  # Reduced pool size for Celery
             minPoolSize=2,                   # Minimum connections
             maxIdleTimeMS=300000,            # 5 minutes idle timeout
-            heartbeatFrequencyMS=15000,      # Check server status every 15s
+            heartbeatFrequencyMS=20000,      # Check server status every 20s
+            tls=True,                        # Enforce TLS
+            tlsAllowInvalidCertificates=True,# Allow for dev environment
         )
         
         logger.debug(f"MongoClient created, testing connection...")
         
         # Get database (use extracted name or default)
         _sync_db = _sync_mongo_client.get_database(db_name)
-        _sync_tasks_collection = _sync_db.tasks
+        _sync_tasks_collection = _sync_db.user_tasks
         
         # Test connection with timeout
         logger.debug(f"Pinging MongoDB server...")
@@ -231,7 +233,7 @@ def _init_sync_mongo_client():
         
         logger.info(f"✅ Synchronous MongoDB client initialized successfully")
         logger.info(f"   Database: {db_name}")
-        logger.info(f"   Collection: tasks")
+        logger.info(f"   Collection: user_tasks")
         logger.info(f"   Connection: Active")
         
         return _sync_tasks_collection
@@ -331,6 +333,7 @@ if CELERY_AVAILABLE and celery_app:
         time_limit=300,              # 5 minute hard timeout
         reject_on_worker_lost=True,  # Reject if worker dies (prevents loss)
         acks_late=True,              # Acknowledge after completion
+        rate_limit='20/m',           # 🛡️ PRO: Limit to 20 emails/minute to protect IP reputation
     )
     def send_reminder_email_task(self, task_id: str):
         """
@@ -435,7 +438,6 @@ if CELERY_AVAILABLE and celery_app:
                 {"_id": obj_id},
                 {
                     "$set": {
-                        "status": "completed",
                         "email_status": "sent",
                         "email_sent_at": now_utc,
                         "updated_at": now_utc,
@@ -583,6 +585,36 @@ if CELERY_AVAILABLE and celery_app:
     
     @celery_app.task(
         bind=True,
+        name="prism_tasks.send_otp_email",
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_backoff_max=300,
+        retry_kwargs={'max_retries': 3},
+        queue="email",
+        ignore_result=True,
+    )
+    def send_otp_email_task(self, to_email: str, otp_code: str, subject: str = "PRISM Verification Code"):
+        """
+        Celery task to send OTP email immediately.
+        """
+        logger.info(f"📧 Processing OTP Email Task for {to_email}")
+        
+        try:
+            # Send Email (Synchronous wrapper)
+            success = _sync_send_otp_email(to_email, otp_code, subject)
+            
+            if success:
+                logger.info(f"✅ OTP email sent successfully to {to_email}")
+                return {"status": "success", "email": to_email}
+            else:
+                raise Exception("Email sending returned False")
+                
+        except Exception as e:
+            logger.error(f"❌ OTP email failed: {e}")
+            raise
+    
+    @celery_app.task(
+        bind=True,
         name="prism_tasks.recover_pending_tasks",
         queue="default",
         ignore_result=True,
@@ -611,15 +643,15 @@ if CELERY_AVAILABLE and celery_app:
             
             # Find all pending tasks that are due (or overdue)
             # Status: pending, due_date <= now, email_status != sent
-            # Also recover permanently_failed tasks (they may have been fixed)
+            # ⚠️ PRO FIX: Do NOT retry 'permanently_failed' automatically on startup to prevent poison loops
             pending_tasks = list(tasks_collection.find({
                 "status": "pending",
                 "due_date": {"$lte": now_utc},
                 "$or": [
                     {"email_status": {"$exists": False}},
                     {"email_status": {"$ne": "sent"}},
-                    {"email_status": "failed"},  # Retry failed tasks
-                    {"email_status": "permanently_failed"}  # Retry permanently failed (may have been fixed)
+                    {"email_status": "failed"},  # Retry temporarily failed tasks
+                    # Excluded "permanently_failed" to improve stability
                 ]
             }).limit(100))  # Process max 100 at a time to avoid overload
             
@@ -697,6 +729,10 @@ else:
         print(f"⚠️ Celery not available - cannot send email for task {task_id}")
         print("📦 Please install Celery: pip install 'celery[redis]>=5.3.0'")
         print("🚀 Then start Celery worker: celery -A app.core.celery_app worker --loglevel=info")
+        return {"status": "error", "reason": "celery_not_available"}
+    
+    def send_otp_email_task(to_email: str, otp_code: str, subject: str = None):
+        """Dummy function for OTP email"""
         return {"status": "error", "reason": "celery_not_available"}
     
     def recover_pending_tasks_task():

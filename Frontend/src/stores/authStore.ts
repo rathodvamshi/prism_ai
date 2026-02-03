@@ -10,6 +10,7 @@ interface User {
   id: string;
   email: string;
   name?: string;
+  role?: string; // "user" | "admin"
   verified?: boolean;
   created_at?: string;
   last_login?: string;
@@ -19,6 +20,7 @@ interface User {
 interface AuthState {
   user: User | null;
   isAuthenticated: boolean;
+  isAdmin: boolean;
   isLoading: boolean;
   authLoading: boolean;
   error: string | null;
@@ -27,7 +29,7 @@ interface AuthState {
   // Actions
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signup: (email: string, password: string, name?: string) => Promise<{ success: boolean; error?: string }>;
-  verifyOTP: (email: string, otp: string) => Promise<{ success: boolean; error?: string; accountCreated?: boolean }>;
+  verifyOTP: (email: string, otp: string) => Promise<{ success: boolean; error?: string; accountCreated?: boolean; isAdmin?: boolean }>;
   forgotPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   checkAuth: () => void;
@@ -38,6 +40,7 @@ interface AuthState {
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isAuthenticated: false,
+  isAdmin: false,
   isLoading: false,
   authLoading: true,
   error: null,
@@ -55,9 +58,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       if (response.data) {
+        // Handle Admin OTP Flow trigger
+        if (response.data.admin_otp_flow) {
+          set({ isLoading: false });
+          return { success: true, requiresOTP: true, isAdminFlow: true };
+        }
+
         set({
           user: response.data.user,
           isAuthenticated: true,
+          isAdmin: response.data.user.role === 'admin',
           isLoading: false,
           authLoading: false,
           error: null
@@ -112,16 +122,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       if (response.data) {
         const accountCreated = response.data.account_created === true;
+        const isAdmin = response.data.is_admin === true;
 
         set({
           user: response.data.user,
           isAuthenticated: true,
+          isAdmin: isAdmin,
           isLoading: false,
           authLoading: false,
           error: null,
           showAccountCreatedAnimation: accountCreated
         });
-        return { success: true, accountCreated };
+        return { success: true, accountCreated, isAdmin };
       }
 
       return { success: false, error: 'Unknown error occurred' };

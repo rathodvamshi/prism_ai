@@ -1,7 +1,8 @@
 """
-🎯 MEMORY-ENHANCED CHAT ROUTER (SIMPLIFIED)
+MEMORY-ENHANCED CHAT ROUTER (SIMPLIFIED)
 
 Focuses on the core memory management functionality without external dependencies.
+"""
 from typing import Dict, Any, List
 from bson import ObjectId
 import json
@@ -116,7 +117,7 @@ async def get_chat_history(
     limit: int = 50,
     current_user: User = Depends(get_verified_user)
 ):
-    """Get user's chat history with proper isolation"""
+    """Get users chat history with proper isolation"""
     try:
         user_id = current_user.user_id
         
@@ -194,7 +195,7 @@ async def create_chat(
 
 @router.get("/chats")
 async def get_user_chats(current_user: User = Depends(get_verified_user)):
-    """Get all user's chat sessions"""
+    """Get all users chat sessions"""
     try:
         user_id = current_user.user_id
         
@@ -258,7 +259,7 @@ async def delete_chat(
 
 @router.get("/memory-summary")
 async def get_memory_summary(current_user: User = Depends(get_verified_user)):
-    """Get user's memory summary"""
+    """Get users memory summary"""
     try:
         user_id = current_user.user_id
         user_email = current_user.email
@@ -305,7 +306,7 @@ async def get_memory_summary(current_user: User = Depends(get_verified_user)):
 
 @router.post("/clear-memory")
 async def clear_memory(current_user: User = Depends(get_verified_user)):
-    """Clear user's chat memory (with confirmation)"""
+    """Clear users chat memory (with confirmation)"""
     try:
         user_id = current_user.user_id
         
@@ -325,7 +326,16 @@ async def clear_memory(current_user: User = Depends(get_verified_user)):
         
         return {
             "message": "Memory cleared successfully",
-            "cleared_at": datetime.now().isoformat(),
+            "cleared_at": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error clearing memory: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear memory"
+        )
+
 async def get_llm_response(prompt: str, user_id: str = "unknown") -> str:
     """Enhanced LLM response using the energetic, personalized main brain system"""
     return await main_brain_generate_response(
@@ -421,6 +431,11 @@ async def send_chat(request: SendChatRequest):
         }
 
 # Memory-enhanced chat endpoint
+class SendMessageRequest(BaseModel):
+    userId: str
+    sessionId: str
+    message: str
+
 @router.post("/memory-chat")
 async def memory_enhanced_chat(request: SendMessageRequest):
     """
@@ -603,501 +618,9 @@ async def test_endpoint():
     }
 
 # Create a separate users router for user profile endpoints
-users_router = APIRouter(
-    prefix="/users",
-    tags=["Users"]
-)
 
-@users_router.get("/profile")
-async def get_user_profile(email: str):
-    """Get user profile by email"""
-    try:
-        print(f"📋 Fetching user profile for: {email}")
-        
-        # Find user in MongoDB
-        user = await users_collection.find_one({"email": email})
-        
-        if not user:
-            # Return default profile structure if user doesn't exist
-            return {
-                "email": email,
-                "name": email.split("@")[0],
-                "username": None,
-                "hobby": [],
-                "role": None,
-                "interests": [],
-                "responseStyle": None,
-                "profilePicUrl": None,
-                "createdAt": datetime.utcnow().isoformat()
-            }
-        
-        # Convert MongoDB document to API response
-        profile = {
-            "email": user.get("email", email),
-            "name": user.get("name", email.split("@")[0]),
-            "username": user.get("username"),
-            "hobby": user.get("hobby", []),
-            "role": user.get("role"),
-            "interests": user.get("interests", []),
-            "responseStyle": user.get("responseStyle"),
-            "profilePicUrl": user.get("profilePicUrl"),
-            "createdAt": user.get("createdAt", datetime.utcnow()).isoformat() if isinstance(user.get("createdAt"), datetime) else user.get("createdAt")
-        }
-        
-        print(f"✅ Profile found for {email}")
-        return profile
-        
-    except Exception as e:
-        print(f"❌ Error fetching profile for {email}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch user profile: {str(e)}")
 
-class UpdateProfileRequest(BaseModel):
-    email: str
-    username: str = None
-    hobby: list = []
-    role: str = None
-    interests: list = []
-    responseStyle: str = None
-    profilePicUrl: str = None
 
-@users_router.put("/profile")
-async def update_user_profile(request: UpdateProfileRequest):
-    """Update user profile"""
-    try:
-        print(f"📝 Updating user profile for: {request.email}")
-        
-        # Build update document
-        update_data = {
-            "email": request.email,
-            "updatedAt": datetime.utcnow()
-        }
-        
-        if request.username is not None:
-            update_data["username"] = request.username
-        if request.hobby:
-            update_data["hobby"] = request.hobby
-        if request.role is not None:
-            update_data["role"] = request.role
-        if request.interests:
-            update_data["interests"] = request.interests
-        if request.responseStyle is not None:
-            update_data["responseStyle"] = request.responseStyle
-        if request.profilePicUrl is not None:
-            update_data["profilePicUrl"] = request.profilePicUrl
-        
-        # Update or insert user
-        result = await users_collection.update_one(
-            {"email": request.email},
-            {"$set": update_data},
-            upsert=True
-        )
-        
-        print(f"✅ Profile updated for {request.email}")
-        return {
-            "success": True,
-            "message": "Profile updated successfully",
-            "modified_count": result.modified_count,
-            "upserted": result.upserted_id is not None
-        }
-        
-    except Exception as e:
-        print(f"❌ Error updating profile for {request.email}: {e}")
-                "user_memory_loaded": bool(user_memory),
-                "memory_context_length": len(memory_context),
-                "memory_updates_applied": list(memory_updates.keys()) if memory_updates else [],
-                "memory_stats": {
-                    "profile": bool(user_memory.get('profile')),
-                    "structured_memories": len(user_memory.get('structured_memory', [])),
-                    "conversations": len(user_memory.get('conversations', [])),
-                    "temp_memory": bool(user_memory.get('temp_memory')),
-                    "graph_relationships": len(user_memory.get('graph_relationships', [])),
-                }
-            }
-        }
-        
-    except Exception as e:
-        print(f"❌ Memory-enhanced chat error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "error": f"Memory processing failed: {str(e)}"
-        }
-
-# Memory testing endpoints
-@router.get("/memory-test/{user_id}")
-async def test_user_memory(user_id: str):
-    """Test endpoint to check user memory loading"""
-    try:
-        print(f"🧪 Testing memory for user: {user_id}")
-        
-        # Load user memory
-        user_memory = await memory_manager.load_user_memory(user_id)
-        
-        # Build context
-        memory_context = memory_manager.build_context_for_model(user_memory)
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "memory_stats": {
-                "profile_loaded": bool(user_memory.get('profile')),
-                "structured_memories": len(user_memory.get('structured_memory', [])),
-                "tasks": len(user_memory.get('tasks', [])),
-                "conversations": len(user_memory.get('conversations', [])),
-                "temp_memory": bool(user_memory.get('temp_memory')),
-                "session_state": bool(user_memory.get('session_state')),
-                "vector_memories": len(user_memory.get('vector_memories', [])),
-                "graph_relationships": len(user_memory.get('graph_relationships', [])),
-                "interests": len(user_memory.get('interests', []))
-            },
-            "context_preview": memory_context[:500] + "..." if len(memory_context) > 500 else memory_context
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Memory test failed: {str(e)}"
-        }
-
-@router.post("/memory-update/{user_id}")
-async def manual_memory_update(user_id: str, updates: Dict[str, Any] = Body(...)):
-    """Manual memory update endpoint for testing"""
-    try:
-        print(f"🛠️ Manual memory update for user: {user_id}")
-        
-        results = await memory_manager.process_memory_update_instructions(user_id, updates)
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "update_results": results,
-            "instructions_processed": list(updates.keys())
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Manual memory update failed: {str(e)}"
-        }
-
-# Simple test endpoint
-@router.get("/test")
-async def test_endpoint():
-    """Simple test to verify router is working"""
-    return {
-        "status": "Memory-enhanced chat router is working!",
-        "timestamp": datetime.now().isoformat(),
-        "features": [
-            "Memory loading from all databases",
-            "Context injection into AI prompts", 
-            "Memory update processing",
-            "Conversation saving",
-            "User validation and access control"
-        ]
-    }
-
-# Create a separate users router for user profile endpoints
-users_router = APIRouter(
-    prefix="/users",
-    tags=["Users"]
-)
-
-@users_router.get("/profile")
-async def get_user_profile(email: str):
-    """Get user profile by email"""
-    try:
-        print(f"📋 Fetching user profile for: {email}")
-        
-        # Find user in MongoDB
-        user = await users_collection.find_one({"email": email})
-        
-        if not user:
-            # Return default profile structure if user doesn't exist
-            return {
-                "email": email,
-                "name": email.split("@")[0],
-                "username": None,
-                "hobby": [],
-                "role": None,
-                "interests": [],
-                "responseStyle": None,
-                "profilePicUrl": None,
-                "createdAt": datetime.utcnow().isoformat()
-            }
-        
-        # Convert MongoDB document to API response
-        profile = {
-            "email": user.get("email", email),
-            "name": user.get("name", email.split("@")[0]),
-            "username": user.get("username"),
-            "hobby": user.get("hobby", []),
-            "role": user.get("role"),
-            "interests": user.get("interests", []),
-            "responseStyle": user.get("responseStyle"),
-            "profilePicUrl": user.get("profilePicUrl"),
-            "createdAt": user.get("createdAt", datetime.utcnow()).isoformat() if isinstance(user.get("createdAt"), datetime) else user.get("createdAt")
-        }
-        
-        print(f"✅ Profile found for {email}")
-        return profile
-        
-    except Exception as e:
-        print(f"❌ Error fetching profile for {email}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch user profile: {str(e)}")
-
-class UpdateProfileRequest(BaseModel):
-    email: str
-    username: str = None
-    hobby: list = []
-    role: str = None
-    interests: list = []
-    responseStyle: str = None
-    profilePicUrl: str = None
-
-@users_router.put("/profile")
-async def update_user_profile(request: UpdateProfileRequest):
-    """Update user profile"""
-    try:
-        print(f"📝 Updating user profile for: {request.email}")
-        
-        # Build update document
-        update_data = {
-            "email": request.email,
-            "updatedAt": datetime.utcnow()
-        }
-        
-        if request.username is not None:
-            update_data["username"] = request.username
-        if request.hobby:
-            update_data["hobby"] = request.hobby
-        if request.role is not None:
-            update_data["role"] = request.role
-        if request.interests:
-            update_data["interests"] = request.interests
-        if request.responseStyle is not None:
-            update_data["responseStyle"] = request.responseStyle
-        if request.profilePicUrl is not None:
-            update_data["profilePicUrl"] = request.profilePicUrl
-        
-        # Update or insert user
-        result = await users_collection.update_one(
-            {"email": request.email},
-            {"$set": update_data},
-            upsert=True
-        )
-        
-        print(f"✅ Profile updated for {request.email}")
-        return {
-            "success": True,
-            "message": "Profile updated successfully",
-            "modified_count": result.modified_count,
-            "upserted": result.upserted_id is not None
-        }
-        
-    except Exception as e:
-        print(f"❌ Error updating profile for {request.email}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")
-
-                "memory_updates_applied": list(memory_updates.keys()) if memory_updates else [],
-                "memory_stats": {
-                    "profile": bool(user_memory.get('profile')),
-                    "structured_memories": len(user_memory.get('structured_memory', [])),
-                    "conversations": len(user_memory.get('conversations', [])),
-                    "temp_memory": bool(user_memory.get('temp_memory')),
-                    "graph_relationships": len(user_memory.get('graph_relationships', [])),
-                }
-            }
-        }
-        
-    except Exception as e:
-        print(f"❌ Memory-enhanced chat error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "error": f"Memory processing failed: {str(e)}"
-        }
-
-# Memory testing endpoints
-@router.get("/memory-test/{user_id}")
-async def test_user_memory(user_id: str):
-    """Test endpoint to check user memory loading"""
-    try:
-        print(f"🧪 Testing memory for user: {user_id}")
-        
-        # Load user memory
-        user_memory = await memory_manager.load_user_memory(user_id)
-        
-        # Build context
-        memory_context = memory_manager.build_context_for_model(user_memory)
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "memory_stats": {
-                "profile_loaded": bool(user_memory.get('profile')),
-                "structured_memories": len(user_memory.get('structured_memory', [])),
-                "tasks": len(user_memory.get('tasks', [])),
-                "conversations": len(user_memory.get('conversations', [])),
-                "temp_memory": bool(user_memory.get('temp_memory')),
-                "session_state": bool(user_memory.get('session_state')),
-                "vector_memories": len(user_memory.get('vector_memories', [])),
-                "graph_relationships": len(user_memory.get('graph_relationships', [])),
-                "interests": len(user_memory.get('interests', []))
-            },
-            "context_preview": memory_context[:500] + "..." if len(memory_context) > 500 else memory_context
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Memory test failed: {str(e)}"
-        }
-
-@router.post("/memory-update/{user_id}")
-async def manual_memory_update(user_id: str, updates: Dict[str, Any] = Body(...)):
-    """Manual memory update endpoint for testing"""
-    try:
-        print(f"🛠️ Manual memory update for user: {user_id}")
-        
-        results = await memory_manager.process_memory_update_instructions(user_id, updates)
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "update_results": results,
-            "instructions_processed": list(updates.keys())
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Manual memory update failed: {str(e)}"
-        }
-
-# Simple test endpoint
-@router.get("/test")
-async def test_endpoint():
-    """Simple test to verify router is working"""
-    return {
-        "status": "Memory-enhanced chat router is working!",
-        "timestamp": datetime.now().isoformat(),
-        "features": [
-            "Memory loading from all databases",
-            "Context injection into AI prompts", 
-            "Memory update processing",
-            "Conversation saving",
-            "User validation and access control"
-        ]
-    }
-
-# Create a separate users router for user profile endpoints
-users_router = APIRouter(
-    prefix="/users",
-    tags=["Users"]
-)
-
-@users_router.get("/profile")
-async def get_user_profile(email: str):
-    """Get user profile by email"""
-    try:
-        print(f"📋 Fetching user profile for: {email}")
-        
-        # Find user in MongoDB
-        user = await users_collection.find_one({"email": email})
-        
-        if not user:
-            # Return default profile structure if user doesn't exist
-            return {
-                "email": email,
-                "name": email.split("@")[0],
-                "username": None,
-                "hobby": [],
-                "role": None,
-                "interests": [],
-                "responseStyle": None,
-                "profilePicUrl": None,
-                "createdAt": datetime.utcnow().isoformat()
-            }
-        
-        # Convert MongoDB document to API response
-        profile = {
-            "email": user.get("email", email),
-            "name": user.get("name", email.split("@")[0]),
-            "username": user.get("username"),
-            "hobby": user.get("hobby", []),
-            "role": user.get("role"),
-            "interests": user.get("interests", []),
-            "responseStyle": user.get("responseStyle"),
-            "profilePicUrl": user.get("profilePicUrl"),
-            "createdAt": user.get("createdAt", datetime.utcnow()).isoformat() if isinstance(user.get("createdAt"), datetime) else user.get("createdAt")
-        }
-        
-        print(f"✅ Profile found for {email}")
-        return profile
-        
-    except Exception as e:
-        print(f"❌ Error fetching profile for {email}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch user profile: {str(e)}")
-
-class UpdateProfileRequest(BaseModel):
-    email: str
-    username: str = None
-    hobby: list = []
-    role: str = None
-    interests: list = []
-    responseStyle: str = None
-    profilePicUrl: str = None
-
-@users_router.put("/profile")
-async def update_user_profile(request: UpdateProfileRequest):
-    """Update user profile"""
-    try:
-        print(f"📝 Updating user profile for: {request.email}")
-        
-        # Build update document
-        update_data = {
-            "email": request.email,
-            "updatedAt": datetime.utcnow()
-        }
-        
-        if request.username is not None:
-            update_data["username"] = request.username
-        if request.hobby:
-            update_data["hobby"] = request.hobby
-        if request.role is not None:
-            update_data["role"] = request.role
-        if request.interests:
-            update_data["interests"] = request.interests
-        if request.responseStyle is not None:
-            update_data["responseStyle"] = request.responseStyle
-        if request.profilePicUrl is not None:
-            update_data["profilePicUrl"] = request.profilePicUrl
-        
-        # Update or insert user
-        result = await users_collection.update_one(
-            {"email": request.email},
-            {"$set": update_data},
-            upsert=True
-        )
-        
-        print(f"✅ Profile updated for {request.email}")
-        return {
-            "success": True,
-            "message": "Profile updated successfully",
-            "modified_count": result.modified_count,
-            "upserted": result.upserted_id is not None
-        }
-        
-    except Exception as e:
-        print(f"❌ Error updating profile for {request.email}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update user profile: {str(e)}")
-
-@users_router.get("/test")
-async def test_users_endpoint():
-    """Test endpoint for users router"""
-    return {"status": "Users router is working!", "timestamp": datetime.now().isoformat()}
 
 @router.post("/consolidate")
 async def trigger_consolidation(current_user: User = Depends(get_verified_user)):

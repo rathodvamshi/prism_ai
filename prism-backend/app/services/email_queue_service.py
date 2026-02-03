@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.db.redis_client import redis_client, EMAIL_HIGH_PRIORITY_QUEUE, EMAIL_SCHEDULED_QUEUE, EMAIL_DAILY_LIMIT_KEY_TEMPLATE
 from app.config import settings
@@ -49,12 +49,34 @@ async def schedule_task_reminder(task_id: str, user_id: str, due_timestamp: floa
     🐢 LANE 2: SCHEDULED (Task Reminders)
     Checked against rate limit first. Adds to ZSet.
     """
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    
     is_allowed = await check_and_increment_limit(user_id)
     if not is_allowed:
         raise ValueError("Daily email limit reached.")
 
     await redis_client.zadd(QUEUE_SCHEDULED, {task_id: due_timestamp})
-    print(f"🐢 Scheduled Task {task_id} for timestamp {due_timestamp}")
+
+    # 🚀 PRO LEVEL UPGRADE: Dispatch to Celery if available for EXACT time execution
+    try:
+        from app.core.celery_app import celery_app
+        if celery_app:
+            # eta expects a datetime object (UTC preferred by Celery internal)
+            # due_timestamp is float seconds.
+            dt_eta = datetime.fromtimestamp(due_timestamp, timezone.utc)
+            dt_ist = dt_eta.astimezone(IST)
+            time_display = dt_ist.strftime("%I:%M %p IST").lstrip("0")
+            
+            celery_app.send_task(
+                "prism_tasks.send_reminder_email",
+                args=[task_id],
+                eta=dt_eta,
+                queue="email"
+            )
+            print(f"📧 Email reminder scheduled for {time_display}")
+    except Exception as e:
+        print(f"⚠️ Celery dispatch failed (fallback to Redis worker used): {e}")
 
 
 async def remove_scheduled_email(task_id: str):

@@ -13,52 +13,176 @@
     font-family: inherit;
     transition: none;
   }
-  
+
   /* Custom thin scrollbar for chat input - Mobile optimized */
   .chat-input::-webkit-scrollbar {
-    width: 3px; /* Thinner for mobile */
+    width: 3px;
+    /* Thinner for mobile */
   }
-  
+
   .chat-input::-webkit-scrollbar-track {
     background: transparent;
   }
-  
+
   .chat-input::-webkit-scrollbar-thumb {
     background: rgba(161, 161, 170, 0.3);
     border-radius: 2px;
     transition: background-color 0.2s ease;
   }
-  
+
   .chat-input::-webkit-scrollbar-thumb:hover {
     background: rgba(161, 161, 170, 0.5);
   }
-  
+
   /* Firefox scrollbar - Mobile optimized */
   .chat-input {
     scrollbar-width: thin;
     scrollbar-color: rgba(161, 161, 170, 0.3) transparent;
   }
-  
+
+  /* ✨ Pro Thin Scrollbar for Tables and Content */
+  .thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(120, 120, 130, 0.25) transparent;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar {
+    height: 6px;
+    width: 6px;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 10px;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(120, 120, 130, 0.25);
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(120, 120, 130, 0.45);
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* ✨ Ultra Thin Scrollbar */
+  .ultra-thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(120, 120, 130, 0.2) transparent;
+  }
+
+  .ultra-thin-scrollbar::-webkit-scrollbar {
+    height: 4px;
+    width: 4px;
+  }
+
+  .ultra-thin-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .ultra-thin-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(120, 120, 130, 0.2);
+    border-radius: 10px;
+  }
+
+  .ultra-thin-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(120, 120, 130, 0.4);
+  }
+
+  /* ✨ Sleek Conversation Scrollbar - Works in all themes */
+  .conversation-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
+  }
+
+  .conversation-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .conversation-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 4px 0;
+  }
+
+  .conversation-scrollbar::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.15);
+    border-radius: 100px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    transition: background 0.2s ease;
+  }
+
+  .conversation-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .conversation-scrollbar::-webkit-scrollbar-thumb:active {
+    background: hsl(var(--muted-foreground) / 0.4);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  /* Hide scrollbar when not scrolling (auto-hide effect) */
+  .conversation-scrollbar-autohide {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  .conversation-scrollbar-autohide:hover {
+    scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
+  }
+
+  .conversation-scrollbar-autohide::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .conversation-scrollbar-autohide::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .conversation-scrollbar-autohide::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 100px;
+    transition: background 0.3s ease;
+  }
+
+  .conversation-scrollbar-autohide:hover::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.2);
+  }
+
+  .conversation-scrollbar-autohide::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.35);
+  }
+
   /* Touch optimization for better mobile experience */
   @media (max-width: 640px) {
     .touch-manipulation {
       touch-action: manipulation;
       -webkit-tap-highlight-color: transparent;
     }
-    
+
     .chat-input::-webkit-scrollbar {
-      width: 4px; /* Slightly wider for easier touch scrolling */
+      width: 4px;
+      /* Slightly wider for easier touch scrolling */
     }
   }
-  
+
   .input-wrapper {
     contain: layout style paint;
   }
-  
+
   .scrollbar-none {
     scrollbar-width: none;
   }
-  
+
   .scrollbar-none::-webkit-scrollbar {
     display: none;
   }
@@ -68,20 +192,20 @@
   * {
     @apply border-border;
   }
-  
+
   html {
     scroll-behavior: smooth;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  
+
   body {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', sans-serif;
     letter-spacing: -0.01em;
     line-height: 1.6;
     @apply bg-background text-foreground;
   }
-  
+
   :root {
     --background: 220 14% 97%;
     --foreground: 0 0% 18%;
@@ -179,6 +303,46 @@
     --sidebar-border: 220 13% 20%;
     --sidebar-ring: 160 83% 45%;
   }
+
+  /* Pure Black AMOLED Theme */
+  .black {
+    --background: 0 0% 5.5%;
+    --foreground: 0 0% 95%;
+
+    --card: 0 0% 7%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 0 0% 7%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 160 83% 45%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 60%;
+
+    --accent: 160 83% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 15%;
+    --input: 0 0% 15%;
+    --ring: 160 83% 45%;
+
+    --sidebar-background: 0 0% 5.5%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 160 83% 45%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 12%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 0 0% 15%;
+    --sidebar-ring: 160 83% 45%;
+  }
 }
 
 @layer base {
@@ -253,34 +417,92 @@
 
   /* Hide scrollbars while preserving scroll behavior */
   .no-scrollbar {
-    -ms-overflow-style: none; /* IE and Edge */
-    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
   }
+
   .no-scrollbar::-webkit-scrollbar {
-    display: none; /* Chrome, Safari, Opera */
+    display: none;
+    /* Chrome, Safari, Opera */
+  }
+
+  /* ✨ Pro Polish Utilities */
+  .glass-card {
+    @apply bg-card/60 backdrop-blur-xl border border-border/40 shadow-sm;
+  }
+
+  .glass-subtle {
+    @apply bg-muted/30 backdrop-blur-sm border border-border/20;
+  }
+
+  .gradient-border {
+    position: relative;
+    background: linear-gradient(var(--background), var(--background)) padding-box,
+                linear-gradient(135deg, hsl(var(--primary) / 0.5), hsl(var(--primary) / 0.1)) border-box;
+    border: 1px solid transparent;
+  }
+
+  .text-gradient {
+    @apply bg-gradient-to-r from-primary via-primary/80 to-primary bg-clip-text text-transparent;
+  }
+
+  .hover-lift {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg;
+  }
+
+  .hover-glow {
+    @apply transition-shadow duration-300 hover:shadow-lg hover:shadow-primary/10;
+  }
+
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary/30 focus:ring-offset-2 focus:ring-offset-background;
+  }
+
+  /* Smooth content appearance */
+  .content-appear {
+    animation: contentAppear 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes contentAppear {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   /* Media helpers (responsive paddings/margins) */
   .pad-responsive {
     padding: clamp(0.75rem, 1rem + 0.5vw, 2rem);
   }
+
   .gap-responsive {
     gap: clamp(0.5rem, 0.5rem + 0.5vw, 1.5rem);
   }
+
   .radius-responsive {
     border-radius: clamp(0.5rem, 0.5rem + 0.5vw, 1rem);
   }
+
   .text-responsive {
     font-size: clamp(0.85rem, 0.9rem + 0.25vw, 1.125rem);
   }
+
   .icon-responsive {
     width: clamp(1rem, 1rem + 0.5vw, 1.5rem);
     height: clamp(1rem, 1rem + 0.5vw, 1.5rem);
   }
+
   .btn-responsive {
     padding-inline: clamp(0.75rem, 0.75rem + 0.5vw, 1.25rem);
     padding-block: clamp(0.5rem, 0.5rem + 0.25vw, 0.75rem);
   }
+
   .input-responsive {
     padding-inline: clamp(0.75rem, 0.75rem + 0.5vw, 1.25rem);
     padding-block: clamp(0.5rem, 0.5rem + 0.25vw, 0.75rem);
@@ -289,34 +511,125 @@
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes wave {
+
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+
+  10% {
+    transform: rotate(14deg);
+  }
+
+  20% {
+    transform: rotate(-8deg);
+  }
+
+  30% {
+    transform: rotate(14deg);
+  }
+
+  40% {
+    transform: rotate(-4deg);
+  }
+
+  50% {
+    transform: rotate(10deg);
+  }
+
+  60%,
+  100% {
+    transform: rotate(0deg);
+  }
 }
 
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes slideRight {
-  from { opacity: 0; transform: translateX(-20px); }
-  to { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 @keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes pulseSoft {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* 🧠 Thinking Dots Animation - Clean & Minimal */
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: hsl(var(--muted-foreground) / 0.6);
+  animation: thinkingBounce 1.4s ease-in-out infinite;
+}
+
+@keyframes thinkingBounce {
+
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 /* Hard override page-wide theme colors per request */
 body {
   background-color: #ffffff !important;
-  color: #0f172a !important; /* readable dark text */
+  color: #0f172a !important;
+  /* readable dark text */
 }
 
 /* Support both patterns: html.dark body and body.dark */
@@ -327,7 +640,10 @@ body.dark {
 }
 
 /* Images & media defaults */
-img, svg, video, canvas {
+img,
+svg,
+video,
+canvas {
   max-width: 100%;
   height: auto;
 }
@@ -335,6 +651,7 @@ img, svg, video, canvas {
 .media-cover {
   object-fit: cover;
 }
+
 .media-contain {
   object-fit: contain;
 }
@@ -352,6 +669,15 @@ img, svg, video, canvas {
 /* Performance optimizations for animations */
 .will-change-transform {
   will-change: transform;
+}
+
+.will-change-scroll {
+  will-change: scroll-position;
+}
+
+.scroll-smooth {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
 }
 
 .backface-hidden {
@@ -381,6 +707,7 @@ img, svg, video, canvas {
   0% {
     transform: translateX(-100%);
   }
+
   100% {
     transform: translateX(100%);
   }
@@ -388,65 +715,66 @@ img, svg, video, canvas {
 
 /* Premium UI Utilities */
 @layer utilities {
+
   /* Message bubble shadows */
   .shadow-message {
     box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   }
-  
+
   .shadow-message-hover {
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
   }
-  
+
   /* Smooth transitions for all interactive elements */
   .transition-smooth {
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   }
-  
+
   /* Premium gradients */
   .gradient-primary {
     background: linear-gradient(135deg, hsl(160 83% 35%) 0%, hsl(199 89% 48%) 100%);
   }
-  
+
   .gradient-subtle {
     background: linear-gradient(180deg, hsl(220 14% 97%) 0%, hsl(0 0% 100%) 100%);
   }
-  
+
   /* Text optimization */
   .text-balance {
     text-wrap: balance;
   }
-  
+
   /* Glass morphism effect */
   .glass {
     background: rgba(255, 255, 255, 0.7);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
   }
-  
+
   .glass-dark {
     background: rgba(0, 0, 0, 0.3);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
   }
-  
+
   /* Micro-interactions */
   .hover-lift {
     transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
-  
+
   .hover-lift:hover {
     transform: translateY(-2px);
     box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.1);
   }
-  
+
   .hover-scale {
     transition: transform 0.15s ease;
   }
-  
+
   .hover-scale:hover {
     transform: scale(1.02);
   }
-  
+
   /* Focus ring enhancement */
   .focus-ring {
     @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-background;
@@ -455,72 +783,73 @@ img, svg, video, canvas {
 
 /* Enhanced Markdown Styling */
 @layer components {
+
   /* Code block container */
   .markdown-content pre {
     @apply rounded-lg overflow-hidden my-4;
   }
-  
+
   /* Inline code */
   .markdown-content code:not(pre code) {
     @apply px-1.5 py-0.5 rounded bg-muted text-sm font-mono;
   }
-  
+
   /* Tables */
   .markdown-content table {
     @apply w-full border-collapse my-4;
   }
-  
+
   .markdown-content th,
   .markdown-content td {
     @apply border border-border px-4 py-2;
   }
-  
+
   .markdown-content th {
     @apply bg-muted font-semibold;
   }
-  
+
   /* Blockquotes */
   .markdown-content blockquote {
     @apply border-l-4 border-primary/40 pl-4 py-2 my-3 bg-muted/30 rounded-r-md italic;
   }
-  
+
   /* Lists */
   .markdown-content ul,
   .markdown-content ol {
     @apply my-3 ml-6 space-y-2;
   }
-  
+
   .markdown-content li {
     @apply leading-7;
   }
-  
+
   /* Headings */
   .markdown-content h1 {
     @apply text-3xl font-bold mb-4 mt-8;
   }
-  
+
   .markdown-content h2 {
     @apply text-2xl font-bold mb-3 mt-6;
   }
-  
+
   .markdown-content h3 {
     @apply text-xl font-semibold mb-3 mt-5;
   }
-  
+
   .markdown-content h4 {
     @apply text-lg font-semibold mb-2 mt-4;
   }
-  
+
   /* Links */
   .markdown-content a {
     @apply text-primary hover:underline font-medium;
   }
-  
+
   /* Horizontal rule */
   .markdown-content hr {
     @apply my-6 border-border;
   }
-  
+
   /* Premium Inline Code Highlighting */
   .markdown-content p code,
   .markdown-content li code,
@@ -529,53 +858,53 @@ img, svg, video, canvas {
     color: #DC2626;
     font-size: 0.9em;
   }
-  
+
   .dark .markdown-content p code,
   .dark .markdown-content li code,
   .dark .markdown-content td code {
     color: #FCA5A5;
   }
-  
+
   /* Paragraph Formatting */
   .markdown-content p {
     @apply mb-3 leading-7;
     font-size: 15px;
     line-height: 1.7;
   }
-  
+
   /* Mark/Highlight important text */
   .markdown-content mark {
     @apply bg-yellow-200 dark:bg-yellow-900/50 px-1 py-0.5 rounded;
   }
-  
+
   /* Better spacing for readability */
   .markdown-content {
     max-width: 740px;
   }
-  
+
   /* List improvements */
   .markdown-content ul li,
   .markdown-content ol li {
     @apply mb-2 leading-7;
   }
-  
+
   /* Code block improvements */
   .markdown-content pre {
     @apply my-4 rounded-lg;
   }
-  
+
   /* Blockquote premium styling */
   .markdown-content blockquote {
     @apply border-l-4 border-primary/40 pl-4 py-2 my-4 bg-muted/30 rounded-r-md italic;
     font-size: 15px;
   }
-  
+
   /* Table cell padding */
   .markdown-content td,
   .markdown-content th {
     @apply px-4 py-3;
   }
-  
+
   /* Smooth text rendering */
   .markdown-content {
     -webkit-font-smoothing: antialiased;
@@ -584,27 +913,177 @@ img, svg, video, canvas {
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   🎨 PRO AI MESSAGE STYLING - Beautiful, Readable, Structured
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@layer components {
+
+  /* AI Message Container - Premium Typography */
+  .ai-message {
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.85;
+    letter-spacing: 0.015em;
+    word-spacing: 0.12em;
+    color: hsl(var(--foreground));
+  }
+
+  /* Bold text - Make key terms POP */
+  .ai-message strong,
+  .ai-message b {
+    font-weight: 700;
+    color: hsl(var(--foreground));
+    letter-spacing: 0.01em;
+  }
+
+  /* Paragraphs - Readable spacing */
+  .ai-message p {
+    margin-bottom: 1rem;
+    line-height: 1.85;
+  }
+
+  /* Lists - Clean structure */
+  .ai-message ul,
+  .ai-message ol {
+    margin: 0.75rem 0 1rem 1.5rem;
+    padding: 0;
+  }
+
+  .ai-message li {
+    margin-bottom: 0.5rem;
+    line-height: 1.75;
+    padding-left: 0.25rem;
+  }
+
+  .ai-message ul li::marker {
+    color: hsl(var(--primary));
+  }
+
+  .ai-message ol li::marker {
+    color: hsl(var(--primary));
+    font-weight: 600;
+  }
+
+  /* Headings in AI messages */
+  .ai-message h1,
+  .ai-message h2,
+  .ai-message h3,
+  .ai-message h4 {
+    font-weight: 700;
+    margin-top: 1.25rem;
+    margin-bottom: 0.75rem;
+    color: hsl(var(--foreground));
+  }
+
+  .ai-message h3 {
+    font-size: 1.1rem;
+  }
+
+  /* Inline code - Subtle highlight */
+  .ai-message code:not(pre code) {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.875em;
+    background: hsl(var(--muted) / 0.5);
+    padding: 0.2em 0.4em;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  /* Emoji styling - Proper sizing */
+  .ai-message .emoji,
+  .ai-message span[role="img"] {
+    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', sans-serif;
+    font-size: 1.1em;
+    vertical-align: middle;
+    margin: 0 0.1em;
+  }
+
+  /* Links */
+  .ai-message a {
+    color: hsl(var(--primary));
+    text-decoration: none;
+    font-weight: 500;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.2s ease;
+  }
+
+  .ai-message a:hover {
+    border-bottom-color: hsl(var(--primary) / 0.5);
+  }
+
+  /* Blockquotes - Elegant callout */
+  .ai-message blockquote {
+    border-left: 3px solid hsl(var(--primary) / 0.6);
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    background: hsl(var(--muted) / 0.3);
+    border-radius: 0 8px 8px 0;
+    font-style: italic;
+  }
+
+  /* Horizontal rule - Section divider */
+  .ai-message hr {
+    border: none;
+    height: 1px;
+    background: linear-gradient(to right, transparent, hsl(var(--border)), transparent);
+    margin: 1.5rem 0;
+  }
+
+  /* Tables - Clean data display */
+  .ai-message table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.95em;
+  }
+
+  .ai-message th {
+    background: hsl(var(--muted) / 0.5);
+    font-weight: 600;
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 2px solid hsl(var(--border));
+  }
+
+  .ai-message td {
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid hsl(var(--border) / 0.5);
+  }
+
+  /* Pro Tips / Key Points callout */
+  .ai-message .tip,
+  .ai-message .key-point {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.08), hsl(var(--primary) / 0.03));
+    border-left: 3px solid hsl(var(--primary));
+    padding: 0.75rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1rem 0;
+  }
+
+  /* Smooth selection */
+  .ai-message ::selection {
+    background: hsl(var(--primary) / 0.2);
+  }
+}
+
 /* Message Divider - GPT-Style Visual Breathing Space */
 .message-divider {
   border: none;
   height: 1px;
-  background: linear-gradient(
-    to right,
-    transparent,
-    rgba(0, 0, 0, 0.1),
-    transparent
-  );
+  background: linear-gradient(to right,
+      transparent,
+      rgba(0, 0, 0, 0.1),
+      transparent);
   margin: 16px 0;
   width: 100%;
 }
 
 .dark .message-divider {
-  background: linear-gradient(
-    to right,
-    transparent,
-    rgba(255, 255, 255, 0.15),
-    transparent
-  );
+  background: linear-gradient(to right,
+      transparent,
+      rgba(255, 255, 255, 0.15),
+      transparent);
 }
 
 /* Semantic Highlight Styling - Single source for all semantic labels */
@@ -622,9 +1101,12 @@ img, svg, video, canvas {
 
 /* Subtle water wave animation */
 @keyframes waveFloat {
-  0%, 100% {
+
+  0%,
+  100% {
     transform: translateY(0px);
   }
+
   50% {
     transform: translateY(-4px);
   }
@@ -632,9 +1114,12 @@ img, svg, video, canvas {
 
 @media (min-width: 640px) {
   @keyframes waveFloat {
-    0%, 100% {
+
+    0%,
+    100% {
       transform: translateY(0px);
     }
+
     50% {
       transform: translateY(-6px);
     }
@@ -674,6 +1159,7 @@ img, svg, video, canvas {
   .queue-marquee {
     min-height: 85px;
   }
+
   .queue-marquee::before,
   .queue-marquee::after {
     width: 50px;
@@ -685,6 +1171,7 @@ img, svg, video, canvas {
   .queue-marquee {
     min-height: 100px;
   }
+
   .queue-marquee::before,
   .queue-marquee::after {
     width: 80px;
@@ -693,6 +1180,7 @@ img, svg, video, canvas {
 
 /* Large desktop */
 @media (min-width: 1024px) {
+
   .queue-marquee::before,
   .queue-marquee::after {
     width: 100px;
@@ -722,10 +1210,13 @@ img, svg, video, canvas {
 
 /* 🌟 Center blink effect - auto highlight when icon reaches middle */
 @keyframes centerBlink {
-  0%, 100% {
+
+  0%,
+  100% {
     opacity: 0.5;
     transform: scale(1);
   }
+
   50% {
     opacity: 0.8;
     transform: scale(1.05);
@@ -734,10 +1225,13 @@ img, svg, video, canvas {
 
 @media (min-width: 640px) {
   @keyframes centerBlink {
-    0%, 100% {
+
+    0%,
+    100% {
       opacity: 0.5;
       transform: scale(1);
     }
+
     50% {
       opacity: 0.85;
       transform: scale(1.08);
@@ -809,6 +1303,7 @@ img, svg, video, canvas {
   .queue-track {
     transform: none !important;
   }
+
   .queue-icon {
     opacity: 0.6;
     filter: none;
@@ -841,4 +1336,129 @@ img, svg, video, canvas {
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--primary) / 0.2) transparent;
   }
+}
+
+/* ========================================
+   WIDTH CONSTRAINT & OVERFLOW MANAGEMENT
+   Ensures all content respects 800px max width
+   ======================================== */
+
+/* Message content: Never exceed container width */
+.message-blocks,
+.message-blocks>*,
+.message-content {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+  hyphens: auto;
+}
+
+/* Code blocks: Fixed width with horizontal scroll */
+.message-blocks pre,
+.message-blocks code[data-code-block="true"],
+[data-code-block="true"],
+.code-block-container {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  scroll-behavior: smooth;
+}
+
+/* Tables: Responsive with horizontal scroll */
+.message-blocks table {
+  max-width: 100%;
+  min-width: 0;
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+
+/* Images: Constrained to container width */
+.message-blocks img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Long URLs and links: Break appropriately */
+.message-blocks a {
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+/* Inline code: Allow wrapping */
+.message-blocks code:not([data-code-block="true"]) {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Horizontal scrollbar styling for code blocks */
+.message-blocks pre::-webkit-scrollbar,
+[data-code-block="true"]::-webkit-scrollbar,
+.code-block-container::-webkit-scrollbar {
+  height: 6px;
+  background: transparent;
+}
+
+.message-blocks pre::-webkit-scrollbar-track,
+[data-code-block="true"]::-webkit-scrollbar-track,
+.code-block-container::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+}
+
+.message-blocks pre::-webkit-scrollbar-thumb,
+[data-code-block="true"]::-webkit-scrollbar-thumb,
+.code-block-container::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 120, 0.4);
+  border-radius: 3px;
+  transition: background 0.2s ease;
+}
+
+.message-blocks pre::-webkit-scrollbar-thumb:hover,
+[data-code-block="true"]::-webkit-scrollbar-thumb:hover,
+.code-block-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.6);
+}
+
+/* Firefox scrollbar */
+.message-blocks pre,
+[data-code-block="true"],
+.code-block-container {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 120, 120, 0.4) transparent;
+}
+
+/* Prevent layout shift from scrollbar */
+.message-blocks pre,
+[data-code-block="true"],
+.code-block-container {
+  scrollbar-gutter: stable;
+}
+
+/* Dark mode scrollbar adjustments */
+.dark .message-blocks pre::-webkit-scrollbar-track,
+.dark [data-code-block="true"]::-webkit-scrollbar-track,
+.dark .code-block-container::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dark .message-blocks pre::-webkit-scrollbar-thumb,
+.dark [data-code-block="true"]::-webkit-scrollbar-thumb,
+.dark .code-block-container::-webkit-scrollbar-thumb {
+  background: rgba(200, 200, 200, 0.3);
+}
+
+.dark .message-blocks pre::-webkit-scrollbar-thumb:hover,
+.dark [data-code-block="true"]::-webkit-scrollbar-thumb:hover,
+.dark .code-block-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(200, 200, 200, 0.5);
 }

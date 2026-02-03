@@ -1,5 +1,20 @@
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+from enum import Enum
+from datetime import datetime
+
+class MessageRole(str, Enum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+class Message(BaseModel):
+    id: str
+    role: MessageRole
+    content: str
+    timestamp: datetime
+    metadata: Optional[Dict[str, Any]] = None
 
 # INPUT: What the user sends us
 class ChatRequest(BaseModel):

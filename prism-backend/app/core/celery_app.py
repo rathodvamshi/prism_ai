@@ -114,20 +114,12 @@ if CELERY_AVAILABLE:
             'visibility_timeout': 3600,  # Task visibility timeout
         },
         
-        # ☁️ CRITICAL: SSL SETTINGS FOR CLOUD REDIS
-        # Most cloud providers (Upstash, Render Redis, AWS ElastiCache) require this
-        # to avoid "Certificate Verify Failed" errors
-        broker_use_ssl={
-            'ssl_cert_reqs': ssl.CERT_NONE  # CERT_NONE for cloud Redis (no cert verification)
-        } if is_ssl else None,
-        
-        redis_backend_use_ssl={
-            'ssl_cert_reqs': ssl.CERT_NONE  # CERT_NONE for cloud Redis (no cert verification)
-        } if is_ssl else None,
+
         
         # Task Routing - Dedicated queues for better performance
         task_routes={
             "prism_tasks.send_reminder_email": {"queue": "email"},
+            "prism_tasks.send_otp_email": {"queue": "email"},
         },
         task_default_queue="default",
         task_default_exchange="tasks",
@@ -143,8 +135,21 @@ if CELERY_AVAILABLE:
         worker_send_task_events=True,  # Send task events for monitoring
         task_send_sent_event=True,     # Send sent events
         
-        # Beat Schedule (for periodic tasks - if needed in future)
-        beat_schedule={},
+        # 🔄 Beat Schedule - Periodic tasks for reliability
+        beat_schedule={
+            # Recovery task runs every 5 minutes to catch any missed tasks
+            "recover-pending-tasks-every-5-min": {
+                "task": "prism_tasks.recover_pending_tasks",
+                "schedule": 300.0,  # Every 5 minutes
+                "options": {"queue": "default"}
+            },
+            # Health check every 2 minutes
+            "health-check-every-2-min": {
+                "task": "prism_tasks.health_check",
+                "schedule": 120.0,  # Every 2 minutes
+                "options": {"queue": "default"}
+            },
+        },
     )
     
     # 🔍 Auto-import tasks to ensure they're registered
@@ -222,17 +227,33 @@ if CELERY_AVAILABLE:
         error_msg = "Redis URL must use rediss:// (SSL) for production security"
         print(f"❌ CRITICAL: {error_msg}")
         print(f"   Current: {broker_url[:50]}...")
-        print("   ⚠️  Plaintext Redis connections are NOT allowed in production")
-        print("   💡 Fix: Update REDIS_URL or CELERY_BROKER_URL to use rediss://")
         # In development, warn but don't fail
         if settings.is_production:
+            print(f"   ⚠️  Plaintext Redis connections are NOT allowed in production")
+            print("   💡 Fix: Update REDIS_URL or CELERY_BROKER_URL to use rediss://")
             raise ValueError(error_msg)
         else:
             print("   ⚠️  WARNING: Running in development mode - SSL not enforced")
             print("   ⚠️  This will FAIL in production deployment")
     
+
+
+    
     print("✅ Celery configured with cloud-native settings")
     print(f"   Broker: {broker_url[:50]}...")
+    
+    # Configure SSL options based on URL scheme
+    if is_ssl:
+        celery_app.conf.update(
+            broker_use_ssl={'ssl_cert_reqs': ssl.CERT_NONE},
+            redis_backend_use_ssl={'ssl_cert_reqs': ssl.CERT_NONE}
+        )
+    else:
+        # Explicitly disable SSL for non-SSL URLs to prevent connection errors
+        celery_app.conf.update(
+            broker_use_ssl=False,
+            redis_backend_use_ssl=False
+        )
     print(f"   Timezone: IST (Asia/Kolkata) | Internal: UTC")
     print(f"   SSL: {'✅ Enabled (rediss://)' if is_ssl else '❌ Disabled (INSECURE)'}")
     print(f"   Platform: {platform.system()} ({'Windows' if IS_WINDOWS else 'Unix-like'})")

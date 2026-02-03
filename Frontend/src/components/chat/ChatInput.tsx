@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -12,10 +12,14 @@ import {
   Image,
   File,
   Cloud,
+  MessageSquarePlus,
+  CornerDownRight,
 } from "lucide-react";
+import { useChatStore } from "@/stores/chatStore";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { useToast } from "@/hooks/use-toast";
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Attachment } from "@/types/chat";
@@ -23,17 +27,25 @@ import { Attachment } from "@/types/chat";
 interface ChatInputProps {
   onSend: (message: string, attachments?: Attachment[]) => void;
   isLoading?: boolean;
-  onOpenApiSettings?: () => void;
   resetSignal?: number; // triggers input clear and focus on new session
+
 }
 
 const models = [
-  { id: "gpt-4o-mini", name: "GPT-4o Mini", available: true },
-  { id: "gpt-4o", name: "GPT-4o", available: false },
-  { id: "claude-3", name: "Claude 3", available: false },
+  { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B", available: true },
+  { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B (Fast)", available: true },
+  { id: "mixtral-8x7b-32768", name: "Mixtral 8x7B", available: true },
 ];
 
-export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }: ChatInputProps) => {
+
+
+export const ChatInput = ({
+  onSend,
+  isLoading,
+  resetSignal,
+
+}: ChatInputProps) => {
+  const { toast } = useToast();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -46,6 +58,16 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const driveInputRef = useRef<HTMLInputElement>(null);
   const isMobile = useIsMobile();
+
+  // 🆕 ASK FLOW - Consume context from store
+  const { askFlowContext, setAskFlowContext } = useChatStore();
+
+  // Auto-focus when context is set
+  useEffect(() => {
+    if (askFlowContext && textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [askFlowContext]);
 
   // Auto-resize when text reaches width and grows up to 200px
   const autoResize = useCallback(() => {
@@ -95,11 +117,46 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
     autoResize();
   }, [autoResize]);
 
-  const handleSubmit = () => {
-    if ((!input.trim() && attachments.length === 0) || isLoading) return;
+  const isSubmittingRef = useRef(false);
 
-    onSend(input, attachments);
+  const handleSubmit = () => {
+    // Allow submission if input exists OR triggers exist (attachments/context)
+    if ((!input.trim() && !askFlowContext && attachments.length === 0) || isLoading || isSubmittingRef.current) return;
+
+    isSubmittingRef.current = true;
+
+    // 🆕 ASK FLOW - Construct structured prompt if context exists
+    let finalMessage = input;
+
+    if (askFlowContext) {
+      const instruction = input.trim() || "Explain the selected text";
+
+      // Professional Prompt Construction matches backend Expectations
+      // Using the exact template requested for robust context handling
+      finalMessage = `The user has selected the following text:
+
+<<<SELECTED_TEXT>>>
+${askFlowContext.text}
+<<<END_SELECTED_TEXT>>>
+
+The user's instruction is:
+"${instruction}"
+
+Your task:
+- Focus specifically on the selected text
+- Follow the user's instruction exactly`;
+
+      setAskFlowContext(null); // Clear context after sending
+    }
+
+    onSend(finalMessage, attachments);
     setInput("");
+
+    // Block immediate re-engagement to prevent double-sends (race condition with parent isLoading)
+    // Parent should set isLoading=true, but we add a safety timeout locally
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+    }, 1000);
 
     // Clean up attachment URLs
     attachments.forEach((a) => {
@@ -118,6 +175,7 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      e.stopPropagation(); // Stop event bubbling
       handleSubmit();
     }
   };
@@ -126,7 +184,10 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
     if (model.available) {
       setSelectedModel(model);
     } else {
-      onOpenApiSettings?.();
+      toast({
+        title: "Model Unavailable",
+        description: "This model requires a premium subscription.",
+      });
     }
   };
 
@@ -223,9 +284,12 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="shrink-0 bg-background/95 backdrop-blur-sm sticky bottom-0 left-0 right-0 z-10 w-full"
+      className="shrink-0 bg-background/95 backdrop-blur-sm sticky bottom-0 left-0 right-0 z-10 w-full pb-2 sm:pb-3"
     >
-      <div className="w-full max-w-[800px] mx-auto px-4 lg:px-0 pb-4">
+      <div className="w-full max-w-[850px] mx-auto px-4 pl-6 sm:pl-8 lg:pl-12 lg:pr-0">
+        {/* 🎯 Smart Suggestions - Show when input is empty and not loading */}
+
+
         {/* Attachment Previews */}
         {attachments.length > 0 && (
           <div className="mb-2 px-1">
@@ -274,14 +338,34 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
         <div className="relative group w-full">
           <div
             className={cn(
-              "relative flex flex-col w-full rounded-2xl sm:rounded-3xl border border-border/60 bg-secondary/30 backdrop-blur-md shadow-sm transition-all duration-200",
+              "relative flex flex-col w-full rounded-2xl sm:rounded-3xl border backdrop-blur-xl shadow-lg transition-all duration-200",
+              // Glassmorphism effect - transparent with blur
+              "bg-background/60 border-border/40",
               // On hover/focus: slightly stronger border and shadow
-              "hover:border-primary/20 hover:shadow-md hover:bg-secondary/40",
-              input || attachments.length > 0 ? "border-primary/30 bg-secondary/50 shadow-md" : ""
+              "hover:border-primary/30 hover:shadow-xl hover:bg-background/70",
+              input || attachments.length > 0 ? "border-primary/40 bg-background/75 shadow-xl" : ""
             )}
             onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
-            onDrop={(e) => { e.preventDefault(); onPickFiles(e.dataTransfer.files); }}
           >
+            {/* 🆕 ASK FLOW - Simple Context Banner */}
+            {askFlowContext && (
+              <div className="mx-3 mt-2.5 mb-0.5 flex items-center gap-2.5 px-2.5 py-1.5 bg-muted/40 rounded-lg border border-border/40 group/banner">
+                <CornerDownRight className="w-3.5 h-3.5 text-indigo-400/80 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-muted-foreground/80 font-medium truncate italic font-mono">
+                    "{askFlowContext.text.trim()}"
+                  </div>
+                </div>
+                <button
+                  onClick={() => setAskFlowContext(null)}
+                  className="p-1 text-muted-foreground/40 hover:text-foreground rounded-full transition-colors opacity-0 group-hover/banner:opacity-100"
+                  title="Remove context"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                </button>
+              </div>
+            )}
+
             {/* Auto-Growing Textarea */}
             <textarea
               ref={textareaRef}
@@ -291,7 +375,8 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
               placeholder="Message Prism..."
               rows={1}
               disabled={isLoading}
-              className="w-full min-h-[52px] max-h-[200px] bg-transparent border-0 outline-none resize-none px-4 py-3.5 text-base text-foreground placeholder:text-muted-foreground/50 scrollbar-thin scrollbar-thumb-muted"
+              className="w-full min-h-[48px] max-h-[200px] bg-transparent border-0 outline-none resize-none px-4 py-3 text-base text-foreground placeholder:text-muted-foreground/50 overflow-y-auto scrollbar-none"
+              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
             />
 
             {/* Icons Bar */}
@@ -420,7 +505,7 @@ export const ChatInput = ({ onSend, isLoading, onOpenApiSettings, resetSignal }:
           </div>
         </div>
 
-        <p className="text-[9px] sm:text-xs text-muted-foreground text-center px-2 sm:px-3 py-1 sm:py-2 mb-1.5 sm:mb-3">
+        <p className="text-[9px] sm:text-[10px] text-muted-foreground/70 text-center px-2 py-0.5">
           PRISM can make mistakes. Consider checking important information.
         </p>
       </div>

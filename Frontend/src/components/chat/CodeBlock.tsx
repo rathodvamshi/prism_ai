@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { prism } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { Copy, Check, Code2, Save } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -254,6 +255,30 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
     timestamp: number;
   }>>([]);
   const [showSidebar, setShowSidebar] = useState(false);
+
+  // Theme detection
+  const [isDarkTheme, setIsDarkTheme] = useState(false);
+
+  useEffect(() => {
+    // Check if dark theme is active
+    const checkTheme = () => {
+      const isDark = document.documentElement.classList.contains('dark') ||
+        document.documentElement.getAttribute('data-theme') === 'dark';
+      setIsDarkTheme(isDark);
+    };
+
+    checkTheme();
+
+    // Watch for theme changes
+    const observer = new MutationObserver(checkTheme);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'data-theme']
+    });
+
+    return () => observer.disconnect();
+  }, []);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const formattedCodeCache = useRef<Map<string, string>>(new Map());
 
@@ -382,55 +407,68 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
     <div
       ref={containerRef}
       data-code-block="true"
-      className={cn(
-        "group relative my-2 sm:my-4 rounded-md sm:rounded-lg overflow-hidden border",
-        "border-zinc-800/50 bg-[#1e1e1e]",
-        "shadow-lg"
-      )}
+      className="gpt-code-block w-full max-w-full min-w-0 my-4 rounded-xl overflow-hidden border"
       style={{
-        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.03)',
+        background: 'var(--gpt-code-bg, #f7f7f8)',
+        borderColor: 'var(--gpt-code-border, #e5e7eb)',
         userSelect: 'text',
-        WebkitUserSelect: 'text'
+        WebkitUserSelect: 'text',
       }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      {/* Premium Header with macOS style */}
-      <div className="flex items-center justify-between px-3 py-2 bg-gradient-to-r from-[#2d2d30] to-[#252526] border-b border-zinc-800/50">
-        <div className="flex items-center gap-2 sm:gap-3">
-          {/* macOS traffic lights */}
-          <div className="hidden sm:flex gap-1.5">
-            <div className="w-2.5 h-2.5 rounded-full bg-[#ff5f57] hover:bg-[#ff6e65] transition-all cursor-pointer hover:scale-110" />
-            <div className="w-2.5 h-2.5 rounded-full bg-[#febc2e] hover:bg-[#ffc93d] transition-all cursor-pointer hover:scale-110" />
-            <div className="w-2.5 h-2.5 rounded-full bg-[#28c840] hover:bg-[#37d74f] transition-all cursor-pointer hover:scale-110" />
-          </div>
+      {/* Premium Glassmorphism Header */}
+      <div
+        className="relative flex items-center justify-between px-4 py-3 backdrop-blur-xl border-b border-zinc-800/40"
+        style={{
+          background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01))',
+        }}
+      >
+        {/* Gradient Accent Line */}
+        <div
+          className="absolute top-0 left-0 right-0 h-[2px]"
+          style={{
+            background: 'linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899, #3b82f6)',
+            backgroundSize: '200% 100%',
+            animation: 'gradient-shift 8s ease infinite',
+          }}
+        />
 
-          {/* Language badge */}
-          <div className="flex items-center gap-1.5 sm:gap-2 rounded-md bg-zinc-800/40">
-            <Code2 className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-zinc-500" />
-            <span className="text-[10px] sm:text-[11px] font-semibold text-zinc-400 uppercase tracking-wide">
-              {detectedLanguage}
-            </span>
+        {/* Language Badge with Icon */}
+        <div className="flex items-center gap-2.5">
+          <div className="p-1.5 rounded-lg bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/20">
+            <Code2 className="w-3.5 h-3.5 text-blue-400" />
           </div>
+          <span className="text-sm font-semibold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent uppercase tracking-wide">
+            {detectedLanguage}
+          </span>
         </div>
 
-        {/* Compact Toolkit */}
+        {/* Action Buttons with Premium Style */}
         <TooltipProvider delayDuration={200}>
-          <div className="flex items-center gap-0.5 sm:gap-1 bg-zinc-800/30 rounded-md">
+          <div className="flex items-center gap-1.5">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   onClick={handleCopy}
                   className={cn(
-                    "p-1.5 rounded transition-all duration-200",
-                    "hover:bg-zinc-700/60 active:scale-95",
-                    copied ? "text-emerald-400 bg-emerald-500/10" : "text-zinc-400 hover:text-zinc-200"
+                    "group/btn p-2 rounded-lg transition-all duration-200",
+                    "hover:bg-white/5 active:scale-95",
+                    "border border-transparent hover:border-white/10",
+                    copied ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "text-zinc-400 hover:text-white"
                   )}
                 >
-                  {copied ? <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" /> : <Copy className="w-3 h-3 sm:w-3.5 sm:h-3.5" />}
+                  {copied ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Copy className="w-4 h-4 group-hover/btn:scale-110 transition-transform" />
+                  )}
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs py-1 px-2">
-                {copied ? "Copied!" : "Copy"}
+              <TooltipContent
+                side="bottom"
+                className="bg-zinc-900/95 backdrop-blur-xl border-zinc-700/50 text-xs font-medium"
+              >
+                {copied ? "✓ Copied!" : "Copy code"}
               </TooltipContent>
             </Tooltip>
 
@@ -439,24 +477,40 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
                 <button
                   onClick={handleDownload}
                   className={cn(
-                    "p-1.5 rounded transition-all duration-200",
-                    "hover:bg-zinc-700/60 active:scale-95",
-                    saved ? "text-blue-400 bg-blue-500/10" : "text-zinc-400 hover:text-zinc-200"
+                    "group/btn p-2 rounded-lg transition-all duration-200",
+                    "hover:bg-white/5 active:scale-95",
+                    "border border-transparent hover:border-white/10",
+                    saved ? "bg-blue-500/10 border-blue-500/30 text-blue-400" : "text-zinc-400 hover:text-white"
                   )}
                 >
-                  {saved ? <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" /> : <Save className="w-3 h-3 sm:w-3.5 sm:h-3.5" />}
+                  {saved ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Save className="w-4 h-4 group-hover/btn:scale-110 transition-transform" />
+                  )}
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs py-1 px-2">
-                {saved ? "Saved!" : "Save"}
+              <TooltipContent
+                side="bottom"
+                className="bg-zinc-900/95 backdrop-blur-xl border-zinc-700/50 text-xs font-medium"
+              >
+                {saved ? "✓ Saved!" : "Download"}
               </TooltipContent>
             </Tooltip>
           </div>
         </TooltipProvider>
       </div>
 
-      {/* Code Container */}
-      <div className="relative code-block-container" style={{ contain: 'layout style paint', isolation: 'isolate' }}>
+      {/* Gradient Animation Keyframes */}
+      <style>{`
+        @keyframes gradient-shift {
+          0%, 100% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+        }
+      `}</style>
+
+      {/* GPT-Style Code Container */}
+      <div className="gpt-code-content overflow-x-auto">
         <SyntaxHighlighter
           key={`code-${children.length}-${detectedLanguage}`}
           language={detectedLanguage}
@@ -467,12 +521,11 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
           useInlineStyles={true}
           PreTag="div"
           data-code-block="true"
-          className="syntax-highlighter-code"
+          className="syntax-highlighter-code text-xs sm:text-sm"
           lineProps={(lineNumber) => ({
             style: {
               display: 'block',
-              width: '100%',
-              minHeight: '1.7em',
+              minHeight: '1.5em',
               backgroundColor: highlightedLine === lineNumber ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
               borderLeft: highlightedLine === lineNumber ? '3px solid #3b82f6' : '3px solid transparent',
               paddingLeft: highlightedLine === lineNumber ? '8px' : '0px',
@@ -480,28 +533,27 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
           })}
           customStyle={{
             margin: 0,
-            padding: '1rem',
-            background: '#1e1e1e',
+            padding: '14px',
+            background: 'var(--gpt-code-bg, #f7f7f8)',
             fontSize: '14px',
-            lineHeight: '1.85',
-            letterSpacing: '0.02em',
-            fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, Monaco, "Courier New", monospace',
+            lineHeight: '1.6',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            color: 'var(--gpt-code-text, #111827)',
             borderRadius: 0,
             whiteSpace: 'pre',
             overflowX: 'auto',
-            overflowY: 'hidden',
-            height: 'auto',
           }}
           lineNumberStyle={{
-            minWidth: '3.5em',
-            paddingRight: '1em',
-            color: '#858585',
+            minWidth: '2.5em',
+            paddingRight: '0.75em',
+            color: 'var(--gpt-line-num, #9ca3af)',
             userSelect: 'none',
-            borderRight: '1px solid #3e3e42',
-            marginRight: '1em',
+            borderRight: '1px solid rgba(59, 130, 246, 0.1)',
+            marginRight: '1.25em',
             textAlign: 'right',
-            fontSize: '13px',
+            fontSize: '12px',
             display: 'inline-block',
+            opacity: 0.6,
           }}
           codeTagProps={{
             style: {
@@ -509,35 +561,94 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
               wordBreak: 'keep-all',
               overflowWrap: 'normal',
               fontVariantLigatures: 'common-ligatures',
+              maxWidth: '100%',
             }
           }}
         >
           {formattedCode}
         </SyntaxHighlighter>
 
-        {/* Stable VS Code styling - No hover effects */}
+        {/* GPT-Style Code Block Styling */}
         <style>{`
-            /* ULTRA-STRONG Selection - Never disappears */
+            /* ===== GPT-STYLE CSS VARIABLES ===== */
+            :root {
+              --gpt-code-bg: #1f1f1f;
+              --gpt-code-border: #404040;
+              --gpt-header-bg: #2d2d2d;
+              --gpt-code-text: #e5e7eb;
+              --gpt-lang-color: #9ca3af;
+              --gpt-line-num: #6b7280;
+            }
+            
+            /* Dark Mode - GPT Accurate */
+            .dark, [data-theme="dark"] {
+              --gpt-code-bg: #0f0f0f;
+              --gpt-code-border: #262626;
+              --gpt-header-bg: #171717;
+              --gpt-code-text: #e5e7eb;
+              --gpt-lang-color: #9ca3af;
+              --gpt-line-num: #6b7280;
+            }
+            
+            /* ===== MOBILE OPTIMIZATION ===== */
+            @media (max-width: 768px) {
+              .gpt-code-block pre {
+                font-size: 12px !important;
+                padding: 10px !important;
+                max-height: 50vh;
+              }
+              
+              .gpt-code-header {
+                padding: 8px 10px !important;
+              }
+            }
+            
+            /* ===== CLEAN SELECTION (NO GRADIENTS) ===== */
+            .gpt-code-block *::selection {
+              background: rgba(59, 130, 246, 0.2) !important;
+              color: inherit !important;
+            }
+            
+            /* ===== TEXT SELECTION ENABLED ===== */
+            .gpt-code-block,
+            .gpt-code-block *,
+            .gpt-code-block pre,
+            .gpt-code-block code {
+              -webkit-user-select: text !important;
+              user-select: text !important;
+            }
+            
+            /* ===== HORIZONTAL SCROLL ONLY ===== */
+            .gpt-code-content {
+              overflow-x: auto;
+              overflow-y: hidden;
+            }
+            
+            /* ===== CLEAN SCROLLBAR ===== */
+            .gpt-code-content::-webkit-scrollbar {
+              height: 8px;
+            }
+            
+            .gpt-code-content::-webkit-scrollbar-track {
+              background: transparent;
+            }
+            
+            .gpt-code-content::-webkit-scrollbar-thumb {
+              background: rgba(0, 0, 0, 0.2);
+              border-radius: 4px;
+            }
+            
+            .dark .gpt-code-content::-webkit-scrollbar-thumb {
+              background: rgba(255, 255, 255, 0.2);
+            }
+            
+            /* ===== REMOVE OLD STYLES ===== */
             .code-block-container *::selection,
             .code-block-container::selection,
             .code-block-container *::-webkit-selection,
             .code-block-container::-webkit-selection {
-              background-color: #8b5cf6 !important;
-              background: #8b5cf6 !important;
-              color: #ffffff !important;
-            }
-            
-            .code-block-container *::-moz-selection,
-            .code-block-container::-moz-selection {
-              background-color: #8b5cf6 !important;
-              background: #8b5cf6 !important;
-              color: #ffffff !important;
-            }
-            
-            /* Force selection even when window loses focus */
-            .code-block-container *::selection,
-            .code-block-container *::-moz-selection {
-              background-color: #8b5cf6 !important;
+              background: rgba(59, 130, 246, 0.2) !important;
+              color: inherit !important;
             }
             
             /* Enable text selection everywhere */
@@ -574,23 +685,19 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
               perspective: 1000px;
             }
             
-            /* Comments - Brighter Green with subtle background */
+            /* Comments - Clean green, no background */
             .code-block-container .token.comment,
             .code-block-container .token.prolog,
             .code-block-container .token.doctype,
             .code-block-container .token.cdata {
               color: #6A9955 !important;
               font-style: italic;
-              background: rgba(106, 153, 85, 0.05);
-              padding: 0 2px;
-              border-radius: 2px;
             }
             
-            /* Block comments */
+            /* Block comments - no background */
             .code-block-container .token.block-comment {
-              background: rgba(106, 153, 85, 0.08);
-              padding: 4px 8px;
-              border-radius: 4px;
+              color: #6A9955 !important;
+              font-style: italic;
             }
             
             /* Keywords - Blue */
@@ -666,20 +773,17 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
               text-align: right;
             }
             
-            /* Premium hover effect on lines */
+            /* Premium line hover effect */
             .code-block-container .token-line {
-              transition: all 0.15s ease;
-              padding: 2px 0;
-              margin: 1px 0;
+              transition: all 0.2s ease;
+              border-left: 2px solid transparent;
+              padding-left: 0.5rem;
+              margin-left: -0.5rem;
             }
             
             .code-block-container .token-line:hover {
-              background-color: rgba(255, 255, 255, 0.05) !important;
-              margin-left: -4px;
-              padding-left: 4px;
-              margin-right: -4px;
-              padding-right: 4px;
-              border-radius: 3px;
+              background: linear-gradient(90deg, rgba(59, 130, 246, 0.05), transparent) !important;
+              border-left-color: rgba(59, 130, 246, 0.3);
             }
             
             /* Golden bracket highlighting */
@@ -709,39 +813,65 @@ export const CodeBlock = React.memo(({ children, language = "javascript", inline
               color: #D16969 !important;
             }
             
-            /* Thin horizontal scrollbar at bottom only */
-            .code-block-container > div {
+            /* Horizontal scrollbar styling - Always visible when needed */
+            .code-block-container {
               scrollbar-width: thin;
-              scrollbar-color: #424242 #2d2d30;
+              scrollbar-color: rgba(120, 120, 120, 0.6) transparent;
               overflow-x: auto;
               overflow-y: hidden;
               scroll-behavior: smooth;
+              max-width: 100%;
+              width: 100%;
             }
             
+            .code-block-container > div {
+              scrollbar-width: thin;
+              scrollbar-color: rgba(120, 120, 120, 0.6) transparent;
+              overflow-x: auto;
+              overflow-y: hidden;
+              scroll-behavior: smooth;
+              max-width: 100%;
+              width: 100%;
+            }
+            
+            /* Visible horizontal scrollbar - 6px height for better visibility */
+            .code-block-container::-webkit-scrollbar,
             .code-block-container > div::-webkit-scrollbar {
-              height: 6px; /* Thin horizontal scrollbar */
-              width: 0px; /* No vertical scrollbar */
+              height: 6px !important;
+              width: 0px !important;
+              background: rgba(0, 0, 0, 0.2);
             }
             
+            .code-block-container::-webkit-scrollbar-track,
             .code-block-container > div::-webkit-scrollbar-track {
-              background: #2d2d30;
+              background: rgba(0, 0, 0, 0.2);
               border-radius: 3px;
+              margin: 0 8px;
             }
             
+            .code-block-container::-webkit-scrollbar-thumb,
             .code-block-container > div::-webkit-scrollbar-thumb {
-              background: #555555;
+              background: rgba(120, 120, 120, 0.6);
               border-radius: 3px;
               transition: background 0.2s ease;
             }
             
+            .code-block-container::-webkit-scrollbar-thumb:hover,
             .code-block-container > div::-webkit-scrollbar-thumb:hover {
-              background: #666666;
+              background: rgba(150, 150, 150, 0.8);
             }
             
-            /* Pre element */
+            /* Always show scrollbar thumb when content overflows */
+            .code-block-container::-webkit-scrollbar-thumb,
+            .code-block-container > div::-webkit-scrollbar-thumb {
+              background: rgba(120, 120, 120, 0.6);
+            }
+            
+            /* Pre element - ensure dark background */
             .code-block-container pre {
               margin: 0;
               padding: 0;
+              background: #1e1e1e !important;
             }
           `}</style>
       </div>

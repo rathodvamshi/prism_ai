@@ -328,14 +328,14 @@ export const SettingsModal = ({ open, onOpenChange, defaultTab = "general" }: Se
             <div className="p-4 sm:p-5 bg-secondary/50 rounded-xl border border-border">
               <h4 className="font-medium text-sm mb-2">Bring Your Own Key (BYOK)</h4>
               <p className="text-xs text-muted-foreground mb-4">
-                Enter your OpenAI API key to unlock premium models and unlimited usage.
+                Enter your Groq API key to unlock unlimited usage. Get your free key at console.groq.com
               </p>
               <div className="flex gap-2">
                 <Input
                   type="password"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-..."
+                  placeholder="gsk_..."
                   className="flex-1 input-responsive"
                 />
                 <Button

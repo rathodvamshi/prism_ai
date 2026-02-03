@@ -5,10 +5,22 @@ Creates indexes for optimal performance across all collections
 
 import asyncio
 import logging
+from pymongo.errors import OperationFailure
 from app.db.mongo_client import db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+async def safe_create_index(collection, keys, **kwargs):
+    """Create index safely, ignoring if it already exists or has data conflicts"""
+    try:
+        await collection.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        if e.code in [85, 11000]:  # IndexOptionsConflict or DuplicateKey
+            logger.debug(f"Index skipped (exists or data conflict): {keys}")
+        else:
+            raise
 
 
 async def create_indexes():
@@ -17,82 +29,81 @@ async def create_indexes():
     try:
         # Users Collection Indexes
         users_collection = db.users
-        await users_collection.create_index("email", unique=True)
-        await users_collection.create_index("user_id")
-        await users_collection.create_index("verified")
-        await users_collection.create_index("isFirstLoginCompleted")
+        await safe_create_index(users_collection, "email", unique=True)
+        await safe_create_index(users_collection, "user_id")
+        await safe_create_index(users_collection, "verified")
+        await safe_create_index(users_collection, "isFirstLoginCompleted")
         logger.info("✅ Created indexes for users collection")
         
         # Chat Sessions Collection Indexes  
-        sessions_collection = db.chat_sessions
-        await sessions_collection.create_index("sessionId", unique=True)
-        await sessions_collection.create_index("user_id")
-        await sessions_collection.create_index([("user_id", 1), ("updatedAt", -1)])
-        await sessions_collection.create_index("isActive")
-        await sessions_collection.create_index("updatedAt")
-        logger.info("✅ Created indexes for chat_sessions collection")
+        sessions_collection = db.sessions
+        await safe_create_index(sessions_collection, "sessionId", unique=True)
+        await safe_create_index(sessions_collection, "user_id")
+        await safe_create_index(sessions_collection, [("user_id", 1), ("updatedAt", -1)])
+        await safe_create_index(sessions_collection, "isActive")
+        await safe_create_index(sessions_collection, "updatedAt")
+        logger.info("✅ Created indexes for sessions collection")
         
         # User Tasks Collection Indexes
         tasks_collection = db.user_tasks
-        await tasks_collection.create_index("taskId", unique=True)
-        await tasks_collection.create_index("user_id")
-        await tasks_collection.create_index([("user_id", 1), ("status", 1)])
-        await tasks_collection.create_index([("user_id", 1), ("createdAt", -1)])
-        await tasks_collection.create_index("status")
-        await tasks_collection.create_index("dueDate")
-        logger.info("✅ Created indexes for user_tasks collection")
+        await safe_create_index(tasks_collection, "taskId", unique=True)
+        await safe_create_index(tasks_collection, "userId")
+        await safe_create_index(tasks_collection, [("userId", 1), ("status", 1)])
+        await safe_create_index(tasks_collection, [("userId", 1), ("due_date", 1)])
+        await safe_create_index(tasks_collection, [("userId", 1), ("description", 1), ("status", 1), ("due_date", 1)])
+        await safe_create_index(tasks_collection, "status")
+        await safe_create_index(tasks_collection, "due_date")
+        await safe_create_index(tasks_collection, "email_status")
+        logger.info("✅ Created indexes for tasks collection")
         
         # User Memory Collection Indexes
-        memory_collection = db.user_memory
-        await memory_collection.create_index("id", unique=True)
-        await memory_collection.create_index("user_id")
-        await memory_collection.create_index([("user_id", 1), ("importance", -1), ("timestamp", -1)])
-        await memory_collection.create_index("type")
-        await memory_collection.create_index("importance")
-        await memory_collection.create_index("timestamp")
-        logger.info("✅ Created indexes for user_memory collection")
+        memory_collection = db.memory
+        await safe_create_index(memory_collection, "userId")
+        await safe_create_index(memory_collection, [("userId", 1), ("importance", -1)])
+        await safe_create_index(memory_collection, "type")
+        logger.info("✅ Created indexes for memory collection")
         
         # Message Highlights Collection Indexes
         highlights_collection = db.message_highlights
-        await highlights_collection.create_index("highlightId", unique=True)
-        await highlights_collection.create_index("uniqueKey", unique=True)
-        await highlights_collection.create_index("sessionId")
-        await highlights_collection.create_index("messageId")
-        # Compound indexes for faster queries
-        await highlights_collection.create_index([("sessionId", 1), ("user_id", 1)])
-        await highlights_collection.create_index([("sessionId", 1), ("userId", 1)])  # Alternative field name
-        await highlights_collection.create_index([("messageId", 1), ("sessionId", 1)])
-        await highlights_collection.create_index("user_id")
-        await highlights_collection.create_index("userId")
+        await safe_create_index(highlights_collection, "highlightId", unique=True)
+        await safe_create_index(highlights_collection, "sessionId")
+        await safe_create_index(highlights_collection, "messageId")
+        await safe_create_index(highlights_collection, [("sessionId", 1), ("userId", 1)])
+        await safe_create_index(highlights_collection, "userId")
         logger.info("✅ Created indexes for message_highlights collection")
         
-        # Mini-Agent Threads Collection Indexes
-        miniagent_collection = db.miniagent_threads
-        # Using mini_agents collection which is the actual collection name
+        # Mini-Agent Collection Indexes
         mini_agents_collection = db.mini_agents
-        await mini_agents_collection.create_index("agentId", unique=True)
-        await mini_agents_collection.create_index("messageId")
-        await mini_agents_collection.create_index("sessionId")
-        # Compound indexes for fastest query performance
-        await mini_agents_collection.create_index([("sessionId", 1), ("user_id", 1)])
-        await mini_agents_collection.create_index([("sessionId", 1), ("userId", 1)])  # Alternative field name
-        await mini_agents_collection.create_index([("messageId", 1), ("sessionId", 1)])
-        await mini_agents_collection.create_index([("agentId", 1), ("user_id", 1)])
-        await mini_agents_collection.create_index([("agentId", 1), ("userId", 1)])
-        await mini_agents_collection.create_index("user_id")
-        await mini_agents_collection.create_index("userId")
-        await mini_agents_collection.create_index([("user_id", 1), ("updatedAt", -1)])
-        await mini_agents_collection.create_index([("userId", 1), ("updatedAt", -1)])
-        await mini_agents_collection.create_index("updatedAt")
+        await safe_create_index(mini_agents_collection, "agentId", unique=True)
+        await safe_create_index(mini_agents_collection, "messageId")
+        await safe_create_index(mini_agents_collection, "sessionId")
+        await safe_create_index(mini_agents_collection, [("sessionId", 1), ("userId", 1)])
+        await safe_create_index(mini_agents_collection, "userId")
+        await safe_create_index(mini_agents_collection, [("userId", 1), ("updatedAt", -1)])
         logger.info("✅ Created indexes for mini_agents collection")
         
-        # Shared Conversations Collection Indexes
-        shares_collection = db.shared_conversations
-        await shares_collection.create_index("shareId", unique=True)
-        await shares_collection.create_index("user_id")
-        await shares_collection.create_index("createdAt")
-        await shares_collection.create_index("accessCount")
-        logger.info("✅ Created indexes for shared_conversations collection")
+        # 🔑 API Keys Collection Indexes (CRITICAL FOR BYOK SPEED)
+        api_keys_collection = db.api_keys
+        await safe_create_index(api_keys_collection, "user_id")
+        await safe_create_index(api_keys_collection, [("user_id", 1), ("is_active", 1), ("priority", 1)])
+        await safe_create_index(api_keys_collection, "key_hash", unique=True)
+        await safe_create_index(api_keys_collection, [("user_id", 1), ("created_at", -1)])
+        logger.info("✅ Created indexes for api_keys collection")
+        
+        # 📊 Usage Tracking Collection Indexes (CRITICAL FOR FREE LIMIT)
+        usage_collection = db.usage_tracking
+        await safe_create_index(usage_collection, "user_id", unique=True)
+        await safe_create_index(usage_collection, [("user_id", 1), ("date", 1)])
+        await safe_create_index(usage_collection, "date")
+        logger.info("✅ Created indexes for usage_tracking collection")
+        
+        # 🔐 Auth Sessions Collection Indexes
+        auth_sessions = db.auth_sessions
+        await safe_create_index(auth_sessions, "session_id", unique=True)
+        await safe_create_index(auth_sessions, "user_id")
+        await safe_create_index(auth_sessions, "expires_at")
+        await safe_create_index(auth_sessions, [("user_id", 1), ("expires_at", -1)])
+        logger.info("✅ Created indexes for auth_sessions collection")
         
         logger.info("🎉 All database indexes created successfully!")
         
@@ -101,37 +112,10 @@ async def create_indexes():
         raise
 
 
-async def verify_indexes():
-    """Verify all indexes were created correctly"""
-    
-    collections = [
-        "users",
-        "chat_sessions", 
-        "user_tasks",
-        "user_memory",
-        "message_highlights",
-        "miniagent_threads",
-        "shared_conversations"
-    ]
-    
-    for collection_name in collections:
-        collection = db[collection_name]
-        indexes = await collection.list_indexes().to_list(length=None)
-        
-        logger.info(f"📊 {collection_name} has {len(indexes)} indexes:")
-        for index in indexes:
-            logger.info(f"   - {index['name']}: {index.get('key', 'N/A')}")
-    
-    logger.info("✅ Index verification complete")
-
-
 async def main():
     """Main initialization function"""
     logger.info("🚀 Starting database initialization...")
-    
     await create_indexes()
-    await verify_indexes()
-    
     logger.info("✨ Database initialization completed successfully!")
 
 

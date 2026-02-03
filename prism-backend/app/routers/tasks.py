@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional, Literal
 import time  # 🚀 Part 19
+import re  # For duplicate description matching
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +16,7 @@ from app.services.email_queue_service import schedule_task_reminder, remove_sche
 from app.services.cache_service import cache_service  # Part 10: Smart caching
 from app.utils.structured_logging import log_task_operation  # 🚀 Part 19
 from app.utils.idempotency import is_duplicate_task, mark_task_created  # 🚀 Part 20
+from app.services.task_service import clear_active_task_draft  # Clear draft after confirm
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -23,6 +25,9 @@ class ConfirmTaskRequest(BaseModel):
     description: str
     due_date: Optional[str] = None  # ISO or "YYYY-MM-DD HH:MM" string
     recurrence: Optional[dict] = None  # Optional recurrence rule
+    session_id: Optional[str] = None  # Chat session ID for clearing draft after confirm
+    time_seconds: Optional[int] = None # 🚀 Added time support
+    image_url: Optional[str] = None    # 🚀 Added image support
 
 
 class TaskResponse(BaseModel):
@@ -36,6 +41,11 @@ class TaskResponse(BaseModel):
     email_last_error: Optional[str] = None
     email_sent_at: Optional[datetime] = None
     confirmation_message: Optional[str] = None
+    time_seconds: Optional[int] = None
+    image_url: Optional[str] = None
+    completed_at: Optional[datetime] = None  # 🚀 NEW: Track completion time
+    created_at: Optional[datetime] = None    # 🚀 NEW: Audit fields
+    updated_at: Optional[datetime] = None
 
 
 class UpdateTaskRequest(BaseModel):
@@ -43,6 +53,9 @@ class UpdateTaskRequest(BaseModel):
     description: Optional[str] = None
     due_date: Optional[str] = None  # ISO or "YYYY-MM-DD HH:MM"
     recurrence: Optional[dict] = None
+    status: Optional[Literal["pending", "completed", "cancelled"]] = None
+    time_seconds: Optional[int] = None
+    image_url: Optional[str] = None
 
 
 class CancelTaskRequest(BaseModel):
@@ -72,14 +85,15 @@ async def confirm_task(
 
     # ☁️ CLOUD-NATIVE: Parse user input as IST, convert to UTC for Celery
     # User says "9:00 PM" → We interpret as "9:00 PM IST" → Convert to UTC → Schedule on Celery
-    import pytz
+    from zoneinfo import ZoneInfo
+    from datetime import timezone as dt_timezone
     import logging
     
     logger = logging.getLogger(__name__)
     
     # Define timezones explicitly
-    IST = pytz.timezone('Asia/Kolkata')
-    UTC = pytz.utc
+    IST = ZoneInfo('Asia/Kolkata')
+    UTC = dt_timezone.utc
     
     # 🚀 GOLDEN RULE LOGGING: Track all time calculations
     now_ist = datetime.now(IST)
@@ -199,13 +213,19 @@ async def confirm_task(
                 email_sent_at=existing_task.get("email_sent_at"),
                 recurrence=existing_task.get("recurrence"),
                 confirmation_message="✅ This reminder already exists! No duplicate created.",
+                created_at=existing_task.get("created_at"),
+                updated_at=existing_task.get("updated_at")
             )
     
     # ✅ Additional check: MongoDB duplicate check (backup, in case Redis fails)
+    # 🔒 ENHANCED: Normalize description for better duplicate detection
     time_buffer = timedelta(minutes=5)
+    normalized_description = payload.description.strip().lower()
+    
+    # Use regex for case-insensitive matching
     existing_task = await tasks_collection.find_one({
         "userId": user_id,
-        "description": payload.description,
+        "description": {"$regex": f"^{re.escape(normalized_description)}$", "$options": "i"},
         "status": {"$in": ["pending", "active"]},
         "due_date": {
             "$gte": due_dt_naive - time_buffer,
@@ -237,6 +257,8 @@ async def confirm_task(
             email_sent_at=existing_task.get("email_sent_at"),
             recurrence=existing_task.get("recurrence"),
             confirmation_message="✅ This reminder already exists! No duplicate created.",
+            created_at=existing_task.get("created_at"),
+            updated_at=existing_task.get("updated_at")
         )
     
     # ☁️ Store both UTC (for sorting/debugging) and display time (for email)
@@ -257,6 +279,8 @@ async def confirm_task(
         "user_email": current_user.email,
         "user_name": current_user.name or current_user.email.split("@")[0],
         "recurrence": payload.recurrence or None,
+        "time_seconds": payload.time_seconds,
+        "image_url": payload.image_url,
     }
 
     # ☁️ Save task to MongoDB
@@ -264,13 +288,6 @@ async def confirm_task(
         result = await tasks_collection.insert_one(doc)
         task_id = str(result.inserted_id)
         logger.info(f"✅ Task saved to MongoDB: {task_id} for user {user_id}")
-        print(f"✅ Task saved to MongoDB with ID: {task_id}")
-        
-        # Verify task was saved correctly
-        saved_task = await tasks_collection.find_one({"_id": ObjectId(task_id)})
-        if not saved_task:
-            raise Exception("Task was not found after insertion - database write may have failed")
-        logger.info(f"✅ Task verification passed: {task_id}")
         
     except Exception as db_error:
         logger.error(f"❌ Failed to save task to MongoDB: {db_error}")
@@ -292,6 +309,15 @@ async def confirm_task(
     # 🚀 Part 10: Invalidate cache on CREATE
     await cache_service.invalidate_tasks(user_id)
     
+    # 🧹 CLEANUP: Clear the task draft after successful creation
+    # This prevents duplicate task drafts in the same session
+    if payload.session_id:
+        try:
+            await clear_active_task_draft(str(user_id), payload.session_id)
+            logger.info(f"✅ Cleared task draft for session: {payload.session_id}")
+        except Exception as draft_error:
+            logger.warning(f"⚠️ Failed to clear task draft (non-blocking): {draft_error}")
+    
     # 🚀 Part 19: Log task creation
     latency_ms = (time.time() - start_time) * 1000
     log_task_operation(
@@ -303,129 +329,55 @@ async def confirm_task(
     )
 
     # ☁️ CLOUD-NATIVE: Schedule reminder using Celery with eta (Estimated Time of Arrival)
-    # Celery lives on Cloud Server (UTC clock), so we pass UTC datetime object
-    # User said "9 PM IST" → We calculated "3:30 PM UTC" → Celery waits until that UTC time
     try:
         from app.tasks.email_tasks import send_reminder_email_task
         from app.core.celery_app import CELERY_AVAILABLE, celery_app
         
         # Check if Celery is available and properly initialized
         if not CELERY_AVAILABLE or celery_app is None:
-            raise ImportError("Celery is not available. Please install: pip install 'celery[redis]>=5.3.0'")
+            raise ImportError("Celery is not available.")
         
         # Check if task function has apply_async method (is a Celery task)
         if not hasattr(send_reminder_email_task, 'apply_async'):
-            raise AttributeError("send_reminder_email_task is not a Celery task. Celery may not be properly initialized.")
+            raise AttributeError("send_reminder_email_task is not a Celery task.")
         
         # ☁️ CRITICAL: Pass UTC datetime object (not naive, not IST)
-        # Celery requires timezone-aware datetime in UTC for eta parameter
-        # Ensure due_utc is timezone-aware UTC datetime
         if due_utc.tzinfo is None:
-            # If naive, assume it's already UTC
             due_utc = due_utc.replace(tzinfo=timezone.utc)
         elif due_utc.tzinfo != timezone.utc:
-            # Convert to UTC if not already
             due_utc = due_utc.astimezone(timezone.utc)
         
         # Schedule task with Celery
         result = send_reminder_email_task.apply_async(
             args=[task_id],
-            eta=due_utc  # UTC datetime object - Celery will wake up at this exact UTC time
+            eta=due_utc
         )
         
-        # Log scheduling details
-        time_until_execution = (due_utc - datetime.now(timezone.utc)).total_seconds()
-        logger.info(f"✅ [Cloud] Task scheduled on Celery")
-        logger.info(f"   Task ID: {task_id}")
-        logger.info(f"   Celery Task ID: {result.id}")
-        logger.info(f"   IST Time: {due_local.strftime('%Y-%m-%d %I:%M %p %Z')}")
-        logger.info(f"   UTC Time: {due_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        logger.info(f"   Time until execution: {time_until_execution:.0f} seconds ({time_until_execution/60:.1f} minutes)")
-        print(f"✅ [Cloud] Task scheduled on Celery")
-        print(f"   Task ID: {task_id}")
-        print(f"   Celery Task ID: {result.id}")
-        print(f"   IST Time: {due_local.strftime('%Y-%m-%d %I:%M %p %Z')}")
-        print(f"   UTC Time: {due_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        print(f"   Time until execution: {time_until_execution:.0f} seconds ({time_until_execution/60:.1f} minutes)")
-    except ImportError as import_error:
-        # Celery not installed - task saved but email won't be sent
-        error_msg = str(import_error)
-        logger.error(f"❌ Celery not available: {error_msg}")
-        logger.error("📦 Installation: pip install 'celery[redis]>=5.3.0'")
-        logger.error("🚀 Start worker: celery -A app.core.celery_app worker --loglevel=info --queues=email,default")
-        print(f"❌ Celery not available: {error_msg}")
-        print("📦 To enable email reminders, install Celery:")
-        print("   pip install 'celery[redis]>=5.3.0'")
-        print("🚀 Then start Celery worker:")
-        print("   celery -A app.core.celery_app worker --loglevel=info --queues=email,default")
-        limit_warning = "⚠️ Task saved but Celery is not available. Install Celery and start worker to enable email reminders."
-    except AttributeError as attr_error:
-        # Celery app not properly initialized or task not registered
-        logger.error(f"❌ Celery task not available: {attr_error}")
-        print(f"❌ Celery task not available: {attr_error}")
-        print("📦 Make sure Celery is installed and worker is running")
-        limit_warning = "⚠️ Task saved but Celery task is not available. Please check Celery installation and worker."
-    except Exception as e:
-        logger.error(f"⚠️ Celery scheduling error: {e}")
-        print(f"⚠️ Celery scheduling error: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        limit_warning = "⚠️ Task saved but email scheduling failed. Please check Celery worker."
-    
-    # 📝 LOG: Task Created
-    print("\n" + "="*70)
-    print("✅ TASK CREATED SUCCESSFULLY")
-    print("="*70)
-    print(f"📋 Task ID: {task_id}")
-    print(f"👤 User: {current_user.name or current_user.email}")
-    print(f"📧 Email: {current_user.email}")
-    print(f"📝 Description: {payload.description}")
-    print(f"⏰ Due Date (IST): {due_local.strftime('%Y-%m-%d %I:%M %p %Z')}")
-    print(f"⏰ Due Date (UTC): {due_utc.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"🔔 Status: pending")
-    if payload.recurrence:
-        print(f"🔄 Recurrence: {payload.recurrence.get('type', 'N/A')}")
-    print("="*70 + "\n")
+        logger.info(f"✅ [Cloud] Task scheduled on Celery. Task ID: {result.id}")
 
-    # Build a clear confirmation message for chat/frontend
-    # Use due_local for display (shows IST time to user)
+    except Exception as e:
+        logger.warning(f"⚠️ Celery scheduling skipped/failed (Task saved ok): {e}")
+        limit_warning = "⚠️ Task saved, but automatic email scheduling is strictly limited to Cloud environment."
+
+    # Build a clear confirmation message
     pretty_time = due_local.strftime("%A, %b %d at %I:%M %p IST") if due_local else "unspecified time"
     if payload.recurrence:
-        freq = payload.recurrence.get("type", "recurring")
-        if freq == "daily":
-            freq_str = "every day"
-        elif freq == "weekday":
-            freq_str = "every weekday"
-        elif freq == "interval_hours":
-            freq_str = f"every {payload.recurrence.get('interval_hours', 1)} hours"
-        elif freq == "monthly_day":
-            freq_str = "on the same day every month"
-        else:
-            freq_str = "on a recurring schedule"
-        confirmation = (
-            f"✅ Done! I've scheduled a recurring reminder to {payload.description} {freq_str}, "
-            f"next at {pretty_time}. I'll notify you via email at your registered address 📧."
-        )
+        confirmation = f"✅ Scheduled recurring reminder: {payload.description} (Next: {pretty_time})"
     else:
-        confirmation = (
-            f"✅ Done! I've scheduled a reminder to {payload.description} at {pretty_time}. "
-            "I'll notify you via email at your registered address 📧."
-        )
+        confirmation = f"✅ Scheduled reminder: {payload.description} at {pretty_time}"
 
-    # ☁️ Return due_date in a format frontend can use
-    # Use due_dt (the original parsed datetime) for response
-    # Frontend expects datetime object or ISO string
     return TaskResponse(
         task_id=task_id,
         description=payload.description,
-        due_date=due_dt,  # Original parsed datetime (may be naive or timezone-aware)
+        due_date=due_dt,
         status="pending",
         email_status="queued",
-        email_retry_count=0,
-        email_last_error=None,
-        email_sent_at=None,
         recurrence=payload.recurrence or None,
-        confirmation_message=f"{confirmation} {limit_warning or ''}".strip(),
+        confirmation_message=str(confirmation),
+        time_seconds=payload.time_seconds,
+        image_url=payload.image_url,
+        created_at=now_naive,
+        updated_at=now_naive
     )
 
 
@@ -437,82 +389,126 @@ async def list_tasks(
     """
     Returns tasks for the current user, optionally filtered by status.
     ✨ OPTIMIZED: Uses projections + Redis caching for maximum performance.
-    🚀 Part 9: MongoDB projections (smaller payloads)
-    🚀 Part 10: Redis caching (avoid unnecessary DB queries)
     """
-    user_id = current_user.user_id
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        user_id = current_user.user_id
+        logger.info(f"📋 Fetching tasks for user {user_id}, status={status}")
 
-    # 🚀 Part 10: Try cache first
-    cached_tasks = await cache_service.get_tasks(user_id, status)
-    if cached_tasks is not None:
-        # Cache hit - deserialize and return
-        return [
-            TaskResponse(
-                task_id=t["task_id"],
-                description=t["description"],
-                due_date=datetime.fromisoformat(t["due_date"]) if t.get("due_date") else None,
-                status=t["status"],
+        # 🚀 Part 10: Try cache first (with error handling)
+        try:
+            cached_tasks = await cache_service.get_tasks(user_id, status)
+            if cached_tasks:
+                logger.info(f"📋 Cache hit: {len(cached_tasks)} tasks")
+                return [
+                    TaskResponse(
+                        task_id=t["task_id"],
+                        description=t["description"],
+                        due_date=datetime.fromisoformat(t["due_date"]) if t.get("due_date") else None,
+                        status=t["status"],
+                        email_status=t.get("email_status"),
+                        email_retry_count=t.get("email_retry_count"),
+                        email_last_error=t.get("email_last_error"),
+                        email_sent_at=datetime.fromisoformat(t["email_sent_at"]) if t.get("email_sent_at") else None,
+                        time_seconds=t.get("time_seconds"),
+                        image_url=t.get("image_url"),
+                        completed_at=datetime.fromisoformat(t["completed_at"]) if t.get("completed_at") else None,
+                        created_at=datetime.fromisoformat(t["created_at"]) if t.get("created_at") else None,
+                        updated_at=datetime.fromisoformat(t["updated_at"]) if t.get("updated_at") else None,
+                    )
+                    for t in cached_tasks
+                ]
+        except Exception:
+            pass # Continue to DB
+
+        query: dict = {"userId": user_id}
+        if status:
+            query["status"] = status
+
+        # 🚀 Projection - fetch only required fields (optimized)
+        projection = {
+            "_id": 1,
+            "description": 1,
+            "due_date": 1,
+            "status": 1,
+            "email_status": 1,
+            "email_retry_count": 1,
+            "email_last_error": 1,
+            "email_sent_at": 1,
+            "time_seconds": 1,
+            "image_url": 1,
+            "completed_at": 1,  # 🚀 NEW
+            "created_at": 1,    # 🚀 NEW
+            "updated_at": 1     # 🚀 NEW
+        }
+        
+        # Sort based on status: Pending -> Due Date ASC, Completed -> Completed Date DESC
+        sort_order = [("due_date", 1)]
+        if status == "completed":
+            sort_order = [("completed_at", -1)]
+
+        cursor = tasks_collection.find(query, projection).sort(sort_order)
+        tasks: list[TaskResponse] = []
+        tasks_for_cache = []
+
+        async for t in cursor:
+            # Safe getters for dates
+            def get_dt(key):
+                val = t.get(key)
+                if isinstance(val, (datetime, str)):
+                     return val
+                return None
+
+            t_resp = TaskResponse(
+                task_id=str(t.get("_id")),
+                description=t.get("description", ""),
+                due_date=t.get("due_date"),
+                status=t.get("status", "pending"),
                 email_status=t.get("email_status"),
                 email_retry_count=t.get("email_retry_count"),
                 email_last_error=t.get("email_last_error"),
-                email_sent_at=datetime.fromisoformat(t["email_sent_at"]) if t.get("email_sent_at") else None,
+                email_sent_at=t.get("email_sent_at"),
+                time_seconds=t.get("time_seconds"),
+                image_url=t.get("image_url"),
+                completed_at=t.get("completed_at"),
+                created_at=t.get("created_at"),
+                updated_at=t.get("updated_at"),
             )
-            for t in cached_tasks
-        ]
+            tasks.append(t_resp)
+            
+            # Serialize for cache
+            def fmt_date(d):
+                return d.isoformat() if hasattr(d, 'isoformat') else None
+                
+            tasks_for_cache.append({
+                "task_id": str(t.get("_id")),
+                "description": t.get("description", ""),
+                "due_date": fmt_date(t.get("due_date")),
+                "status": t.get("status", "pending"),
+                "email_status": t.get("email_status"),
+                "email_retry_count": t.get("email_retry_count"),
+                "email_last_error": t.get("email_last_error"),
+                "email_sent_at": fmt_date(t.get("email_sent_at")),
+                "time_seconds": t.get("time_seconds"),
+                "image_url": t.get("image_url"),
+                "completed_at": fmt_date(t.get("completed_at")),
+                "created_at": fmt_date(t.get("created_at")),
+                "updated_at": fmt_date(t.get("updated_at")),
+            })
 
-    # Cache miss - fetch from database
-    query: dict = {"userId": user_id}
-    if status:
-        query["status"] = status
+        # Cache results
+        try:
+            await cache_service.set_tasks(user_id, tasks_for_cache, status)
+        except Exception:
+            pass
 
-    # 🚀 Part 9: Projection - fetch only required fields (smaller payloads)
-    # ☁️ MongoDB doesn't allow mixing inclusion (1) and exclusion (0) in same projection
-    # Use inclusion-only: specify only fields we want (recurrence and userId excluded by omission)
-    projection = {
-        "_id": 1,
-        "description": 1,
-        "due_date": 1,
-        "status": 1,
-        "email_status": 1,
-        "email_retry_count": 1,
-        "email_last_error": 1,
-        "email_sent_at": 1,
-        # Note: recurrence and userId are excluded by not including them
-    }
-
-    cursor = tasks_collection.find(query, projection).sort("due_date", 1)
-    tasks: list[TaskResponse] = []
-    tasks_for_cache = []  # Serializable format for cache
-
-    async for t in cursor:
-        task_response = TaskResponse(
-            task_id=str(t.get("_id")),
-            description=t.get("description", ""),
-            due_date=t.get("due_date"),
-            status=t.get("status", "pending"),
-            email_status=t.get("email_status"),
-            email_retry_count=t.get("email_retry_count"),
-            email_last_error=t.get("email_last_error"),
-            email_sent_at=t.get("email_sent_at"),
-        )
-        tasks.append(task_response)
+        return tasks
         
-        # Prepare cache-friendly version
-        tasks_for_cache.append({
-            "task_id": str(t.get("_id")),
-            "description": t.get("description", ""),
-            "due_date": t.get("due_date").isoformat() if t.get("due_date") else None,
-            "status": t.get("status", "pending"),
-            "email_status": t.get("email_status"),
-            "email_retry_count": t.get("email_retry_count"),
-            "email_last_error": t.get("email_last_error"),
-            "email_sent_at": t.get("email_sent_at").isoformat() if t.get("email_sent_at") else None,
-        })
-
-    # 🚀 Part 10: Cache for future requests
-    await cache_service.set_tasks(user_id, tasks_for_cache, status)
-
-    return tasks
+    except Exception as e:
+        logger.error(f"❌ Error in list_tasks: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tasks: {str(e)}")
 
 
 @router.post("/update", response_model=TaskResponse)
@@ -528,14 +524,28 @@ async def update_task(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid task_id")
 
-    # Fetch task and verify ownership
     task = await tasks_collection.find_one({"_id": obj_id, "userId": user_id})
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     updates: dict = {}
-    if payload.description:
-        updates["description"] = payload.description
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # Fields mapping
+    if payload.description: updates["description"] = payload.description
+    if payload.recurrence is not None: updates["recurrence"] = payload.recurrence
+    if payload.time_seconds is not None: updates["time_seconds"] = payload.time_seconds
+    if payload.image_url is not None: updates["image_url"] = payload.image_url
+
+    # Status & Completion Logic 🚀
+    if payload.status:
+        updates["status"] = payload.status
+        if payload.status == "completed":
+             if task.get("status") != "completed": # Only set if changing
+                updates["completed_at"] = now_utc
+        elif payload.status == "pending":
+             # If re-opening, clear completed_at
+             updates["completed_at"] = None
 
     if payload.due_date:
         try:
@@ -548,72 +558,43 @@ async def update_task(
             updates["due_date"] = due_local.astimezone(timezone.utc).replace(tzinfo=None)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid due_date format")
-    else:
-        due_dt = task.get("due_date")
-
-    if payload.recurrence is not None:
-        updates["recurrence"] = payload.recurrence
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    updates["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
+    updates["updated_at"] = now_utc
 
     await tasks_collection.update_one({"_id": obj_id}, {"$set": updates})
 
-    # 🚀 Part 10: Invalidate cache on UPDATE
+    # 🚀 Part 10: Invalidate cache
     await cache_service.invalidate_tasks(user_id)
 
-    # Re-fetch updated task
     updated = await tasks_collection.find_one({"_id": obj_id})
-    if not updated:
-        raise HTTPException(status_code=500, detail="Failed to load updated task")
-
+    
+    # Generate meaningful confirmation
     desc = updated.get("description", "")
-    due = updated.get("due_date")
-    if isinstance(due, str):
-        try:
-            due_dt = datetime.fromisoformat(due)
-        except Exception:
-            due_dt = None
+    status_emoji = "✅" if updated.get("status") == "completed" else "🔄"
+    if updated.get("status") == "completed":
+        confirmation = f"🎉 Great job! Marked **{desc}** as completed."
     else:
-        due_dt = due
-    pretty_time = (
-        due_dt.strftime("%A, %b %d at %I:%M %p") if isinstance(due_dt, datetime) else "unspecified time"
-    )
-
-    recurrence = updated.get("recurrence")
-    if recurrence:
-        freq = recurrence.get("type", "recurring")
-        if freq == "daily":
-            freq_str = "every day"
-        elif freq == "weekday":
-            freq_str = "every weekday"
-        elif freq == "interval_hours":
-            freq_str = f"every {recurrence.get('interval_hours', 1)} hours"
-        elif freq == "monthly_day":
-            freq_str = "on the same day every month"
-        else:
-            freq_str = "on a recurring schedule"
-        confirmation = (
-            f"🔄 Updated your recurring reminder to **{desc}** {freq_str}, next at {pretty_time}."
-        )
-    else:
-        confirmation = (
-            f"🔄 Updated your reminder to **{desc}** at {pretty_time}."
-        )
+         confirmation = f"{status_emoji} Updated task **{desc}** successfully."
 
     return TaskResponse(
         task_id=str(updated["_id"]),
         description=desc,
-        due_date=due_dt,
+        due_date=updated.get("due_date"),
         status=updated.get("status", "pending"),
         email_status=updated.get("email_status"),
         email_retry_count=updated.get("email_retry_count"),
         email_last_error=updated.get("email_last_error"),
         email_sent_at=updated.get("email_sent_at"),
-        recurrence=recurrence,
+        recurrence=updated.get("recurrence"),
         confirmation_message=confirmation,
+        time_seconds=updated.get("time_seconds"),
+        image_url=updated.get("image_url"),
+        completed_at=updated.get("completed_at"),
+        created_at=updated.get("created_at"),
+        updated_at=updated.get("updated_at"),
     )
 
 

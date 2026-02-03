@@ -1,22 +1,23 @@
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any, Literal, List
 from zoneinfo import ZoneInfo
 
 from dateutil import parser as date_parser
-import pytz
+from dateutil.tz import tzoffset
 
 # IST Timezone (Asia/Kolkata) - All date/time calculations use this
 IST = ZoneInfo("Asia/Kolkata")
-IST_PYTZ = pytz.timezone('Asia/Kolkata')
+# Create IST offset timezone for dateutil parser (UTC+5:30)
+IST_OFFSET = tzoffset('IST', 5*3600 + 30*60)
 
 # ☁️ Fix timezone warning: Provide timezone mapping for dateutil parser
 # This prevents "tzname IST identified but not understood" warning
 TZINFOS = {
-    'IST': IST_PYTZ,
-    'IST (India Standard Time)': IST_PYTZ,
-    'Asia/Kolkata': IST_PYTZ,
+    'IST': IST_OFFSET,
+    'IST (India Standard Time)': IST_OFFSET,
+    'Asia/Kolkata': IST_OFFSET,
 }
 
 from app.db.mongo_client import tasks_collection
@@ -456,16 +457,80 @@ async def clear_active_task_draft(user_id: str, session_id: str) -> None:
     await redis_client.delete(key)
 
 
+async def ensure_no_duplicate_task(user_id: str, description: str, due_date_utc: datetime) -> None:
+    """
+    Prevent duplicate tasks with same description and time (within 1-minute window).
+    """
+    start_window = due_date_utc - timedelta(minutes=1)
+    end_window = due_date_utc + timedelta(minutes=1)
+    
+    existing = await tasks_collection.find_one({
+        "userId": user_id,
+        "description": description,
+        "due_date": {"$gte": start_window, "$lte": end_window},
+        "status": {"$ne": "cancelled"} # Ignore cancelled
+    })
+    
+    if existing:
+        raise ValueError(f"A similar task already exists for {description} around this time.")
+
+
+async def check_daily_task_limit(user_id: str) -> Tuple[bool, int]:
+    """
+    🎯 CHECK DAILY TASK LIMIT
+    
+    Check if user has reached daily task creation limit.
+    Free users: 3 tasks per day
+    
+    Returns: (limit_reached, tasks_created_today)
+    """
+    # Get start of today in IST
+    now_ist = datetime.now(IST)
+    start_of_day_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day_utc = start_of_day_ist.astimezone(ZoneInfo("UTC"))
+    
+    # Count tasks created today
+    tasks_today = await tasks_collection.count_documents({
+        "userId": user_id,
+        "created_at": {"$gte": start_of_day_utc.replace(tzinfo=None)},
+        "status": {"$ne": "cancelled"}  # Don't count cancelled tasks
+    })
+    
+    # Free tier limit: 3 tasks per day
+    DAILY_LIMIT = 3
+    limit_reached = tasks_today >= DAILY_LIMIT
+    
+    return limit_reached, tasks_today
+
+
 # ⚠️ Only used after explicit user confirmation
 async def create_task(user_id: str, description: str, due_date_iso: str, user_email: Optional[str] = None, user_name: Optional[str] = None):
     """
     Persist a confirmed task. Requires a concrete due_date.
     Converts IST due_date to UTC for database storage (best practice).
+    
+    🎯 FREE TIER LIMIT: 3 tasks per day (upgradeable to unlimited)
     """
     if not due_date_iso:
         raise ValueError("due_date is required to create a task")
+    
+    # 🔒 CHECK DAILY TASK LIMIT
+    limit_reached, tasks_created_today = await check_daily_task_limit(user_id)
+    if limit_reached:
+        # Get user profile to check premium status (future)
+        # For now, all users are free tier
+        raise ValueError(
+            f"daily_limit_reached|You've reached your daily limit of 3 tasks! 🎯\n\n"
+            f"**Tasks created today:** {tasks_created_today}/3\n\n"
+            f"**Want unlimited tasks?** Upgrade to Pro to create unlimited tasks, "
+            f"get priority support, and unlock premium features! ✨"
+        )
 
     try:
+        # Handle Z suffix for UTC which fromisoformat doesn't support in older Python
+        if due_date_iso.endswith("Z"):
+            due_date_iso = due_date_iso[:-1] + "+00:00"
+            
         due_dt = datetime.fromisoformat(due_date_iso)
         # Ensure timezone-aware datetime
         if due_dt.tzinfo is None:
@@ -474,6 +539,9 @@ async def create_task(user_id: str, description: str, due_date_iso: str, user_em
         due_dt_utc = due_dt.astimezone(ZoneInfo("UTC"))
     except Exception as e:
         raise ValueError(f"due_date must be ISO format: {e}")
+        
+    # 🛡️ DUPLICATE CHECK
+    await ensure_no_duplicate_task(user_id, description, due_dt_utc)
 
     now_utc = datetime.now(ZoneInfo("UTC"))
     task_doc = {
@@ -505,10 +573,99 @@ async def create_task(user_id: str, description: str, due_date_iso: str, user_em
             "task": {**task_doc, "_id": result.inserted_id},
         }
 
+    # 🎨 Create user-friendly time display
+    # Convert UTC back to IST for display
+    due_dt_ist = due_dt_utc.astimezone(IST)
+    time_display = due_dt_ist.strftime("%I:%M %p").lstrip("0")  # "7:31 PM" not "07:31 PM"
+    
+    # Calculate relative time for context
+    now_ist = datetime.now(IST)
+    delta = due_dt_ist - now_ist
+    total_minutes = int(delta.total_seconds() / 60)
+    
+    if total_minutes < 60:
+        relative_str = f"in {total_minutes} minute{'s' if total_minutes != 1 else ''}"
+    elif total_minutes < 1440:  # Less than 24 hours
+        hours = total_minutes // 60
+        mins = total_minutes % 60
+        if mins > 0:
+            relative_str = f"in {hours}h {mins}m"
+        else:
+            relative_str = f"in {hours} hour{'s' if hours != 1 else ''}"
+    else:
+        days = total_minutes // 1440
+        relative_str = f"in {days} day{'s' if days != 1 else ''}"
+    
+    # Beautiful confirmation message
+    friendly_msg = f"✅ Reminder set! I'll remind you to **{description}** at **{time_display} IST** ({relative_str})"
+
     return {
-        "message": f"✅ Task saved: {description} (Due: {due_dt})",
+        "message": friendly_msg,
         "task": {**task_doc, "_id": result.inserted_id},
     }
+
+# 🔄 Reschedule a task
+async def reschedule_task(task_id: str, new_due_date_iso: str, user_id: str) -> dict:
+    """
+    Reschedules an existing task.
+    """
+    if not new_due_date_iso:
+        raise ValueError("New due date is required")
+    
+    try:
+        # Parse new date
+        if new_due_date_iso.endswith("Z"):
+            new_due_date_iso = new_due_date_iso[:-1] + "+00:00"
+        due_dt = datetime.fromisoformat(new_due_date_iso)
+        if due_dt.tzinfo is None:
+            due_dt = due_dt.replace(tzinfo=IST)
+        due_dt_utc = due_dt.astimezone(ZoneInfo("UTC"))
+    except Exception as e:
+        raise ValueError(f"Invalid date format: {e}")
+        
+    # Update MongoDB
+    result = await tasks_collection.update_one(
+        {"_id": ObjectId(task_id), "userId": user_id},
+        {
+            "$set": {
+                "due_date": due_dt_utc.replace(tzinfo=None),
+                "updated_at": datetime.now(ZoneInfo("UTC")).replace(tzinfo=None),
+                "email_status": "queued" # Reset email status
+            }
+        }
+    )
+    
+    if result.matched_count == 0:
+        raise ValueError("Task not found")
+        
+    # Reschedule in Redis/Celery
+    await remove_scheduled_email(task_id) # Remove old schedule
+    await schedule_task_reminder(task_id, user_id, due_dt_utc.timestamp()) # Add new
+    
+    return {"message": f"Task rescheduled to {due_dt.strftime('%Y-%m-%d %I:%M %p')}"}
+
+# ❌ Cancel a task
+async def cancel_task(task_id: str, user_id: str) -> dict:
+    """
+    Cancels a task.
+    """
+    result = await tasks_collection.update_one(
+        {"_id": ObjectId(task_id), "userId": user_id},
+        {
+            "$set": {
+                "status": "cancelled", 
+                "email_status": "cancelled",
+                "updated_at": datetime.now(ZoneInfo("UTC")).replace(tzinfo=None)
+            }
+        }
+    )
+    
+    if result.matched_count == 0:
+        raise ValueError("Task not found")
+        
+    await remove_scheduled_email(task_id)
+    return {"message": "Task cancelled successfully"}
+
 
 
 # ---- Task listing and matching helpers for chat CRUD ----
@@ -532,6 +689,7 @@ async def list_tasks_for_chat(
         "status": 1,
         "created_at": 1,
         "updated_at": 1,
+        "completed_at": 1,  # 🚀 Added context
         "_id": 1
     }
     
@@ -578,6 +736,7 @@ async def find_tasks_matching_description(
         "due_date": 1,
         "status": 1,
         "updated_at": 1,
+        "completed_at": 1,  # 🚀 Added context
         "_id": 1
     }
 

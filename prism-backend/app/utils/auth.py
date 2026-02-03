@@ -382,13 +382,18 @@ async def get_current_user_from_session(
         )
 
     if not session_cookie_id:
+        # logger.warning(f"🚫 Not authenticated: Missing {SESSION_COOKIE_NAME} cookie") 
+        # (Reduced noise for common probes)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
+    
+    # logger.debug(f"🔍 Validating session cookie: {session_cookie_id[:8]}...")
 
     session = await get_session(session_cookie_id)
     if not session:
+        logger.warning(f"🚫 Invalid or expired session: {session_cookie_id[:8]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
@@ -415,21 +420,24 @@ async def get_current_user_from_session(
         )
 
     # Minimal user model used throughout the app
+    # 🌩️ CRITICAL: 'role' field is required for RBAC (Admin access)
     return User(
         user_id=str(user_doc["_id"]),
         email=user_doc["email"],
         name=user_doc.get("name"),
+        role=user_doc.get("role", "user") # ✅ Pass role to User model
     )
 
 
 async def get_optional_user_from_session(
+    request: Request, # 🔧 Fix: Ensure Request is passed for middlewares
     session_cookie_id: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> Optional[User]:
     """Optional session-based dependency: returns User or None."""
     if not session_cookie_id:
         return None
     try:
-        return await get_current_user_from_session(session_cookie_id=session_cookie_id)
+        return await get_current_user_from_session(request=request, session_cookie_id=session_cookie_id)
     except HTTPException:
         return None
 

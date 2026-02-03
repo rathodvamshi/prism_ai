@@ -27,6 +27,7 @@ import { HighlightMenu } from "./HighlightMenu";
 import { useChatStore } from "@/stores/chatStore";
 import { StreamingMessage } from "./StreamingMessage";
 import { ActionCard, ActionCardState } from "./ActionCard";
+import { MediaActionCard } from "./MediaActionCard";
 import { MessageBlockParser } from "@/lib/messageBlockParser";
 import { MessageBlockRenderer } from "./MessageBlockRenderer";
 
@@ -48,39 +49,6 @@ interface MessageBubbleProps {
   isStreaming?: boolean;
   isThinking?: boolean;
 }
-
-interface ThinkingAnimationProps {
-  isVisible: boolean;
-}
-
-const ThinkingAnimation = ({ isVisible }: ThinkingAnimationProps) => {
-  if (!isVisible) return null;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="flex items-center gap-1.5 h-6 mb-2 ml-1"
-    >
-      <motion.div
-        className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full"
-        animate={{ scale: [1, 1.2, 1], opacity: [0.4, 1, 0.4] }}
-        transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut", delay: 0 }}
-      />
-      <motion.div
-        className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full"
-        animate={{ scale: [1, 1.2, 1], opacity: [0.4, 1, 0.4] }}
-        transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut", delay: 0.2 }}
-      />
-      <motion.div
-        className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full"
-        animate={{ scale: [1, 1.2, 1], opacity: [0.4, 1, 0.4] }}
-        transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut", delay: 0.4 }}
-      />
-    </motion.div>
-  );
-};
 
 let currentUtterance: SpeechSynthesisUtterance | null = null;
 let currentSpeakingId: string | null = null;
@@ -145,8 +113,8 @@ export const MessageBubble = memo(({
   const { cleanContent, thinkingData } = useMemo(() => {
     if (!message.content) return { cleanContent: "", thinkingData: null };
 
-    // Regex for the thinking data block
-    const regex = /<!--THINKING_DATA:(.*?)-->/s;
+    // Regex for the thinking data block (centralized pattern)
+    const regex = /<!--\s*THINKING_DATA:(.*?)-->/s;
     const match = message.content.match(regex);
 
     if (match) {
@@ -208,20 +176,48 @@ export const MessageBubble = memo(({
   /**
    * Get exact selection offsets using DOM Range API
    * This correctly handles multiple occurrences of the same text
+   * 
+   * CRITICAL: Returns offsets in the RENDERED text (what user sees after markdown parsing)
+   * These offsets are used to map back to the stripMarkdown() output for highlight storage
    */
   const getSelectionOffsets = (containerElement: HTMLElement, range: Range): { start: number; end: number } | null => {
     try {
+      // Validate inputs
+      if (!containerElement || !range) {
+        console.warn('[MessageBubble] Invalid inputs for selection offset calculation');
+        return null;
+      }
+
       // Create a range from start of container to start of selection
       const preRange = document.createRange();
       preRange.selectNodeContents(containerElement);
+
+      // Ensure selection is within our container
+      if (!containerElement.contains(range.startContainer) || !containerElement.contains(range.endContainer)) {
+        console.warn('[MessageBubble] Selection is outside message container');
+        return null;
+      }
+
       preRange.setEnd(range.startContainer, range.startOffset);
 
       const start = preRange.toString().length;
-      const end = start + range.toString().length;
+      const selectedText = range.toString();
+      const end = start + selectedText.length;
+
+      // Validate offsets are reasonable
+      if (start < 0 || end <= start) {
+        console.warn('[MessageBubble] Invalid offset calculation:', { start, end });
+        return null;
+      }
+
+      // Debug log in development
+      if (import.meta.env.DEV) {
+        console.log(`[MessageBubble] Selection offsets: [${start}:${end}] text="${selectedText.substring(0, 30)}${selectedText.length > 30 ? '...' : ''}"`);
+      }
 
       return { start, end };
     } catch (error) {
-      if (process.env.NODE_ENV === 'development') {
+      if (import.meta.env.DEV) {
         console.error('[MessageBubble] Selection offset calculation error:', error);
       }
       return null;
@@ -292,7 +288,7 @@ export const MessageBubble = memo(({
         if (offsets && offsets.start >= 0 && offsets.end > offsets.start) {
           // Check if selection overlaps with existing highlight
           const overlappingHighlight = message.highlights?.find(
-            h => offsets.start >= h.startOffset && offsets.end <= h.endOffset
+            h => offsets.start >= h.startIndex && offsets.end <= h.endIndex
           );
 
           setSelectedText(text);
@@ -309,8 +305,8 @@ export const MessageBubble = memo(({
 
           // If it's an exact match with existing highlight, allow re-coloring
           if (overlappingHighlight &&
-            offsets.start === overlappingHighlight.startOffset &&
-            offsets.end === overlappingHighlight.endOffset) {
+            offsets.start === overlappingHighlight.startIndex &&
+            offsets.end === overlappingHighlight.endIndex) {
             // User can re-color this highlight
             setIsRecoloring(overlappingHighlight.id);
           } else {
@@ -443,12 +439,12 @@ export const MessageBubble = memo(({
       }
       // Parse and render with highlights
       const blocks = MessageBlockParser.parse(cleanContent);
-      return <MessageBlockRenderer blocks={blocks} highlights={highlights} />;
+      return <MessageBlockRenderer blocks={blocks} highlights={highlights} chatId={currentChatId} />;
     }
 
     // For completed AI messages, use structured block renderer
     if (messageBlocks) {
-      return <MessageBlockRenderer blocks={messageBlocks} highlights={highlights} />;
+      return <MessageBlockRenderer blocks={messageBlocks} highlights={highlights} chatId={currentChatId} />;
     }
 
     return null;
@@ -458,60 +454,67 @@ export const MessageBubble = memo(({
   return (
     <>
       <motion.div
-        initial={{ opacity: 0, y: 4 }}
+        initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+        transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
         className={cn(
-          "flex gap-2 sm:gap-3 group mb-3 sm:mb-4",
-          isUser ? "flex-row-reverse self-end" : "self-start"
+          "flex gap-3 sm:gap-4 group mb-6 sm:mb-8 w-full",
+          isUser ? "flex-row-reverse justify-start" : "justify-start"
         )}
       >
-        {/* Avatar */}
+        {/* Avatar - Modern, Clean Design */}
         <div
           className={cn(
-            "w-7 h-7 sm:w-8 sm:h-8 rounded-full overflow-hidden flex items-center justify-center shrink-0 border border-border",
-            isUser ? "bg-secondary" : "bg-secondary"
+            "w-8 h-8 sm:w-9 sm:h-9 rounded-full overflow-hidden flex items-center justify-center shrink-0",
+            isUser
+              ? "bg-gradient-to-br from-blue-500 to-blue-600 shadow-md border-2 border-blue-400/30"
+              : "bg-transparent border-2 border-border/50"
           )}
         >
           {isUser ? (
             profileAvatar ? (
               <img src={profileAvatar} alt={profileName} className="w-full h-full object-cover" />
             ) : (
-              <span className="text-[10px] sm:text-xs font-semibold">
+              <span className="text-xs sm:text-sm font-bold text-white">
                 {(profileName || "U").trim().charAt(0).toUpperCase()}
               </span>
             )
           ) : (
-            <img src="/pyramid.svg" alt="Prism" className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <img src="/pyramid.svg" alt="Prism" className="w-5 h-5 sm:w-5.5 sm:h-5.5 opacity-70" />
           )}
         </div>
 
-        {/* Bubble */}
+        {/* Message Content Container */}
         <div
           className={cn(
             isUser
-              ? "relative text-right max-w-[85%] sm:max-w-[720px] w-fit"
-              : "relative text-left w-full max-w-none pr-8 sm:pr-[2.9rem]"
+              ? "relative text-right max-w-[85%] sm:max-w-[600px] w-fit"
+              : "relative text-left flex-1 min-w-0"
           )}
         >
           <div
             className={cn(
-              "inline-block rounded-xl sm:rounded-[16px] break-words font-[Inter,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif] [word-break:normal] [overflow-wrap:break-word] text-left transition-all duration-150 ease-out",
+              "w-full break-words text-left transition-all duration-200",
               isUser
-                ? "bg-secondary text-secondary-foreground px-3 py-2.5 sm:px-[18px] sm:py-[14px] ml-1 sm:ml-2 shadow-sm text-[15px] sm:text-[16px] leading-[1.5] whitespace-pre-wrap"
-                : "text-foreground px-0 py-0 text-[15px] sm:text-[17px] leading-[1.6] sm:leading-[1.7] font-medium [word-spacing:0.08em] [&_p]:mb-[6px]"
+                ? "inline-block backdrop-blur-xl bg-black/10 dark:bg-white/5 border border-border/30 text-foreground px-4 py-3 sm:px-5 sm:py-3.5 rounded-2xl sm:rounded-[20px] shadow-lg hover:shadow-xl hover:bg-black/15 dark:hover:bg-white/10 text-[15px] sm:text-[15.5px] leading-[1.5] font-normal"
+                : "text-foreground/90 px-0 py-0 text-[15.5px] sm:text-[16px] leading-[1.75] sm:leading-[1.8] font-normal tracking-[0.01em]"
             )}
           >
             {images.length > 0 && (
               <div className={cn("mb-2 sm:mb-3 grid gap-1.5 sm:gap-2", images.length === 1 ? "grid-cols-1" : images.length === 2 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3")}>
                 {images.map((img, idx) => (
-                  <button key={img.id} type="button" onClick={() => { setViewerIndex(idx); setZoom(1); setViewerOpen(true); }} className="block w-full overflow-hidden rounded-md sm:rounded-lg bg-secondary">
+                  <button
+                    key={img.id}
+                    type="button"
+                    onClick={() => { setViewerIndex(idx); setZoom(1); setViewerOpen(true); }}
+                    className="block w-full overflow-hidden rounded-md sm:rounded-lg bg-secondary relative aspect-video"
+                  >
                     <img
                       src={img.thumbUrl || img.url}
                       alt={img.name}
                       loading="lazy"
                       decoding="async"
-                      className="w-full h-24 sm:h-28 md:h-36 object-cover"
+                      className="absolute inset-0 w-full h-full object-cover"
                       sizes="(max-width: 640px) 45vw, 30vw"
                     />
                   </button>
@@ -529,11 +532,6 @@ export const MessageBubble = memo(({
               </div>
             )}
 
-
-            {/* Thinking Animation */}
-            {!isUser && isThinking && (
-              <ThinkingAnimation isVisible={true} />
-            )}
 
             {/* Content Wrapper for Selection Accuracy */}
             <div
@@ -567,95 +565,69 @@ export const MessageBubble = memo(({
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden"
                     >
-                      <div className="bg-secondary/30 backdrop-blur-[2px] rounded-lg p-2.5 sm:p-3.5 text-xs space-y-3 sm:space-y-4 mt-1 border border-border/40 shadow-sm relative overflow-hidden">
+                      <div className="bg-secondary/30 backdrop-blur-[2px] rounded-lg p-3 text-xs border border-border/40 shadow-sm relative overflow-hidden">
 
                         {/* Decorative background element */}
                         <div className="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full blur-3xl -z-10 translate-x-10 -translate-y-10" />
 
-                        {/* Top Row: Intent & Emotion */}
-                        <div className="grid grid-cols-2 gap-3 sm:gap-4">
+                        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+                          {/* Intent */}
                           {thinkingData.intent && (
-                            <div className="flex flex-col gap-1 sm:gap-1.5 min-w-0">
-                              <span className="text-[9px] sm:text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider">Intent</span>
-                              <div className="flex items-center">
-                                <span className="text-foreground/90 font-medium capitalize truncate text-[11px] sm:text-xs">
-                                  {thinkingData.intent}
-                                </span>
-                              </div>
+                            <div className="flex flex-col gap-1 min-w-0">
+                              <span className="text-[9px] uppercase font-bold text-muted-foreground/60 tracking-wider">Intent</span>
+                              <span className="text-foreground/90 font-medium capitalize truncate text-xs">
+                                {thinkingData.intent}
+                              </span>
                             </div>
                           )}
+
+                          {/* Emotion */}
                           {thinkingData.emotion && (
-                            <div className="flex flex-col gap-1 sm:gap-1.5 min-w-0">
-                              <span className="text-[9px] sm:text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider">Emotion</span>
-                              <div className="flex items-center gap-1.5 sm:gap-2">
+                            <div className="flex flex-col gap-1 min-w-0">
+                              <span className="text-[9px] uppercase font-bold text-muted-foreground/60 tracking-wider">Emotion</span>
+                              <div className="flex items-center gap-1.5">
                                 <span className={cn(
-                                  "w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full animate-pulse shrink-0",
+                                  "w-1.5 h-1.5 rounded-full animate-pulse shrink-0",
                                   thinkingData.emotion === "happiness" ? "bg-green-500" :
                                     thinkingData.emotion === "sadness" ? "bg-blue-500" :
                                       thinkingData.emotion === "anger" ? "bg-red-500" :
                                         "bg-gray-400"
                                 )} />
-                                <span className="text-foreground/90 font-medium capitalize truncate text-[11px] sm:text-xs">
+                                <span className="text-foreground/90 font-medium capitalize truncate text-xs">
                                   {thinkingData.emotion}
                                 </span>
                               </div>
                             </div>
                           )}
-                        </div>
 
-                        {/* Middle Row: Tone */}
-                        {thinkingData.behavior_profile && (
-                          <div className="flex flex-col gap-1.5 sm:gap-2">
-                            <span className="text-[9px] sm:text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider">Tone & Style</span>
-                            <div className="flex flex-wrap gap-1.5 sm:gap-2">
-                              {thinkingData.behavior_profile.tone && (
-                                <span className="bg-primary/5 text-primary border border-primary/10 px-2 py-0.5 rounded-md text-[10px] sm:text-[11px] font-medium whitespace-nowrap">
-                                  {thinkingData.behavior_profile.tone}
-                                </span>
-                              )}
-                              {thinkingData.behavior_profile.warmth !== undefined && (
-                                <span className="bg-orange-500/5 text-orange-600/90 dark:text-orange-400 border border-orange-500/10 px-2 py-0.5 rounded-md text-[10px] sm:text-[11px] font-medium whitespace-nowrap">
-                                  Warmth: {(thinkingData.behavior_profile.warmth * 100).toFixed(0)}%
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Suggestions */}
-                        {thinkingData.suggestions && thinkingData.suggestions.length > 0 && (
-                          <div className="flex flex-col gap-2 pt-2 border-t border-border/30">
-                            <span className="text-[9px] sm:text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider flex items-center gap-1.5">
-                              <Sparkles className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-yellow-500/80" />
-                              Suggested Follow-ups
-                            </span>
-                            <div className="flex flex-wrap gap-2">
-                              {thinkingData.suggestions.map((suggestion: string, idx: number) => (
-                                <button
-                                  key={idx}
-                                  onClick={() => {
-                                    useChatStore.getState().sendMessageStream(currentChatId || "", suggestion, () => { }, () => { });
-                                  }}
-                                  className="text-left px-2 sm:px-3 py-1.5 rounded-lg bg-background/50 hover:bg-background border border-border/40 hover:border-primary/20 transition-all text-[10px] sm:text-xs text-foreground/80 hover:text-primary active:scale-95 shadow-sm hover:shadow"
-                                >
-                                  {suggestion}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Pipeline */}
-                        <div className="flex flex-col gap-1.5 pt-1 opacity-50 hover:opacity-100 transition-opacity">
-                          <span className="text-[9px] sm:text-[10px] uppercase font-bold text-muted-foreground/60 tracking-wider">Processing Pipeline</span>
-                          <div className="flex flex-wrap gap-x-1 gap-y-1 items-center">
-                            {(thinkingData.pipeline || []).map((step: string, i: number) => (
-                              <div key={i} className="flex items-center gap-1">
-                                <span className="text-[9px] sm:text-[10px] font-mono bg-background/30 px-1 rounded border border-border/20">{step}</span>
-                                {i < (thinkingData.pipeline.length - 1) && <span className="text-muted-foreground/30 text-[9px]">›</span>}
+                          {/* Tone & Style */}
+                          {thinkingData.behavior_profile && (
+                            <div className="flex flex-col gap-1">
+                              <span className="text-[9px] uppercase font-bold text-muted-foreground/60 tracking-wider">Tone</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {thinkingData.behavior_profile.tone && (
+                                  <span className="bg-primary/5 text-primary border border-primary/10 px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap">
+                                    {thinkingData.behavior_profile.tone}
+                                  </span>
+                                )}
                               </div>
-                            ))}
-                          </div>
+                            </div>
+                          )}
+
+                          {/* Pipeline - Fully Visible */}
+                          {(thinkingData.pipeline && thinkingData.pipeline.length > 0) && (
+                            <div className="flex flex-col gap-1 min-w-0 flex-1">
+                              <span className="text-[9px] uppercase font-bold text-muted-foreground/60 tracking-wider">Flow</span>
+                              <div className="flex flex-wrap gap-x-1 gap-y-1 items-center">
+                                {thinkingData.pipeline.map((step: string, i: number) => (
+                                  <div key={i} className="flex items-center gap-1">
+                                    <span className="text-[10px] font-mono text-muted-foreground/90 bg-background/50 px-1.5 py-0.5 rounded border border-border/30">{step}</span>
+                                    {i < (thinkingData.pipeline.length - 1) && <span className="text-muted-foreground/30 text-[9px]">→</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </motion.div>
@@ -759,18 +731,23 @@ export const MessageBubble = memo(({
               />
             )}
 
-            {/* Rich action payloads (e.g., video) */}
-            {!isThinking && action?.type === "video" && action.data?.url && (
+            {/* Rich action payloads (e.g., video) - Only show if not already rendered as a block */}
+            {!isThinking && (action?.type === "video" || action?.type === "media_play") && !messageBlocks?.some(b => b.type === "action") && (
               <div className="mt-2 sm:mt-3 w-full">
-                <div className="aspect-video w-full overflow-hidden rounded-md border border-border/60 bg-black">
-                  <iframe
-                    title="video-player"
-                    src={action.data.url}
-                    className="h-full w-full"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  />
-                </div>
+                <MediaActionCard
+                  payload={
+                    action.type === "media_play"
+                      ? (action as any).payload
+                      : {
+                        mode: 'video',
+                        url: action.data?.url,
+                        query: action.data?.title || "Video",
+                        source: "youtube"
+                      }
+                  }
+                  chatId={currentChatId}
+                  messageId={message.id}
+                />
               </div>
             )}
 
@@ -786,14 +763,14 @@ export const MessageBubble = memo(({
                       whileHover={{ scale: 1.15, y: -2 }}
                       whileTap={{ scale: 0.95 }}
                       transition={{ type: "spring", stiffness: 400, damping: 15 }}
-                      onClick={() => onOpenHighlights?.()}
+                      onClick={() => onOpenHighlightsPanel?.(message.id)}
                       className="absolute -right-1.5 sm:-right-2 top-7 sm:top-8 w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-gradient-to-br from-yellow-200 via-yellow-300 to-amber-300 flex items-center justify-center shadow-[0_4px_14px_0_rgba(252,211,77,0.5)] hover:shadow-[0_6px_20px_rgba(252,211,77,0.65)] transition-all border-[2px] sm:border-[2.5px] border-white/90 z-20"
                     >
                       <Highlighter className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-amber-700 drop-shadow-sm" />
                     </motion.button>
                   </TooltipTrigger>
                   <TooltipContent side="left" className="text-xs py-1 px-2">
-                    {message.highlights.length} Highlight{message.highlights.length > 1 ? 's' : ''}
+                    {message.highlights.length} Highlight{message.highlights.length > 1 ? 's' : ''} - Click to view
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -832,25 +809,25 @@ export const MessageBubble = memo(({
           {/* AI Message Actions - only show when response is complete */}
           {!isUser && !isStreaming && !isThinking && message.content.trim() && (
             <motion.div
-              initial={{ opacity: 0, y: -5 }}
+              initial={{ opacity: 0, y: -3 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: 0.1, ease: "easeOut" }}
-              className="flex items-center justify-start gap-1 sm:gap-1.5 mt-1 sm:mt-1.5 whitespace-nowrap overflow-x-auto opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+              transition={{ duration: 0.2, delay: 0.05 }}
+              className="flex items-center justify-start gap-0.5 mt-2 sm:mt-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" className="px-1 sm:px-1.5 py-0.5 sm:py-1 rounded-md text-muted-foreground hover:bg-gray-700/40" aria-label="Like" onClick={toggleLike}>
-                      <ThumbsUp className={cn("w-3.5 h-3.5 sm:w-4 sm:h-4", liked ? "text-white" : "text-muted-foreground")} fill={liked ? "currentColor" : "none"} />
+                    <Button variant="ghost" size="icon-sm" className="h-8 w-8 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/50 transition-all" aria-label="Like" onClick={toggleLike}>
+                      <ThumbsUp className={cn("w-4 h-4", liked ? "text-green-600 dark:text-green-400" : "")} fill={liked ? "currentColor" : "none"} />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent side={tooltipSide} sideOffset={8} className="text-xs py-1 px-2">Like</TooltipContent>
+                  <TooltipContent side={tooltipSide} sideOffset={8} className="text-xs py-1.5 px-2.5">Like</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" className="px-1 sm:px-1.5 py-0.5 sm:py-1 rounded-md text-muted-foreground hover:bg-gray-700/40" aria-label="Dislike" onClick={toggleDislike}>
-                      <ThumbsDown className={cn("w-3.5 h-3.5 sm:w-4 sm:h-4", disliked ? "text-red-400" : "text-muted-foreground")} fill={disliked ? "currentColor" : "none"} />
+                    <Button variant="ghost" size="icon-sm" className="h-8 w-8 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/50 transition-all" aria-label="Dislike" onClick={toggleDislike}>
+                      <ThumbsDown className={cn("w-4 h-4", disliked ? "text-red-500 dark:text-red-400" : "")} fill={disliked ? "currentColor" : "none"} />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side={tooltipSide} sideOffset={8} className="text-xs py-1 px-2">Dislike</TooltipContent>
@@ -859,13 +836,13 @@ export const MessageBubble = memo(({
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" onClick={handleCopy} className="px-1 sm:px-1.5 py-0.5 sm:py-1 rounded-md text-muted-foreground hover:bg-gray-700/40" aria-label="Copy">
+                    <Button variant="ghost" size="icon-sm" onClick={handleCopy} className="h-8 w-8 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/50 transition-all" aria-label="Copy">
                       {copied ? (
                         <span className="inline-flex items-center">
-                          <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                          <svg className="w-4 h-4 text-green-600 dark:text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
                         </span>
                       ) : (
-                        <Copy className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                        <Copy className="w-4 h-4" />
                       )}
                     </Button>
                   </TooltipTrigger>
@@ -875,11 +852,11 @@ export const MessageBubble = memo(({
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" onClick={handleSpeakToggle} className="px-1 sm:px-1.5 py-0.5 sm:py-1 rounded-md text-muted-foreground hover:bg-gray-700/40" aria-label={isSpeaking ? "Stop" : "Speak"}>
+                    <Button variant="ghost" size="icon-sm" onClick={handleSpeakToggle} className="h-8 w-8 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/50 transition-all" aria-label={isSpeaking ? "Stop" : "Speak"}>
                       {isSpeaking ? (
-                        <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="6" width="12" height="12" /></svg>
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="6" width="12" height="12" /></svg>
                       ) : (
-                        <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                        <Volume2 className="w-4 h-4" />
                       )}
                     </Button>
                   </TooltipTrigger>
@@ -889,8 +866,8 @@ export const MessageBubble = memo(({
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" className="px-1 sm:px-1.5 py-0.5 sm:py-1 rounded-md text-muted-foreground hover:bg-gray-700/40" aria-label="Regenerate">
-                      <RefreshCw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                    <Button variant="ghost" size="icon-sm" className="h-8 w-8 rounded-lg text-muted-foreground/70 hover:text-foreground hover:bg-muted/50 transition-all" aria-label="Regenerate">
+                      <RefreshCw className="w-4 h-4" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side={tooltipSide} sideOffset={8} className="text-xs py-1 px-2">Regenerate</TooltipContent>
@@ -940,27 +917,50 @@ export const MessageBubble = memo(({
             menuRef={menuRef}
             isHighlighted={
               (message.highlights || []).some(
-                (h) => h.startOffset === selectedRange.start && h.endOffset === selectedRange.end
+                (h) => h.startIndex === selectedRange.start && h.endIndex === selectedRange.end
               )
             }
             onClose={closeMenu}
             onHighlight={async (color) => {
               if (!selectedRange) return;
 
-              const { currentChatId, addHighlight, removeHighlight } = useChatStore.getState();
+              const { currentChatId, addHighlight, removeHighlight, updateHighlightColor } = useChatStore.getState();
               if (currentChatId && selectedRange.start >= 0 && selectedRange.end > selectedRange.start) {
-                // If re-coloring an existing highlight, remove it first
+                // If re-coloring an existing highlight, use updateHighlightColor for smoother UX
                 if (isRecoloring) {
-                  await removeHighlight(currentChatId, message.id, (h) => h.id === isRecoloring);
+                  // Check if store has updateHighlightColor, otherwise fall back to remove+add
+                  if (typeof updateHighlightColor === 'function') {
+                    try {
+                      await updateHighlightColor(currentChatId, message.id, isRecoloring, color);
+                    } catch (err) {
+                      // Fallback to remove + add if updateHighlightColor fails
+                      await removeHighlight(currentChatId, message.id, (h) => h.id === isRecoloring);
+                      await addHighlight(currentChatId, message.id, {
+                        text: selectedText,
+                        color: color,
+                        startIndex: selectedRange.start,
+                        endIndex: selectedRange.end,
+                      });
+                    }
+                  } else {
+                    // Fallback: remove old highlight and add new one with new color
+                    await removeHighlight(currentChatId, message.id, (h) => h.id === isRecoloring);
+                    await addHighlight(currentChatId, message.id, {
+                      text: selectedText,
+                      color: color,
+                      startIndex: selectedRange.start,
+                      endIndex: selectedRange.end,
+                    });
+                  }
+                } else {
+                  // Add new highlight
+                  await addHighlight(currentChatId, message.id, {
+                    text: selectedText,
+                    color: color,
+                    startIndex: selectedRange.start,
+                    endIndex: selectedRange.end,
+                  });
                 }
-
-                // Add new highlight (or re-add with new color)
-                await addHighlight(currentChatId, message.id, {
-                  text: selectedText,
-                  color: color, // Use actual HEX color code from color picker
-                  startOffset: selectedRange.start,
-                  endOffset: selectedRange.end,
-                });
               }
               closeMenu();
             }}
@@ -970,7 +970,7 @@ export const MessageBubble = memo(({
               const { currentChatId, removeHighlight } = useChatStore.getState();
               if (currentChatId && selectedRange.start >= 0 && selectedRange.end > selectedRange.start) {
                 await removeHighlight(currentChatId, message.id, (h) =>
-                  h.startOffset === selectedRange.start && h.endOffset === selectedRange.end
+                  h.startIndex === selectedRange.start && h.endIndex === selectedRange.end
                 );
               }
               closeMenu();
@@ -988,11 +988,23 @@ export const MessageBubble = memo(({
             onCopy={() => {
               navigator.clipboard.writeText(selectedText);
             }}
+            onAskFlow={() => {
+              // 🆕 ASK FLOW - Activate global context
+              useChatStore.getState().setAskFlowContext({
+                text: selectedText,
+                source: 'chat'
+              });
+
+              // Visual feedback handled by ChatInput popping up the context banner
+              closeMenu();
+            }}
             hasMiniAgent={hasMiniAgent}
             messageId={message.id}
           />
         )}
-      </motion.div >
+      </motion.div>
+
+      {/* Image Viewer - Full Screen */}
       {viewerOpen && (
         <div className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center">
           <button className="absolute top-3 right-3 text-white/90 text-xl" onClick={() => setViewerOpen(false)}>×</button>
@@ -1007,8 +1019,7 @@ export const MessageBubble = memo(({
             </div>
           </div>
         </div>
-      )
-      }
+      )}
     </>
   );
 }, (prevProps, nextProps) => {

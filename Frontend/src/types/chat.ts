@@ -8,20 +8,27 @@ export interface Message {
   attachments?: Attachment[];
   // Optional rich action payload (e.g., video/charts)
   action?: {
-    type: "video" | "chart" | "link" | "custom";
-    data: any;
+    type: "video" | "chart" | "link" | "custom" | "media_play" | "task_draft" | "task_update_draft" | "task_cancel_draft";
+    data?: any;
+    payload?: any;  // Support both data and payload for backwards compatibility
   };
   // Optional streaming status for long-running tools (e.g., deep_research)
   streamStatus?: string | null;
+  // 🆕 API source info - shows which API key generated this response
+  keySource?: "platform" | "user";  // "platform" = app's API, "user" = user's own BYOK
+  model?: string;  // e.g., "llama-3.1-8b-instant"
 }
 
 export interface Highlight {
   id: string;
   text: string;
   color: string; // Accepts any HEX color code (e.g., "#FFD93D" or "#FF4B4BCC")
-  startOffset: number;
-  endOffset: number;
+  startIndex: number;  // Absolute character offset (inclusive) - ✅ RENAMED from startOffset
+  endIndex: number;    // Absolute character offset (exclusive) - ✅ RENAMED from endOffset
   note?: string;
+  messageHash?: string;  // ✅ NEW: SHA256 hash for drift detection
+  _broken?: boolean;     // Runtime flag: Highlight cannot be displayed
+  _realigned?: boolean;  // Runtime flag: Highlight was fuzzy-matched
 }
 
 /**
@@ -93,4 +100,23 @@ export interface Task {
   createdAt: Date;
   chatId?: string;
   dueDate?: Date;
+  timeSeconds?: number;
+  imageUrl?: string;
+}
+
+// 🎵 Media Play Feature Types
+export interface MediaPlayPayload {
+  mode: "link" | "video" | "embed";  // link = redirect, video = inline, embed = embedded player
+  url?: string;  // Full URL for redirect mode
+  video_id?: string;  // YouTube video ID for inline mode
+  query: string;  // Original search query
+  message: string;  // User-friendly message
+  cached: boolean;  // Whether result came from cache
+  source: "cache" | "api" | "scraper" | "redirect";  // Where the result came from
+  executeOnce?: boolean;
+}
+
+export interface MediaPlayAction {
+  type: "media_play";
+  payload: MediaPlayPayload;
 }

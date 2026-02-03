@@ -4,16 +4,13 @@ from typing import Literal
 from app.db.redis_client import redis_client
 
 try:
-    # Preferred: renamed package
-    from ddgs import DDGS
+    from duckduckgo_search import DDGS
 except ImportError:
     try:
-        # Fallback: legacy package name
-        from duckduckgo_search import DDGS  # type: ignore
-        print("RuntimeWarning: `ddgs` not found, using legacy `duckduckgo_search`. Consider installing `ddgs`.")
+        from ddgs import DDGS
     except ImportError:
-        DDGS = None  # type: ignore
-        print("ImportError: Neither `ddgs` nor `duckduckgo_search` is installed. Web search will be disabled.")
+        DDGS = None
+        print("ImportError: `duckduckgo_search` is not installed. Web search will be disabled.")
 
 
 def _format_results(results):

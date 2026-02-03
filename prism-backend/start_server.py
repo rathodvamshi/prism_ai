@@ -6,6 +6,21 @@ This script adds the current directory to Python path and starts uvicorn.
 
 import sys
 import os
+import logging
+
+# =============================================================================
+# 🔇 SUPPRESS NOISY LIBRARY LOGS FIRST (before any imports)
+# =============================================================================
+# PyMongo background threads cause WinError 10060 NetworkTimeout on Windows
+# These are non-fatal but spam logs - silence them at CRITICAL level only
+# =============================================================================
+for noisy_logger in [
+    'pymongo', 'pymongo.pool', 'pymongo.topology', 'pymongo.connection',
+    'pymongo.serverSelection', 'pymongo.command', 'pymongo.monitor', 'motor',
+    'httpcore', 'httpx', 'urllib3', 'asyncio', 'watchfiles',
+]:
+    logging.getLogger(noisy_logger).setLevel(logging.CRITICAL)
+
 import uvicorn
 
 # Add current directory to Python path

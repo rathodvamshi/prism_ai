@@ -28,34 +28,50 @@ logger = logging.getLogger(__name__)
 
 class ConnectionPoolConfig:
     """
-    Centralized configuration for all connection pools.
-    Adjust these values based on your workload and infrastructure.
+    🚀 HARDENED CONNECTION POOL CONFIGURATION
+    
+    Optimized for MongoDB Atlas + Windows stability:
+    - Long timeouts to handle network jitter
+    - Conservative pool sizes to reduce background maintenance
+    - Aggressive keepalive to prevent firewall drops
+    - Reduced heartbeat frequency to minimize network chatter
     """
     
-    # MongoDB Connection Pool
-    MONGODB_MIN_POOL_SIZE = 10
-    MONGODB_MAX_POOL_SIZE = 100
-    MONGODB_MAX_IDLE_TIME_MS = 300000  # 5 minutes
-    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 30000  # 30 seconds
+    # =========================================================================
+    # MongoDB Connection Pool (HARDENED for Atlas + Windows stability)
+    # =========================================================================
+    # Issue: WinError 10060 / NetworkTimeout from background pool refresh
+    # Solution: Conservative pool + long timeouts + reduced heartbeat
+    # =========================================================================
+    MONGODB_MIN_POOL_SIZE = 3          # Minimal warm connections (reduce background churn)
+    MONGODB_MAX_POOL_SIZE = 20         # Conservative max (prevent pool thrashing)
+    MONGODB_MAX_IDLE_TIME_MS = 60000   # 1 minute (recycle connections aggressively to avoid stale sockets)
+    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 30000  # 30 seconds (Increased for stability)
+    MONGODB_CONNECT_TIMEOUT_MS = 60000   # 60 seconds (Generous for initial TCP handshake)
+    MONGODB_SOCKET_TIMEOUT_MS = 60000    # 60 seconds (per-operation timeout)
+    MONGODB_HEARTBEAT_FREQUENCY_MS = 10000  # 10 seconds (check health more often to detect drops)
+    MONGODB_LOCAL_THRESHOLD_MS = 15     # 15ms (standard latency preference)
+    MONGODB_WAIT_QUEUE_TIMEOUT_MS = 10000  # 10 seconds (wait for pool slot)
     
-    # Redis Connection Pool
-    REDIS_MAX_CONNECTIONS = 100
-    REDIS_SOCKET_TIMEOUT = 5  # seconds
-    REDIS_SOCKET_CONNECT_TIMEOUT = 5  # seconds
+    # Redis Connection Pool (ULTRA-OPTIMIZED)
+    REDIS_MAX_CONNECTIONS = 50         # Max 50 connections (reduced)
+    REDIS_SOCKET_TIMEOUT = 1           # 1 second (Cache should be instant or fail)
+    REDIS_SOCKET_CONNECT_TIMEOUT = 3   # 3 seconds
     REDIS_SOCKET_KEEPALIVE = True
     REDIS_RETRY_ON_TIMEOUT = True
+    REDIS_HEALTH_CHECK_INTERVAL = 30   # Check every 30s
     
-    # Neo4j Connection Pool
-    NEO4J_MAX_POOL_SIZE = 50
-    NEO4J_MAX_CONNECTION_LIFETIME = 3600  # 1 hour
-    NEO4J_CONNECTION_TIMEOUT = 30  # seconds
-    NEO4J_CONNECTION_ACQUISITION_TIMEOUT = 60  # seconds
+    # Neo4j Connection Pool (OPTIMIZED)
+    NEO4J_MAX_POOL_SIZE = 75
+    NEO4J_MAX_CONNECTION_LIFETIME = 1800  # 30 minutes
+    NEO4J_CONNECTION_TIMEOUT = 15  # seconds
+    NEO4J_CONNECTION_ACQUISITION_TIMEOUT = 30  # seconds
     
-    # HTTP Client Pool (httpx)
-    HTTP_MAX_CONNECTIONS = 100
-    HTTP_MAX_KEEPALIVE_CONNECTIONS = 20
-    HTTP_KEEPALIVE_EXPIRY = 5  # seconds
-    HTTP_TIMEOUT = 30  # seconds
+    # HTTP Client Pool (httpx) - FOR EXTERNAL APIs
+    HTTP_MAX_CONNECTIONS = 150
+    HTTP_MAX_KEEPALIVE_CONNECTIONS = 30
+    HTTP_KEEPALIVE_EXPIRY = 10  # seconds
+    HTTP_TIMEOUT = 20  # seconds
 
 
 # ============================================================================
@@ -187,7 +203,7 @@ async def validate_all_pools():
     except Exception as e:
         logger.error(f"❌ Redis validation failed: {e}")
     
-    # Validate Neo4j
+    # Validate Neo4j (OPTIONAL - graph features only)
     try:
         from app.db.neo4j_client import neo4j_client
         if neo4j_client.is_available:
@@ -195,8 +211,15 @@ async def validate_all_pools():
                 logger.info("✅ Neo4j driver validated (singleton)")
                 logger.info(f"   Pool: {ConnectionPoolConfig.NEO4J_MAX_POOL_SIZE} max connections")
                 results["neo4j"] = True
+            else:
+                logger.warning("⚠️ Neo4j unavailable - graph features disabled (non-critical)")
+                results["neo4j"] = True  # Mark as "ok" since it's optional
+        else:
+            logger.info("ℹ️ Neo4j not configured - graph features disabled")
+            results["neo4j"] = True  # Mark as "ok" since it's optional
     except Exception as e:
-        logger.error(f"❌ Neo4j validation failed: {e}")
+        logger.warning(f"⚠️ Neo4j not available: {e} (non-critical - graph features disabled)")
+        results["neo4j"] = True  # Don't fail startup for optional service
     
     # Summary
     logger.info("\n" + "=" * 60)

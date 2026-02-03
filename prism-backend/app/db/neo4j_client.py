@@ -60,6 +60,7 @@ class Neo4jClient:
     
     _instance = None
     _initialized = False
+    _failure_logged = False  # 🔇 Log failure only once to reduce noise
     
     def __new__(cls):
         """Enforce singleton pattern"""
@@ -83,23 +84,28 @@ class Neo4jClient:
         return self._driver is not None
     
     async def verify_connectivity(self) -> bool:
-        """Verify Neo4j connection is working"""
+        """Verify Neo4j connection is working (logs failure only once)"""
         if not self._driver:
-            logger.error("❌ Neo4j driver not initialized")
+            if not Neo4jClient._failure_logged:
+                logger.warning("⚠️ Neo4j driver not initialized - graph features disabled")
+                Neo4jClient._failure_logged = True
             return False
         
         try:
             await self._driver.verify_connectivity()
             self._connection_verified = True
+            Neo4jClient._failure_logged = False  # Reset on success
             logger.info("✅ Neo4j connection verified successfully")
             return True
         except Exception as e:
-            logger.error(f"❌ Neo4j connectivity verification failed: {e}")
-            if "getaddrinfo failed" in str(e):
-                logger.critical("🚨 DNS RESOLUTION FAILED: Check NEO4J_URI in .env")
-                logger.critical(f"   Current URI: {settings.NEO4J_URI}")
-                logger.critical("   Ensure the Instance ID (e.g. 46945710) is correct.")
-            logger.info("💡 Run: python test_neo4j_connection.py for detailed diagnostics")
+            # 🔇 Log failure only ONCE to reduce log noise
+            if not Neo4jClient._failure_logged:
+                if "getaddrinfo failed" in str(e):
+                    logger.warning(f"⚠️ Neo4j unavailable (DNS failed) - graph features disabled")
+                    logger.debug(f"   URI: {settings.NEO4J_URI}")
+                else:
+                    logger.warning(f"⚠️ Neo4j unavailable: {type(e).__name__} - graph features disabled")
+                Neo4jClient._failure_logged = True
             return False
     
     async def close(self):
@@ -136,6 +142,10 @@ neo4j_client = Neo4jClient()
 
 # Export driver for backward compatibility
 driver = neo4j_client._driver
+
+def get_neo4j_driver():
+    """Get the Neo4j driver instance for direct use"""
+    return neo4j_client._driver
 
 async def close_neo4j():
     await neo4j_client.close()

@@ -4,6 +4,7 @@ Implements comprehensive security measures for the application
 """
 
 from fastapi import Request, HTTPException, status
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import time
 import logging
@@ -41,67 +42,80 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.max_request_size = max_request_size
         self.blocked_ips: Set[str] = set()
+        # Patterns kept for reference or specific route usage, not global middleware scan
         self.suspicious_patterns = [
-            r'<script.*?>.*?</script>',  # XSS attempts
-            r'javascript:',              # JavaScript injection
-            r'on\w+\s*=',               # Event handler injection
-            r'union\s+select',          # SQL injection
-            r'drop\s+table',            # SQL injection
-            r'delete\s+from',           # SQL injection
-            r'\.\./.*\.\.',             # Path traversal
-            r'file://',                 # File scheme
-            r'data:',                   # Data URLs
+            r'<script.*?>.*?</script>', 
+            r'javascript:',              
+            r'on\w+\s*=',               
+            r'union\s+select',          
+            r'drop\s+table',            
+            r'delete\s+from',           
+            r'\.\./.*\.\.',             
+            r'file://',                 
+            r'data:',                   
         ]
         self.compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.suspicious_patterns]
-    
+        
+        # 🟢 WHITELIST: Safe internal routes
+        self.whitelisted_prefixes = [
+            "/api/streaming/",
+            "/api/finalize",
+            "/health",
+            "/auth/me",
+            "/docs",
+            "/openapi.json"
+        ]
+
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         
-        # Check IP blocking
-        client_ip = get_client_ip(request)
-        if client_ip in self.blocked_ips:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+        # Initialize security state
+        request.state.security_flag = False
+        request.state.threat_detected = None
+        
+        try:
+            # Check IP blocking (STRICT BLOCKING for blacklist)
+            client_ip = get_client_ip(request)
+            if client_ip in self.blocked_ips:
+                logger.warning(f"🚫 Blocked request from blacklisted IP: {client_ip}")
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Access denied"}
+                )
+            
+            # 🔍 WHITELIST CHECK
+            is_whitelisted = any(request.url.path.startswith(prefix) for prefix in self.whitelisted_prefixes)
+            
+            # ⚠️ SMART SECURITY CHANGE:
+            # We REMOVED body scanning from Middleware to preventing Stream Consumption errors.
+            # Security is now "Observational" in middleware (Headers/IP) 
+            # and "Specific" in route handlers (InputValidator).
+            
+            # Security headers validation (Passive Log -> Flag)
+            self._validate_security_headers(request)
+            
+            # Process request (ALWAYS ALLOW valid traffic)
+            response = await call_next(request)
+            
+            # Add security headers to response
+            self._add_security_headers(response)
+            
+            # Log request timing (optional)
+            # process_time = time.time() - start_time
+            # logger.info(f"Request processed: {request.method} {request.url.path} - {process_time:.3f}s")
+            
+            return response
+
+        except Exception as e:
+            # 🛡️ FAIL SAFE: Middleware should never crash the app
+            logger.error(f"Security middleware error: {e}", exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "INTERNAL_SECURITY_ERROR",
+                    "message": "An unexpected security check error occurred."
+                }
             )
-        
-        # Request size validation
-        if hasattr(request, 'body'):
-            try:
-                body = await request.body()
-                if len(body) > self.max_request_size:
-                    logger.warning(f"Request too large from {client_ip}: {len(body)} bytes")
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail="Request too large"
-                    )
-                
-                # Check for malicious patterns in body
-                if body:
-                    body_str = body.decode('utf-8', errors='ignore')
-                    if self._contains_malicious_content(body_str):
-                        logger.warning(f"Malicious content detected from {client_ip}")
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Invalid request content"
-                        )
-            except UnicodeDecodeError:
-                pass  # Binary content, skip pattern matching
-        
-        # Security headers validation
-        self._validate_security_headers(request)
-        
-        # Process request
-        response = await call_next(request)
-        
-        # Add security headers to response
-        self._add_security_headers(response)
-        
-        # Log request
-        process_time = time.time() - start_time
-        logger.info(f"Request processed: {request.method} {request.url.path} - {process_time:.3f}s")
-        
-        return response
     
     def _contains_malicious_content(self, content: str) -> bool:
         """Check if content contains malicious patterns"""
@@ -151,9 +165,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         self.blocked_ips.discard(ip)
         logger.info(f"IP unblocked: {ip}")
 
-class InputValidator:
+class FormInputValidator:
     """
-    Comprehensive input validation system
+    Comprehensive input validation system for Forms and Auth
+    (Email, Password, Sanitization)
     """
     
     @staticmethod
@@ -340,7 +355,7 @@ class AuthenticationSecurity:
 
 # Global instances
 security_middleware = SecurityMiddleware
-input_validator = InputValidator()
+form_input_validator = FormInputValidator()
 auth_security = AuthenticationSecurity()
 
 # Simple rate limiting (can be enhanced later with Redis)
@@ -372,10 +387,10 @@ simple_rate_limiter = SimpleRateLimiter()
 # Export main components
 __all__ = [
     'SecurityMiddleware',
-    'InputValidator', 
+    'FormInputValidator', 
     'AuthenticationSecurity',
     'security_middleware',
-    'input_validator',
+    'form_input_validator',
     'auth_security',
     'simple_rate_limiter',
     'get_client_ip'

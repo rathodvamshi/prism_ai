@@ -100,12 +100,17 @@ class UnifiedMemoryOrchestrator:
     - Route storage to correct memory system
     - Provide comprehensive debug logging
     - Prevent duplicates and stale data
+    
+    ULTRA-OPTIMIZATIONS:
+    - In-memory LRU cache for user profiles (60s TTL)
+    - Projection queries to reduce data transfer
+    - Fast-path for common intents
     """
     
     def __init__(self):
         """Initialize connections to all memory systems"""
         from app.db.redis_client import redis_client
-        from app.db.mongo_client import MongoClient, memory_collection
+        from app.db.mongo_client import MongoClient, memory_collection, users_collection, tasks_collection, users_global_collection
         from app.db.neo4j_client import Neo4jClient
         from app.services.memory_manager import index as pinecone_index, get_embedding
         from app.services.user_resolution_service import get_user_resolution_service
@@ -116,6 +121,14 @@ class UnifiedMemoryOrchestrator:
         self.pinecone = pinecone_index
         self.get_embedding = get_embedding
         self.memory_collection = memory_collection
+        self.users_collection = users_collection  # 🆕 For user profile with location
+        self.tasks_collection = tasks_collection  # 🆕 For task awareness
+        self.users_global_collection = users_global_collection # 🆕 For global stats and history
+        
+        # 🚀 IN-MEMORY CACHE for user profiles (avoids repeated MongoDB hits)
+        self._profile_cache: Dict[str, Tuple[Any, datetime]] = {}
+        self._cache_ttl_seconds = 60  # Cache profiles for 60 seconds
+        self._cache_max_size = 1000   # Max 1000 profiles in cache
         
         # 🔐 User Resolution Service - ensures ONE EMAIL = ONE USER
         try:
@@ -125,62 +138,173 @@ class UnifiedMemoryOrchestrator:
             logger.warning(f"⚠️ User Resolution Service not available yet: {e}")
             self.user_resolution = None
         
-        logger.info("🧠 Unified Memory Orchestrator initialized")
+        logger.info("🧠 Unified Memory Orchestrator initialized (ULTRA-OPTIMIZED)")
+    
+    def _get_cached_profile(self, user_id: str) -> Optional[Dict]:
+        """Get user profile from cache if valid"""
+        if user_id in self._profile_cache:
+            data, cached_at = self._profile_cache[user_id]
+            age = (datetime.now() - cached_at).total_seconds()
+            if age < self._cache_ttl_seconds:
+                return data
+            else:
+                # Expired, remove
+                del self._profile_cache[user_id]
+        return None
+    
+    def _set_cached_profile(self, user_id: str, data: Dict):
+        """Store user profile in cache"""
+        # Evict oldest if cache full
+        if len(self._profile_cache) >= self._cache_max_size:
+            oldest_key = min(self._profile_cache, key=lambda k: self._profile_cache[k][1])
+            del self._profile_cache[oldest_key]
+        self._profile_cache[user_id] = (data, datetime.now())
+    
+    def invalidate_cache(self, user_id: str = None):
+        """
+        🗑️ Invalidate cache to force fresh data fetch
+        
+        Args:
+            user_id: Specific user to invalidate. If None, clears ALL cache.
+        """
+        if user_id:
+            if user_id in self._profile_cache:
+                del self._profile_cache[user_id]
+                logger.info(f"🗑️ [Cache] Invalidated cache for user {user_id[:8]}...")
+        else:
+            self._profile_cache.clear()
+            logger.info("🗑️ [Cache] Cleared ALL profile cache")
     
     # ==========================================
     # MEMORY FETCHING (Stop-on-Hit Logic)
     # ==========================================
     
     # ==========================================
-    # HOLOGRAPHIC MEMORY RETRIEVAL (Gather-All Logic)
+    # HOLOGRAPHIC MEMORY RETRIEVAL (ULTRA-OPTIMIZED)
     # ==========================================
     
     async def get_holographic_context(
         self,
-        user_id: str,
-        query: str,
-        intent: str = "general"
+        user_id: str = None,              # Support positional for backwards compatibility
+        query: str = None,
+        intent: str = "general",
+        user_id_or_email: str = None      # Also accept named parameter
     ) -> Tuple[Dict[str, Any], List[str]]:
         """
-        💎 HOLOGRAPHIC MEMORY RETRIEVAL
+        💎 HOLOGRAPHIC MEMORY RETRIEVAL (ULTRA-FAST)
         
-        Fetches context from ALL layers in parallel:
-        1. Redis (Session) - Immediate context
-        2. MongoDB (Profile) - Core identity
-        3. Neo4j (Graph) - Deep relationships
-        4. Pinecone (Vector) - Semantic history
+        OPTIMIZATIONS:
+        - Resolve user ID first
+        - Skip heavy fetches for simple intents
+        - Only fetch MongoDB profile (fastest, most useful)
+        - Neo4j/Pinecone only for "history" or "preferences" intents
         
-        Returns:
-            (context_dict, debug_logs)
+        Args:
+            user_id: User ID (preferred)
+            query: The user's query/message
+            intent: The detected intent
+            user_id_or_email: Alternative parameter name (for backwards compatibility)
         """
+        # Handle both parameter styles
+        actual_user_id = user_id or user_id_or_email
+        if not actual_user_id:
+            raise ValueError("user_id or user_id_or_email is required")
+        
         debug_logs = []
         start_time = datetime.now()
         
-        debug_logs.append(f"[Holographic Fetch START] user_id={user_id}, intent={intent}")
+        # 0. Resolve User Identity
+        resolved_user_id, is_new, resolve_logs = await self.validate_and_resolve_user_id(actual_user_id)
+        debug_logs.extend(resolve_logs)
+        
+        debug_logs.append(f"[Holographic Fetch START] user_id={resolved_user_id}, intent={intent}")
+        
+        # 🚀 ULTRA-FAST: Skip heavy fetches for simple intents
+        # "identity" and "preferences" need MongoDB profile (fastest) - NOT full Neo4j/Pinecone search
+        fast_intents = ["general", "greeting", "thanks", "media", "task", "coding"]
+        
+        # 🆕 "identity" and "preferences" intents ONLY need MongoDB (where name/age/profile/preferences are stored)
+        # Neo4j/Pinecone are TOO SLOW and cause timeouts - user profile and preferences are in MongoDB!
+        if intent in ["identity", "preferences"]:
+            debug_logs.append(f"🔍 [IDENTITY INTENT] Fast MongoDB-only fetch for user profile")
+            # ONLY fetch MongoDB profile - this is where name/email/location lives
+            mongo_result = await self._fetch_from_mongodb(resolved_user_id, query, intent)
+            
+            context = {
+                "session": {},
+                "global_stats": {},
+                "profile": mongo_result.data if mongo_result.found else {},
+                "relationships": [],
+                "memories": [],
+                "tasks": []
+            }
+            
+            if mongo_result.found:
+                debug_logs.append(f"✅ MongoDB: Found profile (name={mongo_result.data.get('name')}) ({mongo_result.query_time_ms:.1f}ms)")
+            else:
+                debug_logs.append(f"⚠️ MongoDB: No profile found ({mongo_result.query_time_ms:.1f}ms)")
+            
+            total_time = (datetime.now() - start_time).total_seconds() * 1000
+            debug_logs.append(f"[Holographic Fetch END - {intent.upper()} FAST PATH] Total time: {total_time:.1f}ms")
+            return context, debug_logs
+            
+        elif intent in fast_intents:
+            debug_logs.append(f"⚡ [ULTRA-FAST] Skipping heavy fetches for intent: {intent}")
+            # Only fetch MongoDB profile (usually <10ms)
+            mongo_result = await self._fetch_from_mongodb(resolved_user_id, query, intent)
+            
+            context = {
+                "session": {},
+                "global_stats": {},
+                "profile": mongo_result.data if mongo_result.found else {},
+                "relationships": [],
+                "memories": [],
+                "tasks": []
+            }
+            
+            # 🚀 ALSO fetch tasks for "task" intent
+            if intent == "task":
+                 task_res = await self._fetch_from_tasks(resolved_user_id)
+                 if task_res.found:
+                     context["tasks"] = task_res.data
+                     debug_logs.append(f"✅ Tasks: Found {len(context['tasks'])} recent tasks ({task_res.query_time_ms:.1f}ms)")
+            
+            total_time = (datetime.now() - start_time).total_seconds() * 1000
+            debug_logs.append(f"[Holographic Fetch END - FAST PATH] Total time: {total_time:.1f}ms")
+            return context, debug_logs
+        
+        # Full fetch only for "history" or "preferences" intents
+        debug_logs.append(f"📚 [FULL FETCH] Deep memory search for intent: {intent}")
         
         # Launch parallel tasks
-        redis_task = self._fetch_from_redis(user_id, query)
-        mongo_task = self._fetch_from_mongodb(user_id, query, intent)
-        neo4j_task = self._fetch_from_neo4j(user_id, query)
-        pinecone_task = self._fetch_from_pinecone(user_id, query)
+        redis_task = self._fetch_from_redis(resolved_user_id, query)
+        global_task = self._fetch_global_stats(resolved_user_id) # 🆕 Fetch global stats
+        mongo_task = self._fetch_from_mongodb(resolved_user_id, query, intent)
+        neo4j_task = self._fetch_from_neo4j(resolved_user_id, query)
+        pinecone_task = self._fetch_from_pinecone(resolved_user_id, query)
+        task_task = self._fetch_from_tasks(resolved_user_id)  # Always fetch recent tasks for context
         
         # Wait for all results (gather)
         results = await asyncio.gather(
             redis_task, 
+            global_task,
             mongo_task, 
             neo4j_task, 
             pinecone_task, 
+            task_task,
             return_exceptions=True
         )
         
-        redis_res, mongo_res, neo4j_res, pinecone_res = results
+        redis_res, global_res, mongo_res, neo4j_res, pinecone_res, task_res = results
         
         # Process results & build context
         context = {
             "session": {},
+            "global_stats": {},
             "profile": {},
             "relationships": [],
-            "memories": []
+            "memories": [],
+            "tasks": []
         }
         
         # 1. Redis (Session)
@@ -189,6 +313,11 @@ class UnifiedMemoryOrchestrator:
             debug_logs.append(f"✅ Redis: Found session context ({redis_res.query_time_ms:.1f}ms)")
         elif isinstance(redis_res, Exception):
             debug_logs.append(f"❌ Redis Error: {str(redis_res)}")
+
+        # 1.5 Global Stats
+        if isinstance(global_res, MemoryFetchResult) and global_res.found:
+            context["global_stats"] = global_res.data
+            debug_logs.append(f"✅ Global: Found user stats ({global_res.query_time_ms:.1f}ms)")
             
         # 2. MongoDB (Profile)
         if isinstance(mongo_res, MemoryFetchResult) and mongo_res.found:
@@ -211,11 +340,74 @@ class UnifiedMemoryOrchestrator:
         elif isinstance(pinecone_res, Exception):
             debug_logs.append(f"❌ Pinecone Error: {str(pinecone_res)}")
             
+        # 5. Tasks (MongoDB)
+        if isinstance(task_res, MemoryFetchResult) and task_res.found:
+            context["tasks"] = task_res.data
+            debug_logs.append(f"✅ Tasks: Found {len(context['tasks'])} recent tasks ({task_res.query_time_ms:.1f}ms)")
+        elif isinstance(task_res, Exception):
+            debug_logs.append(f"❌ Task Error: {str(task_res)}")
+            
         total_time = (datetime.now() - start_time).total_seconds() * 1000
         debug_logs.append(f"[Holographic Fetch END] Total time: {total_time:.1f}ms")
         
         return context, debug_logs
     
+    async def _empty_fetch(self, source: MemorySource) -> MemoryFetchResult:
+        """Helper for skipping fetches"""
+        return MemoryFetchResult(
+            found=False,
+            source=source,
+            data=None,
+            query_time_ms=0,
+            reason="Skipped optimization"
+        )
+
+    async def _fetch_global_stats(self, user_id: str) -> MemoryFetchResult:
+        """Fetch global user statistics (conversation count, first interaction, etc.)"""
+        start = datetime.now()
+        
+        try:
+            # Try to get stats from users_global_collection if available
+            if self.users_global_collection is not None:
+                from bson import ObjectId
+                user_obj_id = ObjectId(user_id) if ObjectId.is_valid(user_id) else None
+                
+                if user_obj_id:
+                    global_data = await self.users_global_collection.find_one(
+                        {"user_id": user_id},  # Global stats keyed by user_id string
+                        {"_id": 0, "conversation_count": 1, "first_interaction": 1, "last_interaction": 1}
+                    )
+                    
+                    query_time = (datetime.now() - start).total_seconds() * 1000
+                    
+                    if global_data:
+                        return MemoryFetchResult(
+                            found=True,
+                            source=MemorySource.MONGODB,
+                            data=global_data,
+                            query_time_ms=query_time,
+                            reason=f"Found global stats for user {user_id[:8]}..."
+                        )
+            
+            query_time = (datetime.now() - start).total_seconds() * 1000
+            return MemoryFetchResult(
+                found=False,
+                source=MemorySource.MONGODB,
+                data=None,
+                query_time_ms=query_time,
+                reason="No global stats found"
+            )
+        except Exception as e:
+            query_time = (datetime.now() - start).total_seconds() * 1000
+            logger.warning(f"Global stats fetch failed: {e}")
+            return MemoryFetchResult(
+                found=False,
+                source=MemorySource.MONGODB,
+                data=None,
+                query_time_ms=query_time,
+                reason=f"Error: {str(e)}"
+            )
+
     async def _fetch_from_redis(self, user_id: str, query: str) -> MemoryFetchResult:
         """Fetch from Redis (session memory)"""
         start = datetime.now()
@@ -262,47 +454,190 @@ class UnifiedMemoryOrchestrator:
         query: str,
         intent: str
     ) -> MemoryFetchResult:
-        """Fetch from MongoDB (structured memory + conversation history)"""
+        """Fetch from MongoDB (structured memory + user profile) - ULTRA-OPTIMIZED with CACHE"""
         start = datetime.now()
         
         try:
-            # Query MongoDB for user's structured memory
-            user_memory = await self.memory_collection.find_one({"userId": user_id})
+            # 🚀 CHECK CACHE FIRST (0ms if hit!)
+            cached = self._get_cached_profile(user_id)
+            if cached is not None and cached:  # Only use cache if it has actual data
+                query_time = (datetime.now() - start).total_seconds() * 1000
+                logger.info(f"⚡ [CACHE HIT] Profile for {user_id[:8]}...: name={cached.get('name')} ({query_time:.1f}ms)")
+                
+                return MemoryFetchResult(
+                    found=True,
+                    source=MemorySource.MONGODB,
+                    data=cached,
+                    query_time_ms=query_time,
+                    reason=f"Cache hit for user {user_id[:8]}..."
+                )
+            
+            # 🆕 Don't use cached empty results - always check DB for potentially new data
+            logger.info(f"🔍 [MongoDB] Fetching profile for user {user_id[:8]}... (cache miss or empty)")
+            
+            # 🆕 FETCH FROM users_collection FIRST (has location, name, etc.)
+            from bson import ObjectId
+            user_obj_id = ObjectId(user_id) if ObjectId.is_valid(user_id) else None
+            
+            if not user_obj_id:
+                logger.warning(f"⚠️ [MongoDB] Invalid user_id format: {user_id[:8]}... - cannot convert to ObjectId")
+            
+            user_profile = None
+            if user_obj_id:
+                try:
+                    user_profile = await self.users_collection.find_one(
+                        {"_id": user_obj_id},
+                        {
+                            "_id": 0,
+                            "name": 1,
+                            "email": 1,
+                            "age": 1,           # 🆕 Add age
+                            "occupation": 1,    # 🆕 Add occupation
+                            "interests": 1,
+                            "hobbies": 1,
+                            "profile": 1,  # Contains location, city, state, country
+                            "responseStyle": 1,
+                            "nickname": 1       # 🆕 Add nickname
+                        }
+                    )
+                    if user_profile:
+                        logger.info(f"✅ [MongoDB] Found user profile: name={user_profile.get('name')}, age={user_profile.get('age')}")
+                    else:
+                        logger.warning(f"⚠️ [MongoDB] No profile document found for user {user_id[:8]}...")
+                except Exception as e:
+                    logger.error(f"❌ [MongoDB] Error fetching user profile: {e}")
+            
+            # 🚀 ALSO check memory_collection for structured memories
+            user_memory = await self.memory_collection.find_one(
+                {"userId": user_id},
+                {
+                    "_id": 0,  # Exclude _id
+                    "name": 1,
+                    "interests": 1,
+                    "preferences": 1,
+                    "profile": 1
+                }
+            )
+            
+            # 🧠 ALSO check semantic_memories collection for stored facts/preferences
+            semantic_memories = await self.db["semantic_memories"].find(
+                {"user_id": user_id, "type": {"$in": ["preference", "fact", "identity"]}},
+                {"_id": 0, "content": 1, "type": 1, "value": 1}
+            ).sort("created_at", -1).limit(20).to_list(length=20)
             
             query_time = (datetime.now() - start).total_seconds() * 1000
             
+            # 🧠 MERGE DATA from both collections
+            memory_data = {
+                "name": None,
+                "nickname": None,
+                "email": None,
+                "age": None,
+                "occupation": None,
+                "interests": [],
+                "hobbies": [],
+                "preferences": [],
+                "profile": {},
+                "location": None,
+                "city": None,
+                "state": None,
+                "country": None,
+                "responseStyle": None
+            }
+            
+            # Priority: user_profile > user_memory
+            if user_profile:
+                memory_data["name"] = user_profile.get("name")
+                memory_data["nickname"] = user_profile.get("nickname")
+                memory_data["email"] = user_profile.get("email")
+                memory_data["age"] = user_profile.get("age")
+                memory_data["occupation"] = user_profile.get("occupation")
+                memory_data["interests"] = user_profile.get("interests", [])[:5]
+                memory_data["hobbies"] = user_profile.get("hobbies", [])[:5]
+                memory_data["responseStyle"] = user_profile.get("responseStyle")
+                
+                # 🌍 EXTRACT LOCATION from profile
+                profile = user_profile.get("profile", {})
+                if isinstance(profile, dict):
+                    memory_data["profile"] = profile
+                    memory_data["location"] = profile.get("location")
+                    memory_data["city"] = profile.get("city")
+                    memory_data["state"] = profile.get("state")
+                    memory_data["country"] = profile.get("country")
+                    
+                    # Log location discovery
+                    if memory_data["location"] or memory_data["city"]:
+                        logger.info(f"🌍 [MongoDB] Found location: {memory_data.get('city') or memory_data.get('location')}")
+            
+            # Merge from memory_collection if user_profile missing data
             if user_memory:
-                # Extract relevant fields
-                memory_data = {
-                    "name": user_memory.get("name"),
-                    "interests": user_memory.get("interests", []),
-                    "preferences": user_memory.get("preferences", []),
-                    "profile": user_memory.get("profile", {}),
-                }
+                if not memory_data["name"]:
+                    memory_data["name"] = user_memory.get("name")
+                if not memory_data["interests"]:
+                    memory_data["interests"] = user_memory.get("interests", [])[:5]
+                memory_data["preferences"] = user_memory.get("preferences", [])[:5]
+            
+            # 🧠 Merge semantic memories (recent facts/preferences)
+            if semantic_memories:
+                logger.info(f"🧠 [MongoDB] Found {len(semantic_memories)} semantic memories")
+                for mem in semantic_memories:
+                    mem_value = mem.get("value") or mem.get("content")
+                    if mem_value and mem_value not in memory_data["preferences"]:
+                        memory_data["preferences"].append(mem_value)
+                # Limit to 10 total
+                memory_data["preferences"] = memory_data["preferences"][:10]
                 
-                # Check if any relevant data exists
-                has_data = (
-                    memory_data["name"] or
-                    len(memory_data["interests"]) > 0 or
-                    len(memory_data["preferences"]) > 0 or
-                    len(memory_data["profile"]) > 0
+                # Check for location in memory_collection too
+                mem_profile = user_memory.get("profile", {})
+                if isinstance(mem_profile, dict):
+                    if not memory_data["location"]:
+                        memory_data["location"] = mem_profile.get("location")
+                    if not memory_data["city"]:
+                        memory_data["city"] = mem_profile.get("city")
+            
+            # Check if any relevant data exists
+            has_data = (
+                memory_data["name"] or
+                memory_data["age"] or
+                memory_data["occupation"] or
+                memory_data["nickname"] or
+                len(memory_data["interests"]) > 0 or
+                len(memory_data["preferences"]) > 0 or
+                len(memory_data["profile"]) > 0 or
+                memory_data["location"] or
+                memory_data["city"]
+            )
+            
+            if has_data:
+                # 🧠 LOG IDENTITY DATA FOUND
+                identity_parts = []
+                if memory_data["name"]: identity_parts.append(f"name={memory_data['name']}")
+                if memory_data["age"]: identity_parts.append(f"age={memory_data['age']}")
+                if memory_data["occupation"]: identity_parts.append(f"occupation={memory_data['occupation']}")
+                if memory_data["location"]: identity_parts.append(f"location={memory_data['location']}")
+                if identity_parts:
+                    logger.info(f"🧠 [Identity Recall] {', '.join(identity_parts)} for user {user_id[:8]}...")
+                
+                # 🚀 CACHE the result for next time
+                self._set_cached_profile(user_id, memory_data)
+                
+                return MemoryFetchResult(
+                    found=True,
+                    source=MemorySource.MONGODB,
+                    data=memory_data,
+                    query_time_ms=query_time,
+                    reason=f"Found user profile + memory for user {user_id[:8]}..."
                 )
-                
-                if has_data:
-                    return MemoryFetchResult(
-                        found=True,
-                        source=MemorySource.MONGODB,
-                        data=memory_data,
-                        query_time_ms=query_time,
-                        reason=f"Found structured memory for user {user_id}"
-                    )
+            
+            # 🚀 CACHE empty result too (avoid repeated empty lookups)
+            self._set_cached_profile(user_id, {})
             
             return MemoryFetchResult(
                 found=False,
                 source=MemorySource.MONGODB,
                 data=None,
                 query_time_ms=query_time,
-                reason="No structured memory found in MongoDB"
+                reason="No user profile or memory found in MongoDB"
             )
         except Exception as e:
             query_time = (datetime.now() - start).total_seconds() * 1000
@@ -314,7 +649,46 @@ class UnifiedMemoryOrchestrator:
                 query_time_ms=query_time,
                 reason=f"MongoDB error: {str(e)}"
             )
-    
+
+            
+    async def _fetch_from_tasks(self, user_id: str) -> MemoryFetchResult:
+        """Fetch recent tasks from MongoDB"""
+        start = datetime.now()
+        try:
+            # Fetch last 5 active/pending tasks + 3 recently completed
+            # Sort by updated_at desc
+            tasks = await self.tasks_collection.find(
+                {"userId": user_id},
+                {"_id": 0, "title": 1, "status": 1, "priority": 1, "dueDate": 1}
+            ).sort("updated_at", -1).limit(5).to_list(length=5)
+            
+            query_time = (datetime.now() - start).total_seconds() * 1000
+            
+            if tasks:
+                return MemoryFetchResult(
+                    found=True,
+                    source=MemorySource.MONGODB,
+                    data=tasks,
+                    query_time_ms=query_time,
+                    reason=f"Found {len(tasks)} recent tasks"
+                )
+            
+            return MemoryFetchResult(
+                found=False,
+                source=MemorySource.MONGODB,
+                data=None,
+                query_time_ms=query_time,
+                reason="No recent tasks found"
+            )
+        except Exception as e:
+            query_time = (datetime.now() - start).total_seconds() * 1000
+            return MemoryFetchResult(
+                found=False,
+                source=MemorySource.MONGODB,
+                data=None,
+                query_time_ms=query_time,
+                reason=f"Task fetch failed: {str(e)}"
+            )
     async def _fetch_from_neo4j(self, user_id: str, query: str) -> MemoryFetchResult:
         """
         Fetch from Neo4j (relationships + entities)
@@ -343,7 +717,7 @@ class UnifiedMemoryOrchestrator:
                     RETURN 
                         type(r1) as direct_rel, 
                         n.name as direct_target, 
-                        n.value as value,
+                        coalesce(n.value, "") as value,
                         type(r2) as indirect_rel,
                         related.name as indirect_target,
                         labels(n) as direct_labels
@@ -495,7 +869,8 @@ class UnifiedMemoryOrchestrator:
         Rules:
         - Inject context from ALL sources
         - Label clearly as [SYSTEM MEMORY CONTEXT]
-        - Prioritize: Profile > Relationships > Memories > Session
+        - Prioritize: Profile > Location > Relationships > Memories > Session
+        - 🆕 NEVER ASK for data that's already available
         """
         debug_logs.append("[Master Prompt] Starting enrichment")
         
@@ -504,43 +879,132 @@ class UnifiedMemoryOrchestrator:
             return base_prompt, debug_logs
         
         # Build memory context section
-        memory_block = "[SYSTEM MEMORY CONTEXT]\n"
+        memory_block = "[SYSTEM MEMORY CONTEXT - USE THIS DATA, DON'T ASK FOR IT]\n"
         
-        # 1. Core Profile (MongoDB)
+        # 🌍 1. LOCATION FIRST (Most commonly needed, most commonly asked redundantly)
         if context.get("profile"):
             profile = context["profile"]
-            memory_block += "👤 User Profile:\n"
+            location_str = None
+            
+            # Extract location from various fields
+            city = profile.get("city")
+            location = profile.get("location")
+            state = profile.get("state")
+            country = profile.get("country")
+            
+            # Also check nested profile object
+            nested_profile = profile.get("profile", {})
+            if isinstance(nested_profile, dict):
+                city = city or nested_profile.get("city")
+                location = location or nested_profile.get("location")
+                state = state or nested_profile.get("state")
+                country = country or nested_profile.get("country")
+            
+            if city or location:
+                parts = [p for p in [city, state, country] if p]
+                location_str = ", ".join(parts) if parts else location
+                memory_block += f"🌍 USER LOCATION: {location_str}\n"
+                memory_block += f"   ⚠️ USE THIS FOR 'near me', 'around here', 'nearby' queries!\n"
+                memory_block += f"   ⚠️ DO NOT ASK user for location - you already have it!\n\n"
+                logger.info(f"🌍 [Prompt] Injected location: {location_str}")
+        
+        # 1.5 Global Context (Project Awareness)
+        if context.get("global_stats"):
+            stats = context["global_stats"]
+            memory_block += "📊 GLOBAL USER CONTEXT:\n"
+            if stats.get("total_sessions"):
+                memory_block += f"  - Total Collaboration Sessions: {stats['total_sessions']}\n"
+            if stats.get("joined_at"):
+                memory_block += f"  - User Since: {stats['joined_at']}\n"
+            memory_block += "\n"
+
+        # 2. User Profile (MongoDB)
+        if context.get("profile"):
+            profile = context["profile"]
+            memory_block += "👤 USER PROFILE (verified data - USE IT, don't ask):\n"
             if profile.get("name"):
                 memory_block += f"  - Name: {profile['name']}\n"
+                # 🔥 CRITICAL: Add explicit instruction for identity queries
+                memory_block += f"  ⚠️ WHEN ASKED 'what is my name?' → RESPOND: 'Your name is {profile['name']}'\n"
+                logger.info(f"✅ [Prompt Enrichment] Added name to prompt: {profile['name']}")
+            if profile.get("nickname"):
+                memory_block += f"  - Nickname: {profile['nickname']}\n"
+            if profile.get("email"):
+                memory_block += f"  - Email: {profile['email']}\n"
+            if profile.get("age"):
+                memory_block += f"  - Age: {profile['age']}\n"
+            if profile.get("occupation"):
+                memory_block += f"  - Occupation: {profile['occupation']}\n"
             if profile.get("interests"):
-                memory_block += f"  - Interests: {', '.join(profile['interests'])}\n"
+                interests = profile['interests']
+                if isinstance(interests, list):
+                    memory_block += f"  - Interests: {', '.join(interests[:5])}\n"
+            if profile.get("hobbies"):
+                hobbies = profile['hobbies']
+                if isinstance(hobbies, list):
+                    memory_block += f"  - Hobbies: {', '.join(hobbies[:5])}\n"
+            
+            # 🎨 PREFERENCES (Colors, likes, dislikes) - CRITICAL FOR RECALL
             if profile.get("preferences"):
-                memory_block += f"  - Preferences: {', '.join(profile['preferences'])}\n"
+                prefs = profile['preferences']
+                if isinstance(prefs, list) and prefs:
+                    memory_block += f"\n🎨 USER PREFERENCES:\n"
+                    for pref in prefs[:10]:
+                        memory_block += f"  - {pref}\n"
+                    memory_block += f"   ⚠️ WHEN ASKED 'what do I like', 'my favorite', 'which color' → USE THESE!\n"
+                    memory_block += f"   ⚠️ DO NOT ASK - you already know their preferences!\n\n"
+                    logger.info(f"🎨 [Prompt] Injected {len(prefs[:10])} preferences")
+            
+            if profile.get("responseStyle"):
+                memory_block += f"  - Preferred Style: {profile['responseStyle']}\n"
             memory_block += "\n"
             
-        # 2. Relationships (Neo4j)
+        # 3. Relationships (Neo4j)
         if context.get("relationships"):
             memory_block += "🕸️ Knowledge Graph:\n"
             for rel in context["relationships"]:
-                memory_block += f"  - {rel['type']} → {rel['target']}\n"
+                if rel.get("reasoning"):
+                     memory_block += f"  - {rel['type']} → {rel['target']} ({rel['reasoning']})\n"
+                else:
+                     memory_block += f"  - {rel['type']} → {rel['target']}\n"
             memory_block += "\n"
             
-        # 3. Semantic Memories (Pinecone)
+        # 4. Semantic Memories (Pinecone)
+            
+        # 5. Recent Tasks (MongoDB)
+        if context.get("tasks"):
+            memory_block += "📋 Recent Tasks (Known Context):\n"
+            for task in context["tasks"]:
+                status_icon = "✅" if task.get("status") == "completed" else "⏳"
+                memory_block += f"  - {status_icon} {task.get('title')} [{task.get('status')}]\n"
+            memory_block += "\n"
+        
+        # 6. Semantic Memories (Pinecone)
         if context.get("memories"):
             memory_block += "🧠 Relevant Memories:\n"
             for mem in context["memories"]:
                 memory_block += f"  - {mem['text']} (confidence: {mem['score']:.2f})\n"
             memory_block += "\n"
             
-        # 4. Session Context (Redis)
+        # 5. Session Context (Redis)
         if context.get("session"):
             memory_block += "⚡ Session Context:\n"
             for key, value in context["session"].items():
                 if key != "timestamp":
                     memory_block += f"  - {key}: {value}\n"
             memory_block += "\n"
-            
-        memory_block += "[END SYSTEM MEMORY CONTEXT]\n\n"
+        
+        # 🆕 CRITICAL INSTRUCTION
+        memory_block += """
+⚠️ CRITICAL INTELLIGENCE RULES:
+1. If location is available above → USE IT for "near me" queries
+2. If name is available above → USE IT, don't ask "what's your name?"
+3. NEVER ask for information that's already provided in this context
+4. Make CONFIDENT responses using available data
+5. For "near me" → respond with: "Here are [results] near you in [location]..."
+[END SYSTEM MEMORY CONTEXT]
+
+"""
         
         # Inject memory context into prompt
         enriched_prompt = memory_block + base_prompt
@@ -561,62 +1025,138 @@ class UnifiedMemoryOrchestrator:
         metadata: Optional[Dict] = None
     ) -> Tuple[MemoryStorageResult, List[str]]:
         """
-        🎯 STORE MEMORY WITH SMART ROUTING
+        🎯 PRO-LEVEL MEMORY STORAGE (Robust & Verified)
         
         Rules:
-        - Route to correct system based on memory_type
-        - Check for duplicates before storing
-        - Confirm successful write
-        - Skip temporary noise and system messages
-        
-        Debug logs show:
-        - Why memory is being stored
-        - Which system was chosen
-        - What exact data is stored
-        - Confirmation of successful write
+        - Multi-system storage (Cross-pollination)
+        - Parallel execution for speed
+        - Verified database writes
+        - Tracks user engagement stats
         """
         debug_logs = []
         start_time = datetime.now()
         
-        debug_logs.append(f"[Memory Storage START] user_id={user_id}, type={memory_type.value}")
+        # 1. Resolve User ID (Email -> ID)
+        canonical_user_id, is_new, resolve_logs = await self.validate_and_resolve_user_id(user_id)
+        debug_logs.extend(resolve_logs)
         
-        # Validation: Skip empty or trivial content
-        if not memory_content or (isinstance(memory_content, str) and len(memory_content.strip()) < 3):
+        debug_logs.append(f"[Memory Storage START] user_id={canonical_user_id}, type={memory_type.value}")
+        
+        # 2. Validation
+        if not memory_content or (isinstance(memory_content, str) and len(memory_content.strip()) < 2):
             debug_logs.append("[Memory Storage SKIP] Content too short or empty")
             return MemoryStorageResult(
                 success=False,
                 destination=None,
                 memory_type=memory_type,
-                reason="Content validation failed - too short or empty"
+                reason="Content validation failed"
             ), debug_logs
+
+        # 3. Increment Engagement Stats (Background)
+        asyncio.create_task(self.update_user_stats(canonical_user_id))
         
-        # Route to appropriate storage system
+        tasks = []
+        
+        # 4. Routing Logic
         if memory_type == MemoryType.SESSION:
-            result = await self._store_to_redis(user_id, memory_content, metadata, debug_logs)
-        
-        elif memory_type in [MemoryType.CONVERSATION, MemoryType.PROFILE, MemoryType.PREFERENCE]:
-            result = await self._store_to_mongodb(user_id, memory_content, memory_type, metadata, debug_logs)
-        
+            tasks.append(self._store_to_redis(canonical_user_id, memory_content, metadata, debug_logs))
+            
+        elif memory_type in [MemoryType.PROFILE, MemoryType.PREFERENCE]:
+            tasks.append(self._store_to_mongodb(canonical_user_id, memory_content, memory_type, metadata, debug_logs))
+            # Cross-pollinate preference to Semantic
+            if memory_type == MemoryType.PREFERENCE:
+                tasks.append(self._store_to_pinecone_with_dedup(
+                    canonical_user_id, 
+                    f"User Preference: {memory_content}", 
+                    {"source": "preference_sync"}, 
+                    []
+                ))
+                
         elif memory_type == MemoryType.RELATIONSHIP:
-            result = await self._store_to_neo4j(user_id, memory_content, metadata, debug_logs)
-        
+            tasks.append(self._store_to_neo4j(canonical_user_id, memory_content, metadata, debug_logs))
+            # Cross-pollinate relationship to Semantic
+            if isinstance(memory_content, (list, tuple)):
+                rel_type, target = memory_content
+                tasks.append(self._store_to_pinecone_with_dedup(
+                    canonical_user_id, 
+                    f"Relationship: {rel_type} -> {target}",
+                    {"source": "relationship_sync"}, 
+                    []
+                ))
+                
         elif memory_type == MemoryType.SEMANTIC:
-            result = await self._store_to_pinecone(user_id, memory_content, metadata, debug_logs)
-        
+            tasks.append(self._store_to_pinecone_with_dedup(canonical_user_id, memory_content, metadata, debug_logs))
+            
+        # Execute all storage tasks in parallel
+        if tasks:
+            storage_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Find the "primary" result to return (for legacy compatibility)
+            main_result = None
+            for res in storage_results:
+                if isinstance(res, MemoryStorageResult):
+                    if not main_result: main_result = res
+                    if res.success: main_result = res # Prefer success
+                elif isinstance(res, Exception):
+                    debug_logs.append(f"❌ Storage task error: {str(res)}")
+            
+            result = main_result or MemoryStorageResult(False, MemorySource.UNKNOWN, memory_type, "No storage tasks succeeded")
         else:
-            debug_logs.append(f"[Memory Storage ERROR] Unknown memory type: {memory_type}")
-            return MemoryStorageResult(
-                success=False,
-                destination=None,
-                memory_type=memory_type,
-                reason=f"Unknown memory type: {memory_type}"
-            ), debug_logs
-        
+            result = MemoryStorageResult(False, MemorySource.UNKNOWN, memory_type, "No storage route found")
+            
         total_time = (datetime.now() - start_time).total_seconds() * 1000
         debug_logs.append(f"[Memory Storage END] total_time={total_time:.2f}ms, success={result.success}")
         
         return result, debug_logs
     
+    async def _store_to_pinecone_with_dedup(
+        self,
+        user_id: str,
+        content: str,
+        metadata: Optional[Dict],
+        debug_logs: List[str]
+    ) -> MemoryStorageResult:
+        """
+        🧠 SEMANTIC DEDUPLICATION STRATEGY
+        1. Convert new memory to vector.
+        2. Query Pinecone for similar vectors (> 0.90).
+        3. If found -> SKIP (Duplicate).
+        4. If not found -> STORE (New).
+        """
+        try:
+            if not self.pinecone:
+                return MemoryStorageResult(False, MemorySource.PINECONE, MemoryType.SEMANTIC, "Pinecone unavailable")
+
+            # 1. Vectorize
+            vector = await self.get_embedding(content)
+            
+            # 2. Check for Similarity
+            results = self.pinecone.query(
+                vector=vector,
+                top_k=1,
+                include_metadata=True,
+                filter={"user_id": user_id}
+            )
+            
+            if results and results.matches:
+                top_match = results.matches[0]
+                if top_match.score > 0.90:  # 90% Similarity Threshold
+                    debug_logs.append(f"[Pinecone Dedup] SKIP: Found existing memory '{top_match.metadata.get('text')}' (Score: {top_match.score:.2f})")
+                    return MemoryStorageResult(
+                        success=True, # Considered success as we handled it
+                        destination=MemorySource.PINECONE,
+                        memory_type=MemoryType.SEMANTIC,
+                        reason=f"Duplicate memory skipped (Sim: {top_match.score:.2f})"
+                    )
+
+            # 3. Store if unique
+            return await self._store_to_pinecone(user_id, content, metadata, debug_logs)
+            
+        except Exception as e:
+            logger.error(f"Dedup check failed: {e}")
+            # Fallback to normal store if check fails
+            return await self._store_to_pinecone(user_id, content, metadata, debug_logs)
+
     async def _store_to_redis(
         self,
         user_id: str,
@@ -776,7 +1316,8 @@ class UnifiedMemoryOrchestrator:
                 await session.run(
                     f"""
                     MERGE (u:User {{id: $user_id}})
-                    MERGE (t:Entity {{name: $target_value}})
+                    // Normalization: Use lowercase for matching to prevent "Python" vs "python" duplicates
+                    MERGE (t:Entity {{name: toLower($target_value)}})
                     MERGE (u)-[r:{rel_type}]->(t)
                     SET r.created_at = $timestamp
                     """,
@@ -1014,9 +1555,9 @@ class UnifiedMemoryOrchestrator:
                 "memory_found": False
             }
         
-        # Step 2: Fetch memory (stop-on-hit)
+        # Step 2: Fetch memory (Holographic Retrieval)
         all_debug_logs.append("")
-        memory_data, fetch_logs = await self.fetch_memory(user_id, message, intent)
+        memory_data, fetch_logs = await self.get_holographic_context(user_id, message, intent)
         all_debug_logs.extend(fetch_logs)
         
         # Step 3: Enrich prompt
@@ -1064,7 +1605,9 @@ class UnifiedMemoryOrchestrator:
         personal_patterns = [
             "my ", "i am", "i'm ", "remember", "you know",
             "my name", "who am i", "what do i", "do you know me",
-            "which ", "what game", "what do i like", "what do i love"
+            "which ", "what game", "what do i like", "what do i love",
+            "where was i", "what did we", "tell me about my", "our ",
+            "husband", "wife", "son", "daughter", "friend", "colleague"
         ]
         
         # Check personal first (higher priority)
@@ -1160,6 +1703,32 @@ class UnifiedMemoryOrchestrator:
             logger.error(f"User resolution error: {e}")
             # Fallback: use provided value
             return user_id_or_email, False, debug_logs
+
+    async def update_user_stats(self, user_id: str, messages: int = 1, sessions: int = 0):
+        """
+        📈 UPDATE GLOBAL USER STATISTICS
+        
+        Tracks engagement levels across the platform.
+        """
+        try:
+            await self.users_global_collection.update_one(
+                {"userId": user_id},
+                {
+                    "$inc": {
+                        "total_messages": messages, 
+                        "total_sessions": sessions
+                    },
+                    "$set": {
+                        "last_active": datetime.now()
+                    },
+                    "$setOnInsert": {
+                        "created_at": datetime.now()
+                    }
+                },
+                upsert=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to update user stats for {user_id}: {e}")
 
 
 # Global singleton instance

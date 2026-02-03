@@ -117,9 +117,9 @@ const Profile = () => {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
-                    <SelectItem value="gpt-4o">GPT-4o (BYOK)</SelectItem>
-                    <SelectItem value="claude-3">Claude 3 (BYOK)</SelectItem>
+                    <SelectItem value="llama-3.3-70b-versatile">Llama 3.3 70B</SelectItem>
+                    <SelectItem value="llama-3.1-8b-instant">Llama 3.1 8B (Fast)</SelectItem>
+                    <SelectItem value="mixtral-8x7b-32768">Mixtral 8x7B</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

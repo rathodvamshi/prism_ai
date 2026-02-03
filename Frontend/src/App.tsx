@@ -13,14 +13,30 @@ import { lazyLoad } from "@/lib/lazyLoad";
 // ⚡ CRITICAL: Load immediately (blocking)
 import Hero from "./pages/Hero";
 import Auth from "./pages/Auth";
+import AdminLogin from "./pages/AdminLogin";
+import AdminDashboard from "./pages/AdminDashboard";
+import Contact from "./pages/Contact";
 
 // ⚡ LAZY: Load on-demand (non-blocking)
 const Chat = lazyLoad(() => import("./pages/Chat"));
 const Profile = lazyLoad(() => import("./pages/Profile"));
-const Settings = lazyLoad(() => import("./pages/Settings"));
 const NotFound = lazyLoad(() => import("./pages/NotFound"));
 
 const queryClient = new QueryClient();
+
+// Guard for Admin Routes
+const AdminRoute = ({ children }: { children: React.ReactNode }) => {
+    const { user, isAdmin, authLoading } = useAuthStore();
+    
+    // While loading, show nothing or spinner. 
+    // Usually authStore.checkAuth() runs on mount if authLoading is true.
+    if (authLoading) return <div className="h-screen w-full flex items-center justify-center bg-zinc-950 text-white">Loading Security Protocols...</div>;
+    
+    if (!user || !isAdmin) {
+        return <Auth />; // Redirect to normal login or show 403
+    }
+    return <>{children}</>;
+};
 
 const router = createBrowserRouter([
   {
@@ -32,16 +48,24 @@ const router = createBrowserRouter([
     element: <PublicRoute><Auth /></PublicRoute>
   },
   {
+    path: "/contact",
+    element: <PublicRoute><Contact /></PublicRoute>
+  },
+  {
+    path: "/admin",
+    element: <AdminRoute><AdminDashboard /></AdminRoute>
+  },
+  {
+    path: "/admin/login",
+    element: <AdminLogin /> 
+  },
+  {
     path: "/chat",
     element: <ProtectedRoute><Chat /></ProtectedRoute>
   },
   {
     path: "/chat/:sessionId",
     element: <ProtectedRoute><Chat /></ProtectedRoute>
-  },
-  {
-    path: "/settings",
-    element: <ProtectedRoute><Settings /></ProtectedRoute>
   },
   {
     path: "/profile",
@@ -60,10 +84,9 @@ const App = () => {
 
   // Initialize auth state on app startup
   useEffect(() => {
-    if (authLoading) {
-      checkAuth();
-    }
-  }, [checkAuth, authLoading]);
+    // Run once on mount
+    checkAuth();
+  }, [checkAuth]);
 
   // Load user data when authenticated
   useEffect(() => {

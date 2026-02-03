@@ -66,7 +66,15 @@ class UserResolutionService:
             mongo_client: MongoDB async client for user storage
         """
         self.mongo = mongo_client
-        self.db = self.mongo["prism_ai"]
+        from app.config import settings
+        from urllib.parse import urlsplit
+        try:
+            uri_path = urlsplit(settings.MONGO_URI).path.strip("/")
+            db_name = uri_path if uri_path else "prismdb"
+        except Exception:
+            db_name = "prismdb"
+            
+        self.db = self.mongo[db_name]
         self.users_collection = self.db["users"]
         
         logger.info("🔐 [User Resolution Service] Initialized")

@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { API_URL } from "@/lib/api";
 import { Loader2, Trash2, Plus, RefreshCw, Network } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -17,7 +18,7 @@ export const MemoryManager = () => {
         setLoading(true);
         try {
             const token = localStorage.getItem("token");
-            const res = await fetch("http://127.0.0.1:8000/chat/memory/graph", {
+            const res = await fetch(`${API_URL}/chat/memory/graph`, {
                 headers: { "Authorization": `Bearer ${token}` }
             });
             const data = await res.json();
@@ -40,7 +41,7 @@ export const MemoryManager = () => {
         if (!newItem.relationship || !newItem.target) return;
         try {
             const token = localStorage.getItem("token");
-            const res = await fetch("http://127.0.0.1:8000/chat/memory/relationship", {
+            const res = await fetch(`${API_URL}/chat/memory/relationship`, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${token}`,
@@ -61,7 +62,7 @@ export const MemoryManager = () => {
     const handleDelete = async (target: string, relationship: string) => {
         try {
             const token = localStorage.getItem("token");
-            const res = await fetch("http://127.0.0.1:8000/chat/memory/relationship", {
+            const res = await fetch(`${API_URL}/chat/memory/relationship`, {
                 method: "DELETE",
                 headers: {
                     "Authorization": `Bearer ${token}`,

@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import {
   Command,
   Plus,
-  Settings,
   Mic,
   User,
   Search,
@@ -24,15 +23,11 @@ interface CommandItem {
   action: () => void;
 }
 
-interface CommandPaletteProps {
-  onOpenSettings: () => void;
-}
-
-export const CommandPalette = ({ onOpenSettings }: CommandPaletteProps) => {
+export const CommandPalette = () => {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const navigate = useNavigate();
-  const { createChat } = useChatStore();
+  const { startDraftSession } = useChatStore();
 
   const commands: CommandItem[] = [
     {
@@ -41,17 +36,8 @@ export const CommandPalette = ({ onOpenSettings }: CommandPaletteProps) => {
       label: "New Chat",
       description: "Start a new conversation",
       action: () => {
-        createChat();
-        setOpen(false);
-      },
-    },
-    {
-      id: "settings",
-      icon: <Settings className="w-4 h-4" />,
-      label: "Open Settings",
-      description: "Configure your preferences",
-      action: () => {
-        onOpenSettings();
+        startDraftSession();
+        navigate('/chat');
         setOpen(false);
       },
     },

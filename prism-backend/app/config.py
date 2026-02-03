@@ -41,10 +41,14 @@ class Settings(BaseSettings):
     SESSION_COOKIE_SAMESITE: str = "lax"  # "lax" for typical SPA, "strict" for extra security
     
     # --------------------------------------------------
-    # AI/LLM Services
+    # AI/LLM Services (Groq Only)
     # --------------------------------------------------
-    GROQ_API_KEY: str = ""                      # Groq LLM Key
-    OPENAI_API_KEY: str = ""                    # OpenAI API Key (optional)
+    GROQ_API_KEY: str = ""                      # Groq LLM Key (Primary)
+    GROQ_API_KEY_2: str = ""                    # Groq LLM Key #2 (Pool)
+    GROQ_API_KEY_3: str = ""                    # Groq LLM Key #3 (Pool)
+    GROQ_API_KEY_4: str = ""                    # Groq LLM Key #4 (Pool)
+    GROQ_API_KEY_5: str = ""                    # Groq LLM Key #5 (Pool)
+    GROQ_API_KEYS: str = ""                     # Comma-separated keys (alternative format)
     
     # --------------------------------------------------
     # Database Services
@@ -54,7 +58,7 @@ class Settings(BaseSettings):
     PINECONE_INDEX_NAME: str = "prism-memory"   # Pinecone index name
     PINECONE_ENVIRONMENT: str = ""              # Pinecone environment (gcp-starter, us-east-1, etc.) - leave empty for serverless
     PINECONE_INDEX_TYPE: str = "serverless"     # "serverless" (cloud-native) or "pod" (legacy)
-    MONGO_URI: str = "mongodb://localhost:27017/prism"# MongoDB (users, tasks, analytics)
+    MONGO_URI: str = "mongodb://localhost:27017/prismdb"# MongoDB (users, tasks, analytics)
     # Timezone for temporal grounding (e.g., Asia/Kolkata)
     TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
     
@@ -108,8 +112,8 @@ class Settings(BaseSettings):
     def tzinfo(self):
         """Return tzinfo from configured timezone."""
         try:
-            import pytz
-            return pytz.timezone(self.TIMEZONE)
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(self.TIMEZONE)
         except Exception:
             import datetime as _dt
             return _dt.timezone.utc

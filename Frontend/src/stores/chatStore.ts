@@ -1,22 +1,33 @@
+const generateId = () => Math.random().toString(36).substring(2, 15);
 import { create } from "zustand";
-import { Chat, Message, MiniAgent, MiniAgentMessage, Task, Highlight } from "@/types/chat";
+import { Chat, Highlight, Message, MiniAgent, MiniAgentMessage, Task } from "@/types/chat";
+import { cleanMessageContent, realignHighlights } from "@/lib/highlightUtils";
 import { chatAPI } from "@/lib/api";
+import { createMetadataFilter } from "@/lib/streamUtils";
 import { useAuthStore } from "./authStore";
 import { toast } from "@/hooks/use-toast";
 
 interface ChatState {
   chats: Chat[];
   currentChatId: string | null;
+  isDraftSession: boolean; // True when in "New Chat" mode before first message
+  isCreatingSession: boolean; // True while session is being created
+  pendingFirstMessage: string | null; // First message waiting for session creation
   tasks: Task[];
   miniAgents: MiniAgent[];
   activeMiniAgentId: string | null;
   sidebarExpanded: boolean;
-  activeTab: "history" | "tasks";
+  activeTab: "history" | "tasks" | "media";
   isLoadingChats: boolean;
   isSendingMessage: boolean;
   isStreaming: boolean;
   lastSynced: Record<string, number>; // Map of chatId/sessionId -> timestamp
   hasMore: boolean; // For pagination
+  freeLimitExceeded: boolean; // True when user hits free usage limit
+  limitExceededType: "free_limit" | "all_keys_exhausted"; // Type of limit exceeded
+  // Error recovery
+  lastFailedMessage: { chatId: string; content: string; attachments?: any[] } | null;
+  askFlowContext: { text: string; source?: string } | null;
 
   // Actions
   createChat: () => Promise<string>;
@@ -27,9 +38,9 @@ interface ChatState {
   pinChat: (id: string, isPinned: boolean) => Promise<void>;
   saveChat: (id: string, isSaved: boolean) => Promise<void>;
 
-  createTask: (title: string, chatId?: string) => string;
-  toggleTask: (id: string) => void;
-  deleteTask: (id: string) => void;
+  createTask: (title: string, description?: string, dueDate?: Date, timeSeconds?: number, imageUrl?: string) => Promise<string>;
+  toggleTask: (id: string) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
   loadTasksFromBackend: () => Promise<void>;
   confirmTaskDraft: (messageId: string, description: string, dueDate?: string) => Promise<void>;
 
@@ -44,14 +55,18 @@ interface ChatState {
   addHighlight: (chatId: string, messageId: string, highlight: Omit<Highlight, "id">) => Promise<void>;
   removeHighlight: (chatId: string, messageId: string, predicate: (h: Highlight) => boolean) => Promise<void>;
   updateHighlightNote: (chatId: string, messageId: string, highlightId: string, note: string) => Promise<void>;
-  loadSessionHighlights: (sessionId: string, force?: boolean) => Promise<void>;
+  updateHighlightColor: (chatId: string, messageId: string, highlightId: string, color: string) => Promise<void>;
+
+  markActionExecuted: (chatId: string, messageId: string) => void;
 
   toggleSidebar: () => void;
-  setActiveTab: (tab: "history" | "tasks") => void;
+  setActiveTab: (tab: "history" | "tasks" | "media") => void;
   // Session helpers
   isSessionEmpty: () => boolean;
   createSessionIfNeeded: () => Promise<string>;
   startNewSession: () => Promise<string | null>;
+  startDraftSession: () => void; // Enter draft mode (no backend call)
+  clearDraftSession: () => void; // Clear draft mode
   hydrateFromStorage: () => void;
 
   // Backend synchronization
@@ -66,13 +81,62 @@ interface ChatState {
 
   // Streaming
   sendMessageStream: (chatId: string, content: string, onToken: (token: string) => void, onComplete: () => void) => Promise<void>;
+
+  // API Keys / Free limit
+  setFreeLimitExceeded: (exceeded: boolean, type?: "free_limit" | "all_keys_exhausted") => void;
+
+  // Error recovery
+  clearLastFailedMessage: () => void;
+  retryLastFailedMessage: () => Promise<void>;
+  setAskFlowContext: (context: { text: string; source?: string } | null) => void;
 }
 
-const generateId = () => Math.random().toString(36).substring(2, 15);
+
+// MongoDB is the source of truth
+
+// Filler words to remove from title generation
+const FILLER_WORDS = [
+  'play', 'show', 'tell me', 'can you', 'please', 'could you', 'would you',
+  'i want to', 'i need to', 'help me', 'how to', 'what is', 'what are',
+  'give me', 'find me', 'search for', 'look up', 'get me', 'open',
+  'hey', 'hi', 'hello', 'okay', 'ok', 'um', 'uh', 'like', 'just'
+];
+
+// Derive a readable chat title from the first user message
+const deriveTitleFrom = (text: string): string => {
+  if (!text) return "New Chat";
+  let t = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!t) return "New Chat";
+
+  // Remove filler words from the beginning
+  for (const filler of FILLER_WORDS) {
+    if (t.startsWith(filler + ' ')) {
+      t = t.slice(filler.length + 1).trim();
+    }
+  }
+
+  // Capitalize first letter of each word
+  t = t.split(' ').map(word =>
+    word.charAt(0).toUpperCase() + word.slice(1)
+  ).join(' ');
+
+  if (!t) return "New Chat";
+
+  const max = 28; // Shorter max for cleaner sidebar
+  if (t.length <= max) return t;
+
+  // Try to break at word boundary
+  const lastSpace = t.lastIndexOf(" ", max);
+  const slicePoint = lastSpace > 15 ? lastSpace : max;
+  return t.slice(0, slicePoint).trim() + "…";
+};
 
 export const useChatStore = create<ChatState>((set, get) => ({
   chats: [],
   currentChatId: null,
+  isDraftSession: false, // Draft mode - no session created yet
+  isCreatingSession: false, // True while session is being created on first message
+  pendingFirstMessage: null as string | null, // Store first message while creating session
   tasks: [],
   miniAgents: [],
   activeMiniAgentId: null,
@@ -83,6 +147,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isStreaming: false,
   lastSynced: {},
   hasMore: true,
+  freeLimitExceeded: false,
+  limitExceededType: "free_limit",
+  lastFailedMessage: null,
+  askFlowContext: null,
+
+  setAskFlowContext: (context) => set({ askFlowContext: context }),
+
+  setFreeLimitExceeded: (exceeded, type = "free_limit") => set({
+    freeLimitExceeded: exceeded,
+    limitExceededType: type
+  }),
+
+  clearLastFailedMessage: () => set({ lastFailedMessage: null }),
+
+  retryLastFailedMessage: async () => {
+    const { lastFailedMessage, addMessage } = get();
+    if (!lastFailedMessage) return;
+
+    const { chatId, content, attachments } = lastFailedMessage;
+    set({ lastFailedMessage: null });
+
+    try {
+      await addMessage(chatId, { role: "user", content, attachments });
+    } catch (error) {
+      console.error("Retry failed:", error);
+      // Re-store the failed message for another retry attempt
+      set({ lastFailedMessage: { chatId, content, attachments } });
+      throw error;
+    }
+  },
 
   loadChatsFromBackend: async (loadMore = false) => {
     const isAuthenticated = useAuthStore.getState().isAuthenticated;
@@ -189,17 +283,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           set({ chats: mergedChats });
 
-          // Set current chat to most recent if none selected (and we didn't just preserve one)
-          if (mergedChats.length > 0 && !get().currentChatId) {
-            // Sort by pinned first, then by updatedAt
-            const sortedChats = [...mergedChats].sort((a: Chat, b: Chat) => {
-              if (a.isPinned && !b.isPinned) return -1;
-              if (!a.isPinned && b.isPinned) return 1;
-              return b.updatedAt.getTime() - a.updatedAt.getTime();
-            });
-            const mostRecentChat = sortedChats[0];
-            set({ currentChatId: mostRecentChat.id });
-          }
+          // ✅ FIX: Do NOT auto-select any session on initial load
+          // Let user explicitly click a session to activate it
+          // This matches ChatGPT behavior and prevents confusion
         }
 
       } else {
@@ -217,9 +303,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // Sync specific chat with backend - fetches ALL conversation messages
   syncChatWithBackend: async (chatId: string, force: boolean = false) => {
-    // Check if synced recently (within 60s) unless forced
+    // Check if synced recently (within 2s) unless forced
+    // Reduced from 60s to 2s to ensure we get fresh data but debounce rapid calls
     const lastSyncTime = get().lastSynced[chatId] || 0;
-    if (!force && Date.now() - lastSyncTime < 60000) {
+    if (!force && Date.now() - lastSyncTime < 2000) {
       // console.log(`Stats for ${chatId} are fresh, skipping sync.`);
       return;
     }
@@ -229,20 +316,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (response.status === 200 && response.data?.messages) {
         // Map messages with proper highlight field mapping AND action payload
         const messages = response.data.messages.map((msg: any) => {
-          // Map highlights with correct field names
+          // Map highlights with correct field names (frontend uses startIndex/endIndex)
           const highlights = (msg.highlights || []).map((h: any) => ({
             id: h.id || h.highlightId || h.highlight_id || generateId(),
             text: h.text || h.highlightedText || '',
             color: h.color || '#FFD93D',
-            // CRITICAL: Backend uses startIndex/endIndex, frontend uses startOffset/endOffset
-            startOffset: h.startOffset ?? h.startIndex ?? h.start_index ?? 0,
-            endOffset: h.endOffset ?? h.endIndex ?? h.end_index ?? 0,
+            startIndex: h.startIndex ?? h.start_index ?? h.startOffset ?? 0,
+            endIndex: h.endIndex ?? h.end_index ?? h.endOffset ?? 0,
             note: h.note || '',
             createdAt: h.createdAt ? new Date(h.createdAt) : new Date(),
           }));
 
+
           // Extract action payload from metadata (restored from MongoDB)
           const actionPayload = msg.metadata?.action_payload || msg.action;
+
+          // Disable auto-execution for restored history messages
+          if (actionPayload?.payload) {
+            actionPayload.payload.executeOnce = false;
+          }
 
           return {
             id: msg.id || msg.message_id || generateId(),
@@ -305,10 +397,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ isLoadingChats: true });
 
     try {
-      const response = await chatAPI.loadSessionData(sessionId);
+      let data;
 
+      // CACHE REMOVED: Always fetch fresh data from backend
+      const response = await chatAPI.loadSessionData(sessionId);
       if (response.status === 200 && response.data) {
-        const { session, messages, highlights, miniAgents } = response.data;
+        data = response.data;
+        console.log("🔥 [loadSessionData] API Response Data:", data);
+      } else {
+        console.error("❌ [loadSessionData] API Failed:", response);
+      }
+
+      if (data) {
+        const { session, messages, highlights, miniAgents } = data;
+        console.log(`📦 [loadSessionData] Parsed: ${messages?.length} messages, ${highlights?.length} highlights`);
+
+
+        // 🔍 DEBUG: Log raw mini-agent data from backend
+        console.log(`🔍 [loadSessionData] Raw miniAgents from backend:`, miniAgents);
+        if (miniAgents?.length > 0) {
+          miniAgents.forEach((agent: any) => {
+            console.log(`   Agent ${agent.agentId || agent.id}: messages=${agent.messages?.length || 0}, hasConversation=${agent.hasConversation}`);
+          });
+        }
 
         // Build highlights map for O(1) lookup instead of O(n*m) filtering
         const highlightsByMessageId = new Map<string, any[]>();
@@ -322,30 +433,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         });
 
-        // Map messages with highlights attached AND action payload
-        const mappedMessages = (messages || []).map((msg: any) => {
+        if (!Array.isArray(messages)) {
+          console.error("❌ [loadSessionData] 'messages' is not an array:", messages);
+        }
+
+        const mappedMessages = Array.isArray(messages) ? messages.map((msg: any) => {
           const messageHighlights = (highlightsByMessageId.get(msg.id) || []).map((h: any) => ({
             id: h.highlightId || h.id || h.highlight_id || generateId(),
             text: h.text || h.highlightedText || '',
             color: h.color || '#FFD93D',
-            startOffset: h.startOffset ?? h.startIndex ?? h.start_index ?? 0,
-            endOffset: h.endOffset ?? h.endIndex ?? h.end_index ?? 0,
+            // ✅ CONSISTENT: Backend sends startIndex/endIndex
+            startIndex: h.startIndex ?? h.start_index ?? 0,
+            endIndex: h.endIndex ?? h.end_index ?? 0,
+            messageHash: h.messageHash || h.message_hash,  // ✅ NEW: Drift detection
             note: h.note || '',
             createdAt: h.createdAt ? new Date(h.createdAt) : new Date(),
           }));
 
+          // Debug log
+          if (messageHighlights.length > 0 && import.meta.env.DEV) {
+            console.log(`📍 [HIGHLIGHT_LOAD] Message ${msg.id}:`, {
+              highlightCount: messageHighlights.length,
+              highlights: messageHighlights.map(h => ({
+                id: h.id,
+                text: h.text.substring(0, 30) + '...',
+                range: [h.startIndex, h.endIndex],
+                color: h.color
+              }))
+            });
+          }
+
+
+          // Realign highlights to handle potential content drift
+          // This fixes minor offset issues if the LLM output varied slightly or whitespace was normalized
+          const realignedHighlights = realignHighlights(msg.content || msg.text || "", messageHighlights);
+
           // Extract action payload from metadata (restored from MongoDB)
           const actionPayload = msg.metadata?.action_payload || msg.action;
+
+          // Disable auto-execution for restored session messages
+          if (actionPayload?.payload) {
+            actionPayload.payload.executeOnce = false;
+          }
 
           return {
             id: msg.id || msg.message_id || generateId(),
             role: msg.role || "user",
             content: msg.content || msg.text || "",
             timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
-            highlights: messageHighlights,
+            highlights: realignedHighlights.filter((h: any) => !h._broken), // Filter out irreparably broken highlights
             action: actionPayload, // ✅ Restore confirmation state from database
           };
-        });
+        }) : [];
 
         // Map mini agents with intelligent field mapping
         const mappedMiniAgents = (miniAgents || []).map((agent: any) => {
@@ -358,17 +497,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }))
             : [];
 
-          return {
+          const mapped = {
             id: agent.agentId || agent.id || agent.agent_id || generateId(),
             messageId: agent.messageId || agent.message_id || '',
             sessionId: agent.sessionId || agent.session_id || sessionId,
             title: agent.title || "Mini Agent",
-            snippet: agent.snippet || agent.selectedText || agent.selected_text || "",
+            // ✅ FIX: Use selectedText (matching TypeScript interface MiniAgent)
+            selectedText: agent.selectedText || agent.selected_text || agent.snippet || "",
             messages: agentMessages,
             createdAt: agent.createdAt ? new Date(agent.createdAt) : new Date(),
             hasConversation: agentMessages.length > 0,
           };
+          console.log('📦 [loadSessionData] Mapped mini-agent:', mapped.id, 'messageId:', mapped.messageId, 'hasConversation:', mapped.hasConversation, 'messagesCount:', agentMessages.length);
+          if (agentMessages.length > 0) {
+            console.log('📨 Mini-agent messages:', agentMessages.map(m => ({ role: m.role, content: m.content?.substring(0, 50) })));
+          }
+          return mapped;
         });
+
+        console.log(`✅ [loadSessionData] Mapped ${mappedMiniAgents.length} mini-agents for session ${sessionId}`);
 
         const totalHighlights = mappedMessages.reduce((sum, msg) => sum + (msg.highlights?.length || 0), 0);
 
@@ -395,6 +542,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }),
             miniAgents: mappedMiniAgents,
             isLoadingChats: false,
+            isDraftSession: false, // Clear draft mode when loading session data
           }));
         } else {
           // Create new chat entry
@@ -413,14 +561,105 @@ export const useChatStore = create<ChatState>((set, get) => ({
             chats: [newChat, ...state.chats],
             miniAgents: mappedMiniAgents,
             isLoadingChats: false,
+            isDraftSession: false, // Clear draft mode when loading session data
           }));
           console.log(`✅ Added new chat to state`);
         }
+
+        // Check for active generation to resume (Page Reload Recovery)
+        chatAPI.checkActiveGeneration(sessionId).then(async (res) => {
+          if (res.status === 200 && res.data?.active_generation) {
+            const gen = res.data.active_generation;
+            console.log("🔄 Found active generation, resuming:", gen);
+
+            const currentState = get();
+            // If already handling it, skip
+            if (currentState.isStreaming) return;
+
+            // Identify or Create Placeholder Message
+            let targetId = generateId();
+            let isNew = true;
+            const chat = currentState.chats.find(c => c.id === sessionId);
+            if (chat && chat.messages.length > 0) {
+              const last = chat.messages[chat.messages.length - 1];
+              if (last.role === 'assistant') {
+                targetId = last.id;
+                isNew = false;
+              }
+            }
+
+            if (isNew) {
+              set(state => ({
+                isStreaming: true,
+                isSendingMessage: false,
+                chats: state.chats.map(c => {
+                  if (c.id === sessionId) {
+                    return {
+                      ...c,
+                      messages: [...c.messages, {
+                        id: targetId,
+                        role: 'assistant',
+                        content: 'Resuming...', // Visual indicator
+                        timestamp: new Date()
+                      }]
+                    }
+                  }
+                  return c;
+                })
+              }));
+            } else {
+              set({ isStreaming: true, isSendingMessage: false });
+            }
+
+            if (['generating', 'streaming'].includes(gen.status)) {
+              // Resume
+              await chatAPI.resumeMessageStream(
+                sessionId,
+                gen.generation_id,
+                (chunk) => {
+                  set(state => ({
+                    chats: state.chats.map(c => c.id === sessionId ? {
+                      ...c,
+                      messages: c.messages.map(m => m.id === targetId ? { ...m, content: m.content + chunk } : m)
+                    } : c)
+                  }));
+                },
+                (finalId) => {
+                  set(state => ({
+                    isStreaming: false,
+                    chats: state.chats.map(c => c.id === sessionId ? {
+                      ...c,
+                      messages: c.messages.map(m => m.id === targetId ? {
+                        ...m,
+                        id: finalId,
+                        content: m.content.replace('Resuming...', '') // Cleanup
+                      } : m)
+                    } : c)
+                  }));
+                },
+                (err) => set({ isStreaming: false })
+              );
+            } else if (gen.status === 'completed') {
+              // Finalize recovery
+              chatAPI.resumeMessageStream(sessionId, gen.generation_id, () => { }, (fid) => {
+                set(state => ({
+                  isStreaming: false,
+                  chats: state.chats.map(c => c.id === sessionId ? {
+                    ...c,
+                    messages: c.messages.map(m => m.id === targetId ? { ...m, id: fid } : m)
+                  } : c)
+                }));
+              }, () => { });
+            }
+          }
+        }).catch(e => console.warn("Active gen check failed", e));
+
       } else {
         set({ isLoadingChats: false });
         throw new Error(response.error || 'Failed to load session data');
       }
     } catch (error) {
+      set({ isLoadingChats: false });
       throw error;
     }
   },
@@ -489,40 +728,86 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // Ensures there is a session to add the first message into
+  // This is called when user sends their FIRST message
   createSessionIfNeeded: async () => {
     const state = get();
+
+    // If in draft mode, create a real session now
+    if (state.isDraftSession) {
+      console.log('📝 Converting draft to real session...');
+
+      // Set creating state for smooth UI transition
+      set({ isCreatingSession: true });
+
+      try {
+        const newId = await get().createChat();
+        set({ isDraftSession: false, isCreatingSession: false });
+        return newId;
+      } catch (error) {
+        set({ isCreatingSession: false });
+        throw error;
+      }
+    }
+
     const current = state.chats.find((c) => c.id === state.currentChatId);
     if (!current || current.messages.length > 0) {
-      return await get().createChat();
+      set({ isCreatingSession: true });
+      try {
+        const newId = await get().createChat();
+        set({ isCreatingSession: false });
+        return newId;
+      } catch (error) {
+        set({ isCreatingSession: false });
+        throw error;
+      }
     }
     return current.id;
   },
 
-  // Starts a fresh session only if the current one has messages
+  // Enter draft mode - NO backend call, NO session created
+  // Just shows an empty chat UI ready for input
+  startDraftSession: () => {
+    console.log('📝 Starting draft session (no backend call)');
+    set({
+      currentChatId: null,
+      isDraftSession: true,
+      isCreatingSession: false,
+      pendingFirstMessage: null,
+      activeMiniAgentId: null
+    });
+  },
+
+  // Clear draft mode (e.g., when navigating away)
+  clearDraftSession: () => {
+    set({ isDraftSession: false, isCreatingSession: false, pendingFirstMessage: null });
+  },
+
+  // Starts a fresh session - NOW uses draft mode instead of creating immediately
   startNewSession: async () => {
     const state = get();
     const current = state.chats.find((c) => c.id === state.currentChatId);
-    if (!current || current.messages.length > 0) {
-      return await get().createChat();
+
+    // If already in draft mode, stay there
+    if (state.isDraftSession) {
+      return null;
     }
-    // If current chat exists and is empty, just reuse it
-    return current.id;
+
+    // If current chat is empty, reuse it
+    if (current && current.messages.length === 0) {
+      return current.id;
+    }
+
+    // Otherwise, enter draft mode (don't create session yet)
+    get().startDraftSession();
+    return null; // Return null to indicate draft mode
   },
 
   setCurrentChat: (id) => {
-    set({ currentChatId: id, activeMiniAgentId: null });
+    // Clear draft mode when selecting an existing chat
+    set({ currentChatId: id, isDraftSession: false, activeMiniAgentId: null });
 
-    // 🚀 PERFORMANCE: Use parallel fetching or single batch endpoint
-    // We prefer loadSessionData which fetches everything in one round trip
-    get().loadSessionData(id).catch(err => {
-      console.warn("Fast load failed, falling back to granular fetch", err);
-      // Fallback to parallel granular fetches if batch fails
-      Promise.all([
-        get().syncChatWithBackend(id),
-        get().loadSessionMiniAgents(id),
-        get().loadSessionHighlights(id)
-      ]);
-    });
+    // Note: Data loading is now handled by Chat.tsx useEffect when sessionId changes
+    // This prevents double-loading when both sidebar and route change trigger loads
   },
 
   addMessage: async (chatId, message) => {
@@ -557,12 +842,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (chat.id === chatId) {
           // Only update this specific chat - prevent message mixing
           const updatedMessages = [...chat.messages, fullMessage];
+          const isFirstMessage = chat.messages.length === 0;
+          const shouldDeriveTitle = isFirstMessage && ["New Chat", "Untitled", ""].includes(chat.title);
+          // Persist a local snapshot for potential rename
+          if (shouldDeriveTitle) {
+            // Fire-and-forget persistence after state update
+            const newTitle = deriveTitleFrom(fullMessage.content);
+            // Schedule rename to avoid blocking UI update
+            queueMicrotask(() => {
+              try { get().renameChat(chatId, newTitle); } catch { /* noop */ }
+            });
+          }
           return {
             ...chat,
             messages: updatedMessages,
             messageCount: updatedMessages.length, // Update message count
             updatedAt: new Date(),
-            title: chat.title,
+            // Immediately mark a useful session name from the first user message
+            title: shouldDeriveTitle ? deriveTitleFrom(fullMessage.content) : chat.title,
           };
         }
         // Don't modify other chats
@@ -573,7 +870,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       // Create a temporary AI message for streaming
-      const aiTempId = generateId();
+      let aiTempId = generateId();
       const aiMessage: Message = {
         id: aiTempId,
         role: 'assistant',
@@ -591,8 +888,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...chat,
               messages: updatedMessages,
               messageCount: updatedMessages.length,
-              // ⚡ VISUAL TRICK: clear title to trigger "thinking" cursor animation
-              title: (chat.messages.length === 0 && ["New Chat", "Untitled"].includes(chat.title)) ? "" : chat.title,
+              // Keep title that we just derived from user prompt; backend/title events can override later
+              title: chat.title,
             };
           }
           return chat;
@@ -601,40 +898,85 @@ export const useChatStore = create<ChatState>((set, get) => ({
         isStreaming: false
       }));
 
-      // GPT-Style streaming: Append chunks using RAF for 60fps smoothness
-      let rafId: number | null = null;
+      // 🚀 OPTIMIZED streaming: Batch updates for smooth rendering
       let pendingChunk = '';
       let isFirstChunk = true;
+      let updateScheduled = false;
+      let lastFlushTime = 0;
+      const MIN_FLUSH_INTERVAL = 50; // 20fps - reduces re-renders, smoother UI
+      const MIN_CHUNK_SIZE = 10; // Reduced from 20 - show first content faster
 
-      const scheduleUpdate = () => {
-        if (rafId) return; // Already scheduled
+      const flushChunks = () => {
+        if (!pendingChunk) {
+          updateScheduled = false;
+          return;
+        }
 
-        rafId = requestAnimationFrame(() => {
-          rafId = null;
+        const now = performance.now();
+        const timeSinceLastFlush = now - lastFlushTime;
 
-          if (pendingChunk) {
-            const chunk = pendingChunk;
-            pendingChunk = '';
+        // For first chunk, flush immediately to end "thinking" state quickly
+        const shouldFlushImmediately = isFirstChunk && pendingChunk.length > 0;
 
-            // CRITICAL: Append-only update (GPT-style)
-            set(state => ({
-              chats: state.chats.map(chat => {
-                if (chat.id === chatId) {
-                  const updatedMessages = chat.messages.map(m =>
-                    m.id === aiTempId
-                      ? { ...m, content: m.content + chunk } // APPEND ONLY
-                      : m
-                  );
-                  return { ...chat, messages: updatedMessages };
-                }
-                return chat;
-              }),
-              isStreaming: true,
-              isSendingMessage: false
-            }));
-          }
+        // Batch more aggressively for subsequent chunks
+        if (!shouldFlushImmediately && timeSinceLastFlush < MIN_FLUSH_INTERVAL && pendingChunk.length < MIN_CHUNK_SIZE) {
+          updateScheduled = false;
+          scheduleUpdate();
+          return;
+        }
+
+        const chunk = pendingChunk;
+        pendingChunk = '';
+        updateScheduled = false;
+        lastFlushTime = now;
+
+        // 🚀 Single atomic state update
+        set(state => {
+          const chatIndex = state.chats.findIndex(c => c.id === chatId);
+          if (chatIndex === -1) return state;
+
+          const chat = state.chats[chatIndex];
+          const msgIndex = chat.messages.findIndex(m => m.id === aiTempId);
+          if (msgIndex === -1) return state;
+
+          // Create new message with appended content
+          const updatedMessage = {
+            ...chat.messages[msgIndex],
+            content: chat.messages[msgIndex].content + chunk
+          };
+
+          // Create new messages array with updated message
+          const newMessages = [
+            ...chat.messages.slice(0, msgIndex),
+            updatedMessage,
+            ...chat.messages.slice(msgIndex + 1)
+          ];
+
+          // Create new chats array with updated chat
+          const newChats = [
+            ...state.chats.slice(0, chatIndex),
+            { ...chat, messages: newMessages },
+            ...state.chats.slice(chatIndex + 1)
+          ];
+
+          return {
+            ...state,
+            chats: newChats,
+            isStreaming: true,
+            isSendingMessage: false
+          };
         });
       };
+
+      const scheduleUpdate = () => {
+        if (updateScheduled) return;
+        updateScheduled = true;
+        // Use RAF directly for smoother visual updates
+        requestAnimationFrame(flushChunks);
+      };
+
+      // 🛡️ Metadata filter (uses shared utility)
+      const filterInternalMetadata = createMetadataFilter();
 
       // Stream AI response using streaming endpoint
       await chatAPI.sendMessageStream(
@@ -642,6 +984,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         message.content,
         // onChunk - GPT-style append-only streaming
         (chunk: string) => {
+          // 🛡️ SECURITY: Filter out any internal metadata that shouldn't be shown to users
+          // This is a safety net in case backend accidentally sends metadata
+          const filteredChunk = filterInternalMetadata(chunk);
+
+          // Skip empty chunks after filtering
+          if (!filteredChunk) return;
+
           // First chunk - immediately switch from thinking to streaming
           if (isFirstChunk) {
             isFirstChunk = false;
@@ -652,18 +1001,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
           }
 
-          // Accumulate chunk and schedule RAF update
-          pendingChunk += chunk;
+          // Accumulate chunk and schedule update
+          pendingChunk += filteredChunk;
           scheduleUpdate();
         },
         // onComplete - finalize message with real ID from backend
-        (messageId: string) => {
-          // Cancel any pending RAF
-          if (rafId) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-          }
-
+        (messageId: string, metadata?: { key_source?: string; model?: string; usage?: any }) => {
           // Flush any remaining content immediately
           if (pendingChunk) {
             const finalChunk = pendingChunk;
@@ -674,7 +1017,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 if (chat.id === chatId) {
                   const updatedMessages = chat.messages.map(m =>
                     m.id === aiTempId
-                      ? { ...m, id: messageId, content: m.content + finalChunk }
+                      ? {
+                        ...m,
+                        id: messageId,
+                        content: m.content + finalChunk,
+                        keySource: metadata?.key_source as "platform" | "user" | undefined,
+                        model: metadata?.model
+                      }
                       : m
                   );
                   return {
@@ -695,7 +1044,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 if (chat.id === chatId) {
                   const updatedMessages = chat.messages.map(m =>
                     m.id === aiTempId
-                      ? { ...m, id: messageId }
+                      ? {
+                        ...m,
+                        id: messageId,
+                        keySource: metadata?.key_source as "platform" | "user" | undefined,
+                        model: metadata?.model
+                      }
                       : m
                   );
                   return {
@@ -716,6 +1070,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
         (error: string) => {
           set({ isSendingMessage: false, isStreaming: false });
           console.error('[Chat] Stream failed:', error);
+
+          // Store failed message for retry (only for non-limit errors)
+          const isLimitError =
+            error.includes('ALL_KEYS_EXHAUSTED') ||
+            error.includes('keys are temporarily exhausted') ||
+            error.includes('all your API keys') ||
+            error.includes('free AI requests') ||
+            error.includes('FREE_LIMIT_EXCEEDED') ||
+            error.includes('Free limit reached');
+
+          if (!isLimitError) {
+            // Store the failed message for retry
+            set({
+              lastFailedMessage: {
+                chatId,
+                content: message.content,
+                attachments: message.attachments
+              }
+            });
+          }
+
+          // Check for API key related errors
+          if (
+            error.includes('ALL_KEYS_EXHAUSTED') ||
+            error.includes('keys are temporarily exhausted') ||
+            error.includes('all your API keys')
+          ) {
+            // All keys exhausted - different UI needed
+            set({ freeLimitExceeded: true, limitExceededType: "all_keys_exhausted" });
+          } else if (
+            error.includes('free AI requests') ||
+            error.includes('FREE_LIMIT_EXCEEDED') ||
+            error.includes('Free limit reached')
+          ) {
+            // Free tier exhausted - prompt to add key
+            set({ freeLimitExceeded: true, limitExceededType: "free_limit" });
+          }
+
           // Remove temp message on error
           set(state => ({
             chats: state.chats.map(chat => {
@@ -769,6 +1161,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return chat;
             })
           }));
+          // Persist streamed title to MongoDB
+          try { get().renameChat(chatId, title); } catch { /* noop */ }
+        },
+        // ✅ onStart: CRITICAL FIX - Swap temp ID with real ID immediately
+        (messageId: string) => {
+          console.log(`🔄 Swapping temp ID ${aiTempId} with real ID ${messageId}`);
+
+          // 1. Update store
+          set(state => ({
+            chats: state.chats.map(chat => {
+              if (chat.id === chatId) {
+                return {
+                  ...chat,
+                  messages: chat.messages.map(m =>
+                    m.id === aiTempId ? { ...m, id: messageId } : m
+                  )
+                };
+              }
+              return chat;
+            })
+          }));
+
+          // 2. Update local variable so subsequent chunks target the correct message
+          aiTempId = messageId;
         }
       );
 
@@ -893,38 +1309,108 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createTask: (title, chatId) => {
-    const task: Task = {
-      id: generateId(),
-      title,
-      completed: false,
-      createdAt: new Date(),
-      chatId,
-    };
-    set((state) => ({ tasks: [task, ...state.tasks] }));
-    return task.id;
+  createTask: async (title, description, dueDate, timeSeconds, imageUrl) => {
+    try {
+      // Combine title and description or just send title as description
+      // Backend expects 'description'
+      // If we have both, maybe format as "Title: Description" or just use title if description is empty
+      const finalDesc = description ? `${title}\n${description}` : title;
+
+      const resp = await chatAPI.confirmTask({
+        description: finalDesc,
+        due_date: dueDate ? dueDate.toISOString() : undefined,
+        time_seconds: timeSeconds,
+        image_url: imageUrl,
+      });
+
+      if (resp.status === 200 && resp.data) {
+        const t = resp.data;
+        const newTask: Task = {
+          id: t.task_id,
+          title: t.description,
+          completed: false,
+          createdAt: new Date(),
+          dueDate: t.due_date ? new Date(t.due_date) : undefined,
+          timeSeconds: t.time_seconds,
+          imageUrl: t.image_url,
+        };
+
+        set((state) => ({ tasks: [newTask, ...state.tasks] }));
+        return newTask.id;
+      }
+    } catch (error) {
+      console.error("Failed to create task:", error);
+      toast({ title: "Failed to create task", variant: "destructive" });
+    }
+    return "";
   },
 
-  toggleTask: (id) =>
-    set((state) => ({
-      tasks: state.tasks.map((task) =>
-        task.id === id ? { ...task, completed: !task.completed } : task
-      ),
-    })),
+  toggleTask: async (id) => {
+    const task = get().tasks.find((t) => t.id === id);
+    if (!task) return;
 
-  deleteTask: (id) =>
-    set((state) => ({ tasks: state.tasks.filter((task) => task.id !== id) })),
+    const newCompleted = !task.completed;
+    const newStatus = newCompleted ? "completed" : "pending";
+
+    // Optimistic update
+    set((state) => ({
+      tasks: state.tasks.map((t) =>
+        t.id === id ? { ...t, completed: newCompleted } : t
+      ),
+    }));
+
+    try {
+      await chatAPI.updateTask({
+        task_id: id,
+        status: newStatus
+      });
+    } catch (error) {
+      console.error("Failed to toggle task:", error);
+      // Revert on failure
+      set((state) => ({
+        tasks: state.tasks.map((t) =>
+          t.id === id ? { ...t, completed: !newCompleted } : t
+        ),
+      }));
+      toast({ title: "Failed to update task", variant: "destructive" });
+    }
+  },
+
+  deleteTask: async (id) => {
+    const originalTasks = get().tasks;
+
+    // Optimistic delete
+    set((state) => ({ tasks: state.tasks.filter((task) => task.id !== id) }));
+
+    try {
+      await chatAPI.cancelTask({ task_id: id });
+    } catch (error) {
+      console.error("Failed to delete task:", error);
+      // Revert on failure
+      set({ tasks: originalTasks });
+      toast({ title: "Failed to delete task", variant: "destructive" });
+    }
+  },
 
   loadTasksFromBackend: async () => {
     try {
+      console.log("📋 Loading tasks from backend...");
       const [pending, completed] = await Promise.all([
         chatAPI.getTasks("pending"),
         chatAPI.getTasks("completed"),
       ]);
 
+      console.log("📋 Pending response:", pending);
+      console.log("📋 Completed response:", completed);
+
       const mapTasks = (resp: any, completedFlag: boolean): Task[] => {
-        if (resp.status !== 200 || !Array.isArray(resp.data)) return [];
-        return resp.data.map((t: any) => {
+        // Handle both successful response formats
+        const taskData = resp.data || [];
+        if (resp.error || !Array.isArray(taskData)) {
+          console.warn(`⚠️ Invalid task response for ${completedFlag ? 'completed' : 'pending'}:`, resp);
+          return [];
+        }
+        return taskData.map((t: any) => {
           // ☁️ Handle due_date - can be ISO string or datetime object
           let dueDate: Date | undefined = undefined;
           if (t.due_date) {
@@ -948,6 +1434,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             completed: completedFlag,
             createdAt: dueDate || new Date(),
             dueDate: dueDate,
+            timeSeconds: t.time_seconds,
+            imageUrl: t.image_url,
           };
         });
       };
@@ -975,9 +1463,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         formattedDueDate = dueDate;
       }
 
+      // 🧹 Pass session_id to clear draft after confirmation (prevents duplicates)
+      const currentSessionId = get().currentChatId;
+
       const resp = await chatAPI.confirmTask({
         description,
-        due_date: formattedDueDate
+        due_date: formattedDueDate,
+        session_id: currentSessionId  // Clear draft on backend after successful creation
       });
       if (resp.status === 200 && resp.data) {
         const t = resp.data;
@@ -1039,6 +1531,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       console.log('🤖 Creating/Getting Mini Agent for message:', messageId);
 
+      // ⚡ Optimistic: create a temporary agent for instant UI open
+      const tempId = `temp_agent_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const optimisticAgent: MiniAgent = {
+        id: tempId,
+        messageId,
+        sessionId: currentChat.id,
+        selectedText,
+        messages: [],
+        createdAt: new Date(),
+        hasConversation: false,
+      };
+
+      set((state) => ({
+        miniAgents: [...state.miniAgents, optimisticAgent],
+        activeMiniAgentId: tempId,
+        chats: [...state.chats],
+      }));
+
       // Call backend - it will return existing agent or create new one
       const response = await chatAPI.createMiniAgent({
         messageId,
@@ -1052,43 +1562,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const isExisting = agentData.isExisting || false;
 
         console.log(isExisting ? '♻️ Reusing existing Mini Agent:' : '✅ Mini Agent created in database:', agentData.agentId);
+        console.log('📦 Backend returned:', {
+          agentId: agentData.agentId,
+          isExisting,
+          hasConversation: agentData.hasConversation,
+          messagesCount: agentData.messages?.length || 0
+        });
 
         // Map messages from backend format
         const messages = (agentData.messages || []).map((msg: any) => ({
           id: msg.id || generateId(),
           role: msg.role || "user",
-          content: msg.content || "",
+          content: msg.content || msg.text || "",
           timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
         }));
+
+        console.log('📨 Mapped messages:', messages.length, messages.map(m => ({ role: m.role, contentLength: m.content?.length })));
 
         const agent: MiniAgent = {
           id: agentData.agentId,
           messageId: agentData.messageId,
+          sessionId: agentData.sessionId || currentChat.id,
           selectedText: agentData.selectedText,
           messages,
           createdAt: agentData.createdAt ? new Date(agentData.createdAt) : new Date(),
-          hasConversation: agentData.hasConversation || false,
+          hasConversation: agentData.hasConversation || messages.length > 0,  // ✅ Calculate from messages if not provided
         };
+
+        console.log('🤖 Final agent state:', { id: agent.id, hasConversation: agent.hasConversation, messagesCount: agent.messages.length });
 
         // Check if agent already exists in state
         const existingAgentIndex = state.miniAgents.findIndex(a => a.id === agent.id);
 
         if (existingAgentIndex !== -1) {
-          // Update existing agent (snippet may have changed)
+          // Replace optimistic or existing agent by id
           set((state) => ({
-            miniAgents: state.miniAgents.map(a => a.id === agent.id ? agent : a),
+            miniAgents: state.miniAgents.map(a => (a.id === tempId || a.id === agent.id) ? agent : a),
             activeMiniAgentId: agent.id,
-            chats: [...state.chats], // Trigger re-render
+            chats: [...state.chats],
           }));
-          console.log('📝 Updated existing Mini Agent with new snippet:', agent.id);
+          console.log('📝 Updated existing/optimistic Mini Agent:', agent.id);
         } else {
-          // Add new agent to state
+          // Replace optimistic temp with real
           set((state) => ({
-            miniAgents: [...state.miniAgents, agent],
+            miniAgents: state.miniAgents.map(a => a.id === tempId ? agent : a),
             activeMiniAgentId: agent.id,
-            chats: [...state.chats], // Trigger re-render
+            chats: [...state.chats],
           }));
-          console.log('✅ Mini Agent added to state:', agent.id);
+          console.log('✅ Mini Agent created and reconciled:', agent.id);
         }
 
         return agent.id;
@@ -1098,6 +1619,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (error) {
       console.error("❌ Failed to create mini-agent:", error);
+      // Rollback optimistic temp agent
+      try {
+        set((state) => ({
+          miniAgents: state.miniAgents.filter(a => !a.id.startsWith('temp_agent_')),
+          activeMiniAgentId: state.activeMiniAgentId && state.activeMiniAgentId.startsWith('temp_agent_') ? null : state.activeMiniAgentId,
+        }));
+        toast({ title: "Mini Agent", description: "Failed to create. Please try again.", variant: "destructive" });
+      } catch { }
       throw error;
     }
   },
@@ -1124,6 +1653,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             agent.id === agentId
               ? {
                 ...agent,
+                sessionId: agent.sessionId || agentData.sessionId || state.currentChatId || undefined,
                 messages,
                 selectedText: agentData.selectedText || agent.selectedText,
               }
@@ -1371,6 +1901,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const newAgent: MiniAgent = {
               id: agentData.agentId,
               messageId: agentData.messageId,
+              sessionId: agentData.sessionId || state.currentChatId || undefined,
               selectedText: agentData.selectedText,
               messages,
               createdAt: agentData.createdAt ? new Date(agentData.createdAt) : new Date(),
@@ -1401,25 +1932,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const response = await chatAPI.getSessionMiniAgents(sessionId);
 
       if (response.status === 200 && response.data?.miniAgents) {
-        const miniAgents = response.data.miniAgents.map((agent: any) => ({
-          id: agent.agentId,
-          messageId: agent.messageId,
-          selectedText: agent.selectedText,
-          messages: (agent.messages || []).map((msg: any) => ({
+        console.log('📥 Loading session mini-agents:', response.data.miniAgents?.length || 0);
+        const fetched = response.data.miniAgents.map((agent: any) => {
+          // ✅ Map messages first to determine hasConversation
+          const messages = (agent.messages || []).map((msg: any) => ({
             id: msg.id || generateId(),
             role: msg.role || "user",
-            content: msg.content || "",
+            content: msg.content || msg.text || "",
             timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
-          })),
-          hasConversation: agent.hasConversation || false,
-          createdAt: agent.createdAt ? new Date(agent.createdAt) : new Date(),
-        }));
+          }));
+
+          const mapped = {
+            // ✅ FIX: Backend sends 'id', fallback to agentId for compatibility
+            id: agent.agentId || agent.id || agent.agent_id,
+            messageId: agent.messageId || agent.message_id,
+            sessionId: sessionId,
+            // ✅ FIX: Map selectedText from various possible field names
+            selectedText: agent.selectedText || agent.selected_text || agent.snippet || "",
+            messages,
+            // ✅ FIX: Calculate hasConversation from messages if not provided
+            hasConversation: agent.hasConversation || messages.length > 0,
+            createdAt: agent.createdAt ? new Date(agent.createdAt) : new Date(),
+          };
+          console.log('📦 Mapped mini-agent:', mapped.id, 'messageId:', mapped.messageId, 'hasConversation:', mapped.hasConversation, 'messages:', messages.length);
+          return mapped;
+        });
 
         set((state) => {
-          // Merge with existing agents for other sessions
-          const otherAgents = state.miniAgents.filter(a => a.sessionId !== sessionId);
+          // Dedupe by id and prefer latest fetched for this session
+          const map = new Map<string, MiniAgent>();
+          // Keep existing agents from other sessions
+          for (const a of state.miniAgents) {
+            if (a.sessionId && a.sessionId !== sessionId) {
+              map.set(a.id, a);
+            }
+          }
+          // Add/replace fetched for current session
+          for (const a of fetched) {
+            map.set(a.id, a);
+          }
           return {
-            miniAgents: [...otherAgents, ...miniAgents],
+            miniAgents: Array.from(map.values()),
             lastSynced: { ...state.lastSynced, [`${sessionId}_miniAgents`]: Date.now() }
           };
         });
@@ -1437,7 +1990,131 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ...highlight,
     };
 
-    // 1. Update State Immediately
+    // Get the message text for validation
+    const state = get();
+    const chat = state.chats.find((c) => c.id === chatId);
+    const message = chat?.messages.find((m) => m.id === messageId);
+
+    if (!message) {
+      console.error('❌ Message not found:', messageId);
+      return;
+    }
+
+    // Import validation utilities
+    const { generateMessageHashSync, logHighlightDebug, cleanMessageContent, getRenderedText } = await import('@/lib/highlightUtils');
+
+    // ✅ GET RENDERED TEXT (markdown stripped - matches what user sees/selects)
+    // CRITICAL: Use the SAME content we're sending to backend (message.content)
+    // Backend will: clean_message_content() → strip_markdown()
+    // Frontend must match this exactly!
+    const renderedContent = getRenderedText(message.content);
+
+    // ✅ SMART POSITION FINDING
+    // The DOM selection offsets may not exactly match getRenderedText() output
+    // because the DOM and regex-based markdown stripping can differ slightly.
+    // Strategy: Find the exact text in the rendered content near the given position.
+
+    let finalStartIndex = highlight.startIndex;
+    let finalEndIndex = highlight.endIndex;
+
+    // First, check if the text matches at the exact position
+    const textAtPosition = renderedContent.substring(finalStartIndex, finalEndIndex);
+
+    if (textAtPosition !== highlight.text) {
+      console.log(`⚠️ Text mismatch at original position [${finalStartIndex}:${finalEndIndex}]`);
+      console.log(`   Expected: "${highlight.text}"`);
+      console.log(`   Found: "${textAtPosition}"`);
+
+      // Search for the exact text in a radius around the original position
+      const searchRadius = 50; // Characters to search in each direction
+      const searchStart = Math.max(0, finalStartIndex - searchRadius);
+      const searchEnd = Math.min(renderedContent.length, finalEndIndex + searchRadius);
+      const searchArea = renderedContent.substring(searchStart, searchEnd);
+
+      const localIndex = searchArea.indexOf(highlight.text);
+
+      if (localIndex !== -1) {
+        // Found the text nearby - use corrected position
+        finalStartIndex = searchStart + localIndex;
+        finalEndIndex = finalStartIndex + highlight.text.length;
+        console.log(`🔧 Auto-corrected to position [${finalStartIndex}:${finalEndIndex}]`);
+      } else {
+        // Try global search as last resort
+        const globalIndex = renderedContent.indexOf(highlight.text);
+        if (globalIndex !== -1) {
+          // Check if this is reasonably close to the original position (within 100 chars)
+          if (Math.abs(globalIndex - highlight.startIndex) < 100) {
+            finalStartIndex = globalIndex;
+            finalEndIndex = globalIndex + highlight.text.length;
+            console.log(`🔧 Found text at global position [${finalStartIndex}:${finalEndIndex}]`);
+          } else {
+            console.error(`❌ Text found but too far from selection (at ${globalIndex}, expected near ${highlight.startIndex})`);
+            console.error(`   This may highlight the wrong occurrence - aborting`);
+            return;
+          }
+        } else {
+          console.error(`❌ Cannot find text "${highlight.text}" in rendered content`);
+          console.error(`   Content length: ${renderedContent.length}`);
+          return;
+        }
+      }
+    }
+
+    // Final validation
+    const verifyText = renderedContent.substring(finalStartIndex, finalEndIndex);
+    if (verifyText !== highlight.text) {
+      console.error(`❌ Final verification failed at [${finalStartIndex}:${finalEndIndex}]`);
+      console.error(`   Expected: "${highlight.text}"`);
+      console.error(`   Found: "${verifyText}"`);
+      return;
+    }
+
+    console.log(`✅ Validated highlight: "${highlight.text}" at position [${finalStartIndex}:${finalEndIndex}]`);
+
+    // Update the optimistic highlight with corrected indexes
+    optimisticHighlight.startIndex = finalStartIndex;
+    optimisticHighlight.endIndex = finalEndIndex;
+
+    // Generate message hash using clean content for consistency
+    const cleanContent = cleanMessageContent(message.content);
+    const messageHash = generateMessageHashSync(cleanContent);
+
+    // Debug log
+    logHighlightDebug('CREATE', {
+      messageId,
+      startIndex: highlight.startIndex,
+      endIndex: highlight.endIndex,
+      text: highlight.text,
+      hash: messageHash
+    });
+
+    // ✅ CLIENT-SIDE DUPLICATE DETECTION
+    // Check if a highlight with the same range and text already exists
+    const existingHighlights = message.highlights || [];
+    const isDuplicate = existingHighlights.some(existing => {
+      // Check for exact match
+      if (existing.startIndex === finalStartIndex &&
+        existing.endIndex === finalEndIndex &&
+        existing.text.trim() === highlight.text.trim()) {
+        return true;
+      }
+
+      // Check for overlapping highlights with same text
+      const rangesOverlap = (
+        finalStartIndex < existing.endIndex &&
+        existing.startIndex < finalEndIndex
+      );
+      const textMatch = existing.text.trim() === highlight.text.trim();
+
+      return rangesOverlap && textMatch;
+    });
+
+    if (isDuplicate) {
+      console.log(`🔄 Duplicate highlight detected on client - skipping creation`);
+      return; // Don't create duplicate
+    }
+
+    // 1. Update State Immediately (Optimistic)
     set((state) => ({
       chats: state.chats.map((chat) =>
         chat.id === chatId
@@ -1456,32 +2133,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const userId = useAuthStore.getState().user?.id || "anonymous";
 
-      // 2. Network Request in Background
+      // 2. Network Request with Full Validation Data (use corrected indexes)
       const response = await chatAPI.createHighlight({
         userId,
         sessionId: chatId,
         messageId,
         text: highlight.text,
         color: highlight.color,
-        startIndex: highlight.startOffset,
-        endIndex: highlight.endOffset,
-        note: highlight.note
+        startIndex: finalStartIndex,  // ✅ Use corrected index
+        endIndex: finalEndIndex,      // ✅ Use corrected index
+        note: highlight.note,
+        messageText: message.content,   // ✅ CRITICAL: Send ORIGINAL content, backend will clean it
       });
 
       // 3. Reconcile / Confirm
-      console.log('Highlight creation response:', response); // Debug log
-
       if ((response.status === 201 || response.status === 200) && (response.data?.highlight || response.data?.success)) {
         const payload = response.data;
-        const realId = payload.highlightId || (payload.highlight ? payload.highlight.id : null) || (payload._id) || tempId;
+        const realId = payload.highlight?.highlightId || payload.highlightId || tempId;
 
-        if (!realId && !payload.highlight) {
+        if (!realId) {
           console.warn("⚠️ Created highlight but no ID returned", payload);
-          // Verify if we can fallback to tempId if success is true? 
-          // Ideally we need the real ID. 
         }
 
-        // Silently update the ID in the store so future deletes work
+        // Update the ID in the store
         set((state) => ({
           chats: state.chats.map((chat) =>
             chat.id === chatId
@@ -1501,20 +2175,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : chat
           ),
         }));
+
+        console.log('✅ Highlight created successfully:', realId);
+        // Silent success - no notification
+      } else if (response.data?.isExisting) {
+        // Duplicate highlight - this is OK, just use existing
+        console.log('ℹ️ Highlight already exists, using existing ID');
+        const existingId = response.data.highlight?.highlightId || tempId;
+        set((state) => ({
+          chats: state.chats.map((chat) =>
+            chat.id === chatId
+              ? {
+                ...chat,
+                messages: chat.messages.map((msg) =>
+                  msg.id === messageId
+                    ? {
+                      ...msg,
+                      highlights: (msg.highlights || []).map(h =>
+                        h.id === tempId ? { ...h, id: existingId } : h
+                      )
+                    }
+                    : msg
+                ),
+              }
+              : chat
+          ),
+        }));
       } else {
-        console.error('Invalid backend response structure:', response);
-        throw new Error("Invalid backend response");
+        // Log detailed error info
+        console.error('❌ Backend returned error:', {
+          status: response.status,
+          data: response.data,
+          detail: response.data?.detail
+        });
+
+        // Extract error message properly
+        let errorMessage = "Failed to create highlight";
+        if (response.data?.detail) {
+          if (typeof response.data.detail === 'string') {
+            errorMessage = response.data.detail;
+          } else if (typeof response.data.detail === 'object') {
+            errorMessage = response.data.detail.message || response.data.detail.error || JSON.stringify(response.data.detail);
+          }
+        } else if (response.data?.error) {
+          errorMessage = response.data.error;
+        } else if (response.data?.message) {
+          errorMessage = response.data.message;
+        }
+
+        throw new Error(errorMessage);
       }
     } catch (error) {
       console.error("❌ Failed to create highlight, rolling back:", error);
 
-      // Notify user
-      toast({
-        title: "Failed to save highlight",
-        description: "Your highlight could not be saved. Please check your connection.",
-        variant: "destructive",
-      });
-
+      // Silent rollback - no notification, just console log
       // 4. Rollback on Error
       set((state) => ({
         chats: state.chats.map((chat) =>
@@ -1629,68 +2343,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  loadSessionHighlights: async (sessionId: string, force: boolean = false) => {
-    // Check cache
-    const lastSyncTime = get().lastSynced[`${sessionId}_highlights`] || 0;
-    if (!force && Date.now() - lastSyncTime < 60000) {
-      return;
-    }
-
+  /**
+   * Update highlight color in place (smoother UX than delete+create)
+   * Optimistic update with backend sync
+   */
+  updateHighlightColor: async (chatId: string, messageId: string, highlightId: string, color: string) => {
     try {
-      // Check if highlights already loaded for this session (legacy check retained as secondary optimization)
-      if (!force) {
-        const existingChat = get().chats.find(c => c.id === sessionId);
-        if (existingChat && existingChat.messages.some(m => m.highlights && m.highlights.length > 0)) {
-          // Also set synced flag to prevent future checks for a while
-          set(state => ({
-            lastSynced: { ...state.lastSynced, [`${sessionId}_highlights`]: Date.now() }
-          }));
-          return;
-        }
-      }
+      // 1. Optimistic UI update - instant feedback
+      set((state) => ({
+        chats: state.chats.map((chat) =>
+          chat.id === chatId
+            ? {
+              ...chat,
+              messages: chat.messages.map((msg) =>
+                msg.id === messageId
+                  ? {
+                    ...msg,
+                    highlights: (msg.highlights || []).map((h) =>
+                      h.id === highlightId ? { ...h, color } : h
+                    ),
+                  }
+                  : msg
+              ),
+            }
+            : chat
+        ),
+      }));
 
-      const response = await chatAPI.getSessionHighlights(sessionId);
-
-      if (response.status === 200 && response.data?.highlights) {
-        const highlights = response.data.highlights;
-
-        // Group highlights by message ID (optimized with Map for O(1) lookups)
-        const highlightsByMessage = new Map<string, Highlight[]>();
-        highlights.forEach((h: any) => {
-          if (!highlightsByMessage.has(h.messageId)) {
-            highlightsByMessage.set(h.messageId, []);
-          }
-          highlightsByMessage.get(h.messageId)!.push({
-            id: h.highlightId || h.id,
-            text: h.text || '',
-            color: h.color || '#FFD93D',
-            // CRITICAL: Backend uses startIndex/endIndex, frontend uses startOffset/endOffset
-            startOffset: h.startOffset ?? h.startIndex ?? 0,
-            endOffset: h.endOffset ?? h.endIndex ?? 0,
-            note: h.note || undefined,
-          });
-        });
-
-        // Update messages with highlights (batch update for performance)
-        set((state) => ({
-          chats: state.chats.map((chat) =>
-            chat.id === sessionId
-              ? {
-                ...chat,
-                messages: chat.messages.map((msg) => ({
-                  ...msg,
-                  highlights: highlightsByMessage.get(msg.id) || [],
-                })),
-              }
-              : chat
-          ),
-          lastSynced: { ...state.lastSynced, [`${sessionId}_highlights`]: Date.now() }
-        }));
+      // 2. Backend sync (if API exists)
+      try {
+        await chatAPI.updateHighlightColor(highlightId, color);
+        console.log("✅ Highlight color updated:", highlightId);
+      } catch (backendError) {
+        console.warn("⚠️ Backend color update failed, keeping local state:", backendError);
+        // Don't rollback - the highlight still works locally with new color
       }
     } catch (error) {
-      console.error("Failed to load highlights:", error);
+      console.error("❌ Failed to update highlight color:", error);
+      throw error;
     }
   },
+
+
 
   toggleSidebar: () =>
     set((state) => ({
@@ -1724,5 +2418,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (error) {
       console.error("Stream error in store:", error);
     }
+  },
+
+  markActionExecuted: (chatId: string, messageId: string) => {
+    set((state) => ({
+      chats: state.chats.map((chat) => {
+        if (chat.id === chatId) {
+          return {
+            ...chat,
+            messages: chat.messages.map((msg) => {
+              if (msg.id === messageId && msg.action?.payload) {
+                return {
+                  ...msg,
+                  action: {
+                    ...msg.action,
+                    payload: {
+                      ...msg.action.payload,
+                      executeOnce: false,
+                    },
+                  },
+                };
+              }
+              return msg;
+            }),
+          };
+        }
+        return chat;
+      }),
+    }));
   }
 }));
+

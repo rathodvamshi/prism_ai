@@ -1,31 +1,30 @@
-import React, { useState, useRef, useEffect, lazy, Suspense } from "react";
+import React, { useState, useRef, useEffect, lazy, Suspense, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useChatStore } from "@/stores/chatStore";
 import { useProfileStore } from "@/stores/profileStore";
 import { ChatSidebar } from "@/components/chat/ChatSidebar";
 import { MessageBubble } from "@/components/chat/MessageBubble";
-// import { VirtualizedMessageList } from "@/components/chat/VirtualizedMessageList";
+import { VirtualizedMessageList } from "@/components/chat/VirtualizedMessageList";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ConversationLoadingSkeleton } from "@/components/chat/LoadingSkeletons";
 import { ConnectionStatus } from "@/components/chat/ConnectionStatus";
 import { ChatErrorBoundary } from "@/components/chat/ChatErrorBoundary";
+import { FreeLimitExceededPopup } from "@/components/FreeLimitExceededPopup";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 
 // ⚡ LAZY LOAD: Heavy components loaded only when needed
 const MiniAgentPanel = lazy(() => import("@/components/chat/MiniAgentPanel"));
 const HighlightsPanel = lazy(() => import("@/components/chat/HighlightsPanel"));
-const SettingsModal = lazy(() => import("@/components/settings/SettingsModal"));
 const CommandPalette = lazy(() => import("@/components/command/CommandPalette"));
 
 // Loading fallbacks
 import {
   PanelLoadingFallback,
-  ModalLoadingFallback,
   CommandPaletteLoadingFallback
 } from "@/components/chat/LazyLoadingFallbacks";
 
-import { Share, Bot, Loader2, MoreHorizontal, ChevronDown, Check, Lock } from "lucide-react";
+import { Share, Bot, Loader2, MoreHorizontal, ChevronDown, ArrowDown, Check, Lock, PanelLeft, RefreshCw, AlertTriangle } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { usePageLoadMetrics, usePerformanceMonitor } from "@/hooks/usePerformanceMonitor";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -37,9 +36,9 @@ import { useNavigate, useParams } from "react-router-dom";
 import type { Message } from "@/types/chat";
 
 const models = [
-  { id: "gpt-4o-mini", name: "GPT-4o Mini", available: true },
-  { id: "gpt-4o", name: "GPT-4o", available: false },
-  { id: "claude-3", name: "Claude 3", available: false },
+  { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B", available: true },
+  { id: "llama-3.1-8b-instant", name: "Llama 3.1 8B (Fast)", available: true },
+  { id: "mixtral-8x7b-32768", name: "Mixtral 8x7B", available: true },
 ];
 
 const Chat = () => {
@@ -48,28 +47,32 @@ const Chat = () => {
   usePerformanceMonitor('Chat', process.env.NODE_ENV === 'development');
 
   const { sessionId } = useParams<{ sessionId?: string }>();
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState("general");
   const [isRestoring, setIsRestoring] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [hasNewMessages, setHasNewMessages] = useState(false); // Track new messages while scrolled up
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isUserAtBottomRef = useRef(true); // Track if user is at bottom
   const lastScrollTopRef = useRef(0); // Track scroll direction
+  const justCreatedSessionRef = useRef<string | null>(null); // Track newly created session to skip reload
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const [headerModel, setHeaderModel] = useState(models[0]);
   const [resetSignal, setResetSignal] = useState(0);
+  const [forceScrollSignal, setForceScrollSignal] = useState(0); // 🆕 Signal for VirtualizedMessageList
   const [isSpeakingGlobal, setIsSpeakingGlobal] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [includeHighlights, setIncludeHighlights] = useState(true);
   const [sharePayload, setSharePayload] = useState<string>("");
   const [activeHighlightsMessageId, setActiveHighlightsMessageId] = useState<string | null>(null);
+
   const { toast } = useToast();
 
   const {
     chats,
     currentChatId,
+    isDraftSession,
+    isCreatingSession,
     miniAgents,
     activeMiniAgentId,
     addMessage,
@@ -85,6 +88,12 @@ const Chat = () => {
     isStreaming,
     isLoadingChats,
     sidebarExpanded,
+    freeLimitExceeded,
+    limitExceededType,
+    setFreeLimitExceeded,
+    lastFailedMessage,
+    clearLastFailedMessage,
+    retryLastFailedMessage,
   } = useChatStore();
 
   const currentChat = chats.find((c) => c.id === currentChatId);
@@ -109,12 +118,37 @@ const Chat = () => {
     }
   }, [activeHighlightsMessageId]);
 
-  // Auto-close highlights panel when message has no highlights or doesn't exist
+  // 🧠 Preload MiniAgentPanel after idle for faster first open
   useEffect(() => {
-    if (activeHighlightsMessageId && (!activeHighlightsMessage || !activeHighlightsMessage.highlights || activeHighlightsMessage.highlights.length === 0)) {
+    const idle = (window as any).requestIdleCallback || ((fn: any) => setTimeout(fn, 600));
+    const cancelIdle = (window as any).cancelIdleCallback || clearTimeout;
+    const handle = idle(() => {
+      import("@/components/chat/MiniAgentPanel").catch(() => { });
+    });
+    return () => cancelIdle(handle);
+  }, []);
+
+  // Auto-close highlights panel when the message is deleted (not when highlights are empty)
+  useEffect(() => {
+    if (activeHighlightsMessageId && !activeHighlightsMessage) {
+      // Message no longer exists - close panel
       setActiveHighlightsMessageId(null);
     }
-  }, [activeHighlightsMessage?.highlights?.length, activeHighlightsMessageId]);
+  }, [activeHighlightsMessage, activeHighlightsMessageId]);
+
+
+
+  // 🔍 Debug: Log mini-agents state when it changes
+  useEffect(() => {
+    if (import.meta.env.DEV && miniAgents.length > 0) {
+      console.log('🤖 [Chat] miniAgents updated:', miniAgents.map(a => ({
+        id: a.id?.slice(0, 20) + '...',
+        messageId: a.messageId?.slice(0, 8) + '...',
+        hasConversation: a.hasConversation,
+        messagesCount: a.messages?.length
+      })));
+    }
+  }, [miniAgents]);
 
   useEffect(() => {
     if (currentChat && currentChat.messages.length === 0) {
@@ -133,37 +167,43 @@ const Chat = () => {
     let scrollTimeout: NodeJS.Timeout | null = null;
 
     const handleScroll = () => {
-      // Debounce scroll handling for performance
       if (scrollTimeout) {
         clearTimeout(scrollTimeout);
       }
 
       scrollTimeout = setTimeout(() => {
         const { scrollTop, scrollHeight, clientHeight } = scrollElement;
-
-        // Calculate distance from bottom
         const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
 
-        // User is at bottom if within 30px threshold
-        const isAtBottom = distanceFromBottom < 30;
+        // User is "at bottom" if they are within 150px (even more forgiving for smooth experience)
+        const isAtBottom = distanceFromBottom < 150;
 
-        // Detect if user scrolled up manually
-        const scrolledUp = scrollTop < lastScrollTopRef.current;
-
-        // If user scrolls up, immediately disable auto-scroll
-        if (scrolledUp && distanceFromBottom > 30) {
-          isUserAtBottomRef.current = false;
-        } else if (isAtBottom) {
-          isUserAtBottomRef.current = true;
-        }
-
-        // Update last scroll position
+        // Detect scroll direction
+        const isScrollingUp = scrollTop < lastScrollTopRef.current;
         lastScrollTopRef.current = scrollTop;
 
-        // Show jump button if scrolled up during streaming
-        const shouldShowButton = !isAtBottom && (isSendingMessage || isStreaming) && distanceFromBottom > 200;
-        setShowScrollToBottom(shouldShowButton);
-      }, 50); // 50ms debounce
+        // Smart Lock Logic:
+        // 1. If at bottom, LOCK and clear new message indicator
+        // 2. If scrolling UP and NOT at bottom, UNLOCK
+        // 3. If scrolling DOWN, don't change lock (let them return to bottom)
+
+        if (isAtBottom) {
+          isUserAtBottomRef.current = true;
+          setShowScrollToBottom(false);
+          setHasNewMessages(false); // Clear new message indicator when at bottom
+        } else if (isScrollingUp) {
+          isUserAtBottomRef.current = false;
+          // Show jump button if scrolled up more than 150px (ChatGPT-style threshold)
+          if (distanceFromBottom > 150) {
+            setShowScrollToBottom(true);
+          }
+        } else {
+          // Scrolling down but not at bottom yet - still show button
+          if (distanceFromBottom > 150) {
+            setShowScrollToBottom(true);
+          }
+        }
+      }, 8); // ~120fps for ultra-smooth detection
     };
 
     scrollElement.addEventListener('scroll', handleScroll, { passive: true });
@@ -171,51 +211,73 @@ const Chat = () => {
       scrollElement.removeEventListener('scroll', handleScroll);
       if (scrollTimeout) clearTimeout(scrollTimeout);
     };
-  }, [isSendingMessage, isStreaming]);
+  }, []); // Ref dependency handled by effect lifecycle
 
-  // GPT-Style auto-scroll during streaming (smooth, respects user position)
+  // Track new messages while user is scrolled up
   useEffect(() => {
-    if ((isSendingMessage || isStreaming) && isUserAtBottomRef.current) {
-      // Use RAF for smooth 60fps scrolling
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-        });
-      });
+    if (currentChat?.messages?.length && !isUserAtBottomRef.current && showScrollToBottom) {
+      setHasNewMessages(true);
     }
-  }, [isSendingMessage, isStreaming, currentChat?.messages.length, currentChat?.messages[currentChat?.messages.length - 1]?.content]);
+  }, [currentChat?.messages?.length, showScrollToBottom]);
 
-  // Hide scroll button when streaming stops
-  useEffect(() => {
-    if (!isSendingMessage && !isStreaming) {
-      setShowScrollToBottom(false);
-    }
-  }, [isSendingMessage, isStreaming]);
+  // � NO AUTO-SCROLL during streaming
+  // User controls scroll manually. Only show "scroll to bottom" button if they scroll up.
+  // This prevents page jumping/blinking during response generation.
 
-  // Smooth scroll when user sends message - center it nicely
+  // Initial scroll handling - scroll to bottom when session is loaded
   useEffect(() => {
-    if (currentChat && currentChat.messages.length > 0) {
-      const lastMessage = currentChat.messages[currentChat.messages.length - 1];
-      if (lastMessage.role === 'user') {
-        // User just sent a message - scroll to show it centered
+    if (currentChat && currentChat.messages.length > 0 && !isRestoring && !isLoadingChats) {
+      // Allow DOM to paint first, then scroll to bottom
+      const scrollTimer = setTimeout(() => {
         isUserAtBottomRef.current = true;
-        setShowScrollToBottom(false);
+        if (scrollRef.current) {
+          const { scrollHeight, clientHeight } = scrollRef.current;
+          scrollRef.current.scrollTo({ top: scrollHeight - clientHeight, behavior: "auto" });
+        }
+        // Also use bottomRef as backup
+        bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+      }, 50); // Reduced delay for snappier feel
 
-        // Small delay to ensure DOM is updated
-        setTimeout(() => {
-          requestAnimationFrame(() => {
-            bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-          });
-        }, 50);
-      }
+      return () => clearTimeout(scrollTimer);
     }
-  }, [currentChat?.messages.length]);
+  }, [currentChatId, resetSignal, isRestoring, isLoadingChats, currentChat?.messages?.length]);
+
 
   const scrollToBottom = () => {
     isUserAtBottomRef.current = true;
     setShowScrollToBottom(false);
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHasNewMessages(false);
+
+    // Smooth scroll with force signal for VirtualizedMessageList
+    setForceScrollSignal(prev => prev + 1);
+
+    // Fallback for non-virtualized views (loading/empty)
+    if (scrollRef.current) {
+      const { scrollHeight, clientHeight } = scrollRef.current;
+      scrollRef.current.scrollTo({
+        top: scrollHeight - clientHeight,
+        behavior: "smooth"
+      });
+    }
+    // Backup: use bottomRef
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   };
+
+  // Keyboard shortcut: End key to scroll to bottom
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // End key or Ctrl+End to scroll to bottom
+      if (e.key === 'End' || (e.ctrlKey && e.key === 'End')) {
+        if (showScrollToBottom) {
+          e.preventDefault();
+          scrollToBottom();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showScrollToBottom]);
 
   // Hydrate store and show skeleton while restoring
   useEffect(() => {
@@ -223,8 +285,21 @@ const Chat = () => {
 
     // Load session data from URL parameter if present
     const loadSession = async () => {
+      // Reset isRestoring when sessionId changes (show loading state)
+      if (sessionId) {
+        setIsRestoring(true);
+      }
+
       try {
         if (sessionId) {
+          // Skip reload if we just created this session (optimistic update is already in place)
+          if (justCreatedSessionRef.current === sessionId) {
+            console.log('⏭️ Skipping reload for just-created session:', sessionId);
+            justCreatedSessionRef.current = null; // Clear the flag
+            setIsRestoring(false);
+            return;
+          }
+
           // Check if session already loaded in state (prevent duplicate loads)
           const existingChat = chats.find(c => c.id === sessionId);
           const hasMessages = existingChat && existingChat.messages && existingChat.messages.length > 0;
@@ -240,9 +315,15 @@ const Chat = () => {
           if (!cancelled) {
             await loadSessionData(sessionId);
             setCurrentChat(sessionId);
+            // Set isRestoring to false after data is loaded
+            setIsRestoring(false);
           }
         } else {
-          // No session ID in URL - load all chats if empty
+          // No session ID in URL - we're in draft mode or viewing chat list
+          // Set isRestoring to false immediately since there's nothing to restore
+          setIsRestoring(false);
+
+          // Load all chats if empty
           if (chats.length === 0 && !cancelled) {
             await loadChatsFromBackend();
           }
@@ -250,31 +331,45 @@ const Chat = () => {
       } catch (error) {
         if (!cancelled) {
           console.error('Failed to load session:', error);
+
+          // Check for 404 Not Found or specific error message
+          const isNotFound = (error as any)?.message?.includes('404') ||
+            (error as any)?.message?.includes('not found') ||
+            (error as any)?.status === 404;
+
+          if (isNotFound) {
+            toast({
+              title: "Session not found",
+              description: "The chat session provided does not exist or has been deleted.",
+              variant: "destructive",
+            });
+            // Navigate to root to start fresh
+            navigate('/chat', { replace: true });
+            setIsRestoring(false);
+            return;
+          }
+
           toast({
             title: "Failed to load chat",
             description: "Could not load the requested chat session. Retrying...",
             variant: "destructive",
           });
 
-          // Retry once after 1 second
+          // Retry once after 1 second for non-404 errors
           setTimeout(() => {
             if (!cancelled && sessionId) {
               loadSessionData(sessionId).then(() => {
                 setCurrentChat(sessionId);
+                setIsRestoring(false);
               }).catch(err => {
                 console.error('Retry failed:', err);
+                setIsRestoring(false);
               });
             }
           }, 1000);
-        }
-      } finally {
-        if (!cancelled) {
-          // Brief skeleton to emulate smooth restore
-          setTimeout(() => {
-            if (!cancelled) {
-              setIsRestoring(false);
-            }
-          }, 300);
+
+          // Also set isRestoring false after scheduling retry
+          setIsRestoring(false);
         }
       }
     };
@@ -305,12 +400,45 @@ const Chat = () => {
   };
 
   const handleSend = async (message: string, attachments?: any[]) => {
-    let targetId = currentChatId;
-    if (!targetId) {
-      targetId = await createSessionIfNeeded();
+    // Validate message - don't create session for empty/trivial input
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage || trimmedMessage.length < 1) {
+      return;
     }
 
-    if (!targetId) return;
+    let targetId = currentChatId;
+    let isNewSession = false;
+
+    // If in draft mode or no current chat, create session NOW (on first real message)
+    if (!targetId || isDraftSession) {
+      console.log('🆕 Creating session on first message...');
+
+      // Clear restoring state since we're creating, not restoring
+      setIsRestoring(false);
+
+      try {
+        // createSessionIfNeeded now handles isCreatingSession state internally
+        targetId = await createSessionIfNeeded();
+        isNewSession = true;
+      } catch (error) {
+        console.error('Failed to create session:', error);
+        toast({
+          title: "Error",
+          description: "Failed to create chat session. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    if (!targetId) {
+      toast({
+        title: "Error",
+        description: "Failed to create chat session. Please try again.",
+        variant: "destructive",
+      });
+      return;
+    }
 
     try {
       // addMessage from chatStore handles:
@@ -319,13 +447,49 @@ const Chat = () => {
       // 3. Backend response handling
       // 4. AI response addition
       // All in one call - no duplicate API calls
-      await addMessage(targetId, { role: "user", content: message, attachments });
+
+      // Start the message sending - this adds the optimistic update
+      const messagePromise = addMessage(targetId, { role: "user", content: message, attachments });
+
+      // If this was a new session, navigate AFTER optimistic update is in place
+      if (isNewSession && targetId) {
+        // Mark this session as just-created to skip reload on navigation
+        justCreatedSessionRef.current = targetId;
+
+        // Small delay to ensure state update propagates before navigation
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        // Navigate to the new session URL with smooth transition
+        // Use replace to avoid back button going to empty /chat
+        navigate(`/chat/${targetId}`, { replace: true });
+      }
+
+      // Wait for message to complete
+      await messagePromise;
     } catch (error) {
       console.error("Error sending message:", error);
 
       toast({
         title: "Connection Error",
         description: "Unable to connect to the AI service. Please check your connection.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleRetryMessage = async () => {
+    if (!lastFailedMessage) return;
+
+    try {
+      await retryLastFailedMessage();
+      toast({
+        title: "Message Sent",
+        description: "Your message was successfully resent.",
+      });
+    } catch (error) {
+      toast({
+        title: "Retry Failed",
+        description: "Unable to send the message. Please try again.",
         variant: "destructive",
       });
     }
@@ -370,42 +534,76 @@ const Chat = () => {
       addHighlight(currentChatId, messageId, {
         text,
         color,
-        startOffset: 0,
-        endOffset: text.length,
+        startIndex: 0,
+        endIndex: text.length,
       });
     }
   };
 
-  const openApiSettings = () => {
-    if (isMobile) {
-      navigate("/settings?tab=api");
-    } else {
-      setSettingsTab("api");
-      setSettingsOpen(true);
+  const getMiniAgentByMessage = useCallback((messageId: string) => {
+    return miniAgents.find(a => a.messageId === messageId);
+  }, [miniAgents]);
+
+  const handleTextHighlight = useCallback((messageId: string, text: string, startIndex: number, endIndex: number) => {
+    if (currentChatId) {
+      addHighlight(currentChatId, messageId, {
+        text,
+        color: "yellow",
+        startIndex,
+        endIndex
+      });
     }
-  };
+  }, [currentChatId, addHighlight]);
+
+  const handleVirtualScrollStateChange = useCallback((isAtBottom: boolean) => {
+    setShowScrollToBottom(!isAtBottom);
+  }, []);
+
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+
+  const handleSpeak = useCallback((messageId: string, text: string) => {
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onend = () => {
+      setPlayingMessageId(null);
+      setIsSpeakingGlobal(false);
+    };
+    utterance.onerror = () => {
+      setPlayingMessageId(null);
+      setIsSpeakingGlobal(false);
+    };
+    setPlayingMessageId(messageId);
+    setIsSpeakingGlobal(true);
+    speechSynthesis.speak(utterance);
+  }, []);
+
+  const handleStopSpeaking = useCallback(() => {
+    speechSynthesis.cancel();
+    setPlayingMessageId(null);
+    setIsSpeakingGlobal(false);
+  }, []);
 
   return (
     <ChatErrorBoundary>
       <div className="flex h-screen min-h-0 overflow-hidden bg-background">
         <ConnectionStatus />
-        <ChatSidebar onOpenSettings={() => (isMobile ? navigate("/settings") : setSettingsOpen(true))} />
+        <ChatSidebar />
 
         {/* Main Chat Area */}
-        <div className="flex-1 flex flex-col min-w-0 w-full">
+        <div className="flex-1 flex flex-col min-w-0 relative">
           {/* Header */}
           <header className={cn(
-            "shrink-0 h-14 flex items-center justify-between gap-2 px-3 sm:px-4 transition-all duration-200",
-            sidebarExpanded
-              ? "bg-background border-b border-border/50"
-              : "bg-transparent"
+            "absolute top-0 left-0 right-0 h-14 flex items-center justify-between gap-2 px-3 sm:px-4 z-10 transition-all duration-200 ease-in-out",
+            sidebarExpanded && !isMobile
+              ? "bg-background border-b border-border shadow-sm"
+              : "bg-transparent border-b border-transparent"
           )}>
             <div className="flex items-center gap-2 min-w-0 flex-1">
               {isMobile && (
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className="text-muted-foreground"
+                  className="text-muted-foreground mr-1"
                   onClick={() => useChatStore.getState().toggleSidebar()}
                 >
                   <MoreHorizontal className="w-5 h-5" />
@@ -432,7 +630,10 @@ const Chat = () => {
                           if (m.available) {
                             setHeaderModel(m);
                           } else {
-                            openApiSettings();
+                            toast({
+                              title: "Model Unavailable",
+                              description: "This model requires a premium subscription.",
+                            });
                           }
                         }}
                         className={cn("gap-2", !m.available && "opacity-60")}
@@ -448,7 +649,17 @@ const Chat = () => {
                   </DropdownMenuContent>
                 </DropdownMenu>
               ) : (
-                <h2 className="text-sm sm:text-base font-medium text-foreground truncate">PRISM</h2>
+                <h2
+                  aria-label="Prism"
+                  className={cn(
+                    "font-bold tracking-tight leading-none truncate transition-all duration-300",
+                    sidebarExpanded ? "text-lg sm:text-xl" : "text-base sm:text-lg",
+                    // Subtle gradient for simple, beautiful look
+                    "bg-gradient-to-r from-foreground to-foreground/70 bg-clip-text text-transparent"
+                  )}
+                >
+                  Prism
+                </h2>
               )}
             </div>
             <div className="flex items-center gap-1 sm:gap-2 shrink-0">
@@ -461,11 +672,10 @@ const Chat = () => {
                       size="icon-sm"
                       className="text-muted-foreground"
                       aria-label="New Chat"
-                      onClick={async () => {
-                        const newSessionId = await useChatStore.getState().startNewSession();
-                        if (newSessionId) {
-                          navigate(`/chat/${newSessionId}`);
-                        }
+                      onClick={() => {
+                        // Enter draft mode - NO backend call
+                        useChatStore.getState().startDraftSession();
+                        navigate('/chat');
                       }}
                     >
                       <span className="sr-only">New Chat</span>
@@ -526,120 +736,200 @@ const Chat = () => {
           </header>
 
           {/* Messages - ⚡ VIRTUALIZED for performance */}
-          <div className="flex-1 overflow-hidden">
-            {(!currentChat || currentChat.messages.length === 0) && !isRestoring && !isLoadingChats && (
-              <ScrollArea className="flex-1 h-full">
-                <div className="max-w-3xl mx-auto py-4 sm:py-6 px-3 sm:px-6">
-                  <motion.div
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.4, ease: "easeOut" }}
-                    className="py-8 sm:py-16"
-                  >
-                    <EmptyWelcome />
-                  </motion.div>
-                </div>
-              </ScrollArea>
-            )}
-
-            {isLoadingChats && (
-              <ScrollArea className="flex-1 h-full">
-                <div className="max-w-3xl mx-auto py-4 sm:py-6 px-3 sm:px-6">
-                  <ConversationLoadingSkeleton />
-                </div>
-              </ScrollArea>
-            )}
-
-            {isRestoring && !isLoadingChats && (
-              <ScrollArea className="flex-1 h-full">
-                <div className="max-w-3xl mx-auto py-4 sm:py-6 px-3 sm:px-6">
-                  <div className="space-y-4">
-                    <div className="h-6 w-32 sm:w-40 bg-muted animate-pulse rounded" />
-                    <div className="space-y-2">
-                      <div className="h-4 w-full bg-muted animate-pulse rounded" />
-                      <div className="h-4 w-2/3 bg-muted animate-pulse rounded" />
+          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+            {/* Determine which view to show - MUTUALLY EXCLUSIVE */}
+            {(() => {
+              // Priority 1: Loading states
+              if (isLoadingChats) {
+                return (
+                  <ScrollArea className="flex-1 h-full scroll-smooth will-change-scroll" viewportRef={scrollRef}>
+                    <div className="w-full max-w-[850px] mx-auto pt-16 sm:pt-24 pb-4 sm:pb-10 px-4 pl-6 sm:pl-8 lg:pl-12">
+                      <ConversationLoadingSkeleton />
                     </div>
+                  </ScrollArea>
+                );
+              }
+
+              // Priority 2: Restoring state
+              if (isRestoring) {
+                return (
+                  <ScrollArea className="flex-1 h-full scroll-smooth will-change-scroll" viewportRef={scrollRef}>
+                    <div className="w-full max-w-[850px] mx-auto pt-16 sm:pt-24 pb-4 sm:pb-10 px-4 pl-6 sm:pl-8 lg:pl-12">
+                      <div className="space-y-4">
+                        <div className="h-6 w-32 sm:w-40 bg-muted animate-pulse rounded" />
+                        <div className="space-y-2">
+                          <div className="h-4 w-full bg-muted animate-pulse rounded" />
+                          <div className="h-4 w-2/3 bg-muted animate-pulse rounded" />
+                        </div>
+                      </div>
+                    </div>
+                  </ScrollArea>
+                );
+              }
+
+              // Priority 3: Creating session
+              if (isCreatingSession) {
+                return (
+                  <ScrollArea className="flex-1 h-full scroll-smooth will-change-scroll" viewportRef={scrollRef}>
+                    <div className="w-full max-w-[850px] mx-auto pt-16 sm:pt-24 pb-4 sm:pb-10 px-4 pl-6 sm:pl-8 lg:pl-12">
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ duration: 0.2 }}
+                        className="flex flex-col items-center justify-center py-16 gap-4"
+                      >
+                        <div className="relative">
+                          <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
+                            <Loader2 className="w-6 h-6 text-primary animate-spin" />
+                          </div>
+                          <motion.div
+                            className="absolute inset-0 rounded-full border-2 border-primary/30"
+                            animate={{ scale: [1, 1.2, 1], opacity: [0.5, 0, 0.5] }}
+                            transition={{ duration: 1.5, repeat: Infinity }}
+                          />
+                        </div>
+                        <p className="text-sm text-muted-foreground">Setting up your chat...</p>
+                      </motion.div>
+                    </div>
+                  </ScrollArea>
+                );
+              }
+
+              // Priority 4: Show messages if we have them
+              if (currentChat && currentChat.messages && currentChat.messages.length > 0) {
+                return (
+                  <div className="flex-1 min-h-0 relative">
+                    <VirtualizedMessageList
+                      messages={currentChat.messages}
+                      onHighlight={handleTextHighlight}
+                      onCreateMiniAgent={handleCreateMiniAgent}
+                      onOpenMiniAgent={setActiveMiniAgent}
+                      getMiniAgentByMessage={getMiniAgentByMessage}
+                      onOpenHighlightsPanel={(id) => setActiveHighlightsMessageId(id)}
+                      activeHighlightsMessageId={activeHighlightsMessageId}
+                      isSpeaking={playingMessageId}
+                      onSpeak={handleSpeak}
+                      onStopSpeaking={handleStopSpeaking}
+                      scrollToBottom={!showScrollToBottom}
+                      onScrollStateChange={handleVirtualScrollStateChange}
+                      isStreamingLogic={isStreaming}
+                      isSendingMessage={isSendingMessage}
+                      forceScrollSignal={forceScrollSignal}
+                    />
                   </div>
-                </div>
-              </ScrollArea>
-            )}
+                );
+              }
 
-            {currentChat && currentChat.messages.length > 0 && !isLoadingChats && (
-              <ScrollArea className="flex-1 h-full">
-                <div className="max-w-3xl mx-auto py-4 sm:py-6 px-3 sm:px-6 space-y-4 sm:space-y-6">
-                  {currentChat.messages.map((message) => {
-                    const agentForMessage = miniAgents.find(a => a.messageId === message.id);
-                    // Use index to detect last message
-                    const index = currentChat.messages.indexOf(message);
-                    return (
-                      <MessageBubble
-                        key={message.id}
-                        message={message}
-                        onHighlight={(messageId, text, startIndex, endIndex) => {
-                          if (currentChatId) {
-                            addHighlight(currentChatId, messageId, {
-                              text,
-                              color: "yellow",
-                              startOffset: startIndex,
-                              endOffset: endIndex
-                            });
-                          }
-                        }}
-                        onCreateMiniAgent={handleCreateMiniAgent}
-                        miniAgent={agentForMessage}
-                        hasMiniAgent={!!agentForMessage}
-                        onOpenMiniAgent={() => {
-                          if (agentForMessage) {
-                            setActiveMiniAgent(agentForMessage.id);
-                          }
-                        }}
-                        onOpenHighlights={() => setActiveHighlightsMessageId(message.id)}
-                        showHighlightsPanel={activeHighlightsMessageId === message.id}
-                        isSpeaking={isSpeakingGlobal && currentChatId === message.id}
-                        // 🧠 Thinking Logic (Latest AI message + isSendingMessage/isStreaming)
-                        isThinking={
-                          message.role === "assistant" &&
-                          index === currentChat.messages.length - 1 &&
-                          isSendingMessage
-                        }
-                      />
-                    );
-                  })}
-                  <div ref={bottomRef} />
-                </div>
-              </ScrollArea>
-            )}
+              // Priority 5: Empty welcome (draft mode or no messages)
+              return (
+                <ScrollArea className="flex-1 h-full scroll-smooth will-change-scroll" viewportRef={scrollRef}>
+                  <div className="w-full max-w-[850px] mx-auto pt-16 sm:pt-24 pb-4 sm:pb-10 px-4 pl-6 sm:pl-8 lg:pl-12">
+                    <motion.div
+                      initial={{ opacity: 0, y: 12 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, ease: "easeOut" }}
+                      className="py-8 sm:py-16"
+                    >
+                      <EmptyWelcome onSend={handleSend} />
+                    </motion.div>
+                  </div>
+                </ScrollArea>
+              );
+            })()}
 
-            {/* Jump to latest button */}
+          </div>
+
+          {/* Input with scroll button positioned above it */}
+          <div className="relative">
+            {/* Jump to latest button - Clean & Simple */}
             <AnimatePresence>
               {showScrollToBottom && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
+                <motion.button
+                  initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className="absolute bottom-20 sm:bottom-32 left-1/2 -translate-x-1/2 z-10"
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.2 }}
+                  onClick={scrollToBottom}
+                  aria-label="Jump to latest message"
+                  className={cn(
+                    "absolute z-20 left-1/2 -translate-x-1/2",
+                    "-top-14", // Position above input box
+                    "w-10 h-10", // 40px circular button
+                    "flex items-center justify-center",
+                    "rounded-full",
+                    "bg-background border border-border",
+                    "shadow-sm",
+                    "text-muted-foreground",
+                    "hover:bg-accent hover:text-foreground hover:border-primary/30",
+                    "active:scale-95",
+                    "transition-all duration-200",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                    "cursor-pointer"
+                  )}
                 >
-                  <Button
-                    onClick={scrollToBottom}
-                    size="sm"
-                    className="shadow-lg bg-background border border-border hover:bg-secondary gap-1.5 sm:gap-2 rounded-full px-3 sm:px-4 py-2 text-xs sm:text-sm"
-                  >
-                    <ChevronDown className="w-3 h-3 sm:w-4 sm:h-4" />
-                    <span className="hidden sm:inline">Jump to latest</span>
-                    <span className="sm:hidden">Latest</span>
-                  </Button>
+                  <ArrowDown className="w-5 h-5" />
+
+                  {/* New message indicator dot */}
+                  {hasNewMessages && (
+                    <motion.span
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full border-2 border-background"
+                    />
+                  )}
+                </motion.button>
+              )}
+            </AnimatePresence>
+
+            {/* Error Recovery Banner */}
+            <AnimatePresence>
+              {lastFailedMessage && lastFailedMessage.chatId === currentChatId && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10, height: 0 }}
+                  animate={{ opacity: 1, y: 0, height: "auto" }}
+                  exit={{ opacity: 0, y: 10, height: 0 }}
+                  className="mb-2 mx-4"
+                >
+                  <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-destructive/10 border border-destructive/20">
+                    <AlertTriangle className="w-4 h-4 text-destructive shrink-0" />
+                    <span className="text-sm text-destructive flex-1 truncate">
+                      Message failed to send
+                    </span>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                        onClick={clearLastFailedMessage}
+                      >
+                        Dismiss
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-3 text-xs border-destructive/30 text-destructive hover:bg-destructive/10"
+                        onClick={handleRetryMessage}
+                        disabled={isSendingMessage || isStreaming}
+                      >
+                        {isSendingMessage ? (
+                          <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3 h-3 mr-1.5" />
+                        )}
+                        Retry
+                      </Button>
+                    </div>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
-          </div>
 
-          {/* Input */}
-          <ChatInput
-            onSend={handleSend}
-            isLoading={isSendingMessage || isStreaming}
-            onOpenApiSettings={openApiSettings}
-            resetSignal={resetSignal}
-          />
+            <ChatInput
+              onSend={handleSend}
+              isLoading={isSendingMessage || isStreaming}
+              resetSignal={resetSignal}
+            />
+          </div>
         </div>
 
         {/* ⚡ LAZY: Mini Agent Panel */}
@@ -650,10 +940,10 @@ const Chat = () => {
         )}
 
         {/* ⚡ LAZY: Highlights Panel */}
-        {activeHighlightsMessage && activeHighlightsMessage.highlights && activeHighlightsMessage.highlights.length > 0 && (
+        {activeHighlightsMessage && (
           <Suspense fallback={<PanelLoadingFallback />}>
             <HighlightsPanel
-              highlights={activeHighlightsMessage.highlights}
+              highlights={activeHighlightsMessage.highlights || []}
               onClose={() => setActiveHighlightsMessageId(null)}
               onUpdateNote={async (highlightId, note) => {
                 if (currentChatId && activeHighlightsMessage) {
@@ -674,20 +964,9 @@ const Chat = () => {
           </Suspense>
         )}
 
-        {/* ⚡ LAZY: Settings Modal */}
-        {settingsOpen && (
-          <Suspense fallback={<ModalLoadingFallback />}>
-            <SettingsModal
-              open={settingsOpen}
-              onOpenChange={setSettingsOpen}
-              defaultTab={settingsTab}
-            />
-          </Suspense>
-        )}
-
         {/* ⚡ LAZY: Command Palette */}
         <Suspense fallback={<CommandPaletteLoadingFallback />}>
-          <CommandPalette onOpenSettings={() => (isMobile ? navigate("/settings") : setSettingsOpen(true))} />
+          <CommandPalette />
         </Suspense>
         {/* Share Dialog */}
         <Dialog open={shareOpen} onOpenChange={setShareOpen}>
@@ -757,27 +1036,78 @@ const Chat = () => {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Free Limit Exceeded Popup */}
+      <FreeLimitExceededPopup
+        open={freeLimitExceeded}
+        onOpenChange={setFreeLimitExceeded}
+        exceededType={limitExceededType}
+        onKeyAdded={() => {
+          // Key was added successfully, user can continue chatting
+          setFreeLimitExceeded(false);
+        }}
+      />
     </ChatErrorBoundary>
   );
 };
 
 export default Chat;
 
-const EmptyWelcome: React.FC = () => {
+const EmptyWelcome: React.FC<{ onSend: (text: string) => void }> = ({ onSend }) => {
   const { profile } = useProfileStore();
   const name = profile.name;
 
+  const starterTiles = [
+    { title: "Project Brainstorm", desc: "Ideas for my next big project", icon: "🚀", color: "from-blue-500/20 to-cyan-500/20" },
+    { title: "Code Architect", desc: "Design a scalable app architecture", icon: "💻", color: "from-purple-500/20 to-indigo-500/20" },
+    { title: "Deep Explanation", desc: "Explain quantum physics like I'm five", icon: "🔬", color: "from-amber-500/20 to-orange-500/20" },
+    { title: "Creative Writing", desc: "Write a sci-fi story set on Mars", icon: "🖋️", color: "from-rose-500/20 to-pink-500/20" },
+    { title: "Study Buddy", desc: "Help me memorize these concepts", icon: "📚", color: "from-green-500/20 to-teal-500/20" },
+    { title: "Data Analyst", desc: "Analyze this trend for insights", icon: "📊", color: "from-teal-500/20 to-emerald-500/20" },
+  ];
+
   return (
-    <div className="max-w-xl mx-auto text-center px-4">
-      <div className="inline-block rounded-xl sm:rounded-2xl px-3 sm:px-4 py-1.5 sm:py-2 mb-3 sm:mb-4 bg-card/50 border border-border">
-        <span className="text-xs sm:text-sm text-muted-foreground">Welcome to PRISM</span>
-      </div>
-      <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold tracking-tight text-foreground">
-        Hello{name ? `! ${name}` : "!"} <span className="align-middle">👋</span>
-      </h1>
-      <p className="text-xs sm:text-sm text-muted-foreground mt-2 sm:mt-3">
-        Ask me anything you want.
-      </p>
+    <div className="max-w-4xl mx-auto text-center px-6">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+      >
+        <div className="inline-flex items-center gap-2 rounded-full px-4 py-2 mb-8 bg-primary/5 border border-primary/10 backdrop-blur-sm">
+          <Bot className="w-4 h-4 text-primary" />
+          <span className="text-xs font-semibold tracking-wider text-primary uppercase">Prism Intelligence</span>
+        </div>
+
+        <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight text-foreground mb-4 leading-tight">
+          Welcome back{name ? `, ${name.split(' ')[0]}` : ""} <span className="inline-block animate-[wave_2s_ease-in-out_infinite]">👋</span>
+        </h1>
+
+        <p className="text-xl text-muted-foreground/80 max-w-xl mx-auto mb-16 leading-relaxed">
+          I'm your personal AI partner, ready to help you create, learn, and build anything you can imagine.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-left">
+          {starterTiles.map((tile, i) => (
+            <motion.button
+              key={tile.title}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4, delay: 0.2 + (i * 0.05) }}
+              onClick={() => onSend(tile.desc)}
+              className={cn(
+                "group relative p-6 rounded-2xl border border-border/50 bg-card/30 backdrop-blur-md",
+                "hover:border-primary/30 hover:shadow-xl hover:shadow-primary/5 hover:-translate-y-1 transition-all duration-300",
+                "overflow-hidden cursor-pointer"
+              )}
+            >
+              <div className={cn("absolute inset-0 bg-gradient-to-br opacity-0 group-hover:opacity-10 transition-opacity", tile.color)} />
+              <div className="text-3xl mb-4 transform group-hover:scale-110 transition-transform duration-300">{tile.icon}</div>
+              <h3 className="font-bold text-foreground mb-1 group-hover:text-primary transition-colors">{tile.title}</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">{tile.desc}</p>
+            </motion.button>
+          ))}
+        </div>
+      </motion.div>
     </div>
   );
 };

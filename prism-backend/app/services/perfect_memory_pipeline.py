@@ -375,28 +375,64 @@ class PerfectMemoryPipeline:
     
     async def _update_memory_systems(self, user_id: str, user_message: str, ai_response: str):
         """
-        Step 6: Update all memory systems
-        - Pinecone vector memory
-        - Neo4j graph relationships  
-        - MongoDB structured memory
+        🚀 PRO Step 6: Update ALL memory systems with enhanced extraction
+        - Enhanced memory extraction (PRO-level patterns + LLM)
+        - Cross-pollination to MongoDB, Redis, Neo4j, Pinecone
+        - Importance-based prioritization
         """
         try:
             import asyncio
             
-            # Process memories in parallel
+            # 🚀 PRO: Use enhanced memory extractor
+            from app.services.enhanced_memory_extractor import memory_extractor
+            from app.services.pro_memory_storage import store_memories_pro
+            
+            debug_logs = []
+            
+            # Check if message likely contains extractable info
+            if memory_extractor.should_extract_from_message(user_message):
+                print(f"🎯 [PRO Memory] Extracting from message for user {user_id}")
+                
+                # Extract memories using PRO extractor (LLM + patterns)
+                extractions = await memory_extractor.extract(user_id, user_message, use_llm=True)
+                
+                if extractions:
+                    print(f"🎯 [PRO Memory] Found {len(extractions)} extractions")
+                    
+                    # Store across ALL systems using PRO storage
+                    storage_results = await store_memories_pro(user_id, extractions, debug_logs)
+                    
+                    # Log storage results
+                    for key, results in storage_results.items():
+                        successes = [r for r in results if r.success]
+                        if successes:
+                            print(f"   ✅ {key}: Stored to {[r.target.value for r in successes]}")
+                else:
+                    print(f"🎯 [PRO Memory] No extractable info found")
+            
+            # Also process for vector memory (conversation context)
             vector_task = process_user_message_for_memory(user_id, user_message)
+            
+            # Legacy graph relationships (as backup)
             graph_task = self._update_graph_relationships(user_id, user_message)
+            
+            # Legacy structured memory (as backup)
             structured_task = self._update_structured_memory(user_id, user_message)
             
             await asyncio.gather(vector_task, graph_task, structured_task, return_exceptions=True)
             
-            print(f"✅ Memory systems updated for user {user_id}")
+            print(f"✅ [PRO] Memory systems updated for user {user_id}")
             
         except Exception as e:
             print(f"❌ Error updating memory systems: {e}")
+            # Fallback to basic processing
+            try:
+                await process_user_message_for_memory(user_id, user_message)
+            except:
+                pass
     
     async def _update_graph_relationships(self, user_id: str, message: str):
-        """Update Neo4j graph relationships based on message content"""
+        """Update Neo4j graph relationships based on message content (legacy backup)"""
         try:
             message_lower = message.lower()
             

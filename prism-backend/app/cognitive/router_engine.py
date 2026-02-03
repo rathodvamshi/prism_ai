@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Any, Optional, List
+import re
 
 from app.cognitive.temporal import resolve_time
 from app.cognitive.context_stack import (
@@ -50,14 +51,28 @@ def _split_multi_intent(text: str) -> List[str]:
 def _classify_intent(text: str) -> str:
     # Minimal heuristic classification aligned with catalog keys
     tl = (text or "").lower()
-    if any(k in tl for k in ["remind", "schedule", "set a reminder", "task"]):
-        return "task_create"
+    
+    # High priority: Media play detection (play, watch, listen commands)
+    if ("play" in tl or "watch" in tl or "listen" in tl):
+        # Exclude task/reminder commands
+        if not any(x in tl for x in ["remind", "schedule", "task", "todo", "role", "game"]):
+            return "media_play"
+    
+    
+    # Specific task intents need higher priority than generic "task" keyword
+    if any(k in tl for k in ["what tasks", "my tasks", "list tasks", "pending tasks", "completed tasks", "show tasks"]):
+        return "task_list"
+
+    if any(k in tl for k in ["cancel", "delete", "stop"]) and ("remind" in tl or "task" in tl):
+        return "task_cancel"
+    
     if any(k in tl for k in ["update", "reschedule"]):
         return "task_update"
-    if any(k in tl for k in ["cancel", "delete", "stop"]) and "remind" in tl:
-        return "task_cancel"
-    if any(k in tl for k in ["what tasks", "my tasks", "list tasks", "pending tasks", "completed tasks"]):
-        return "task_list"
+
+    # Generic Creation (lowest priority among task intents)
+    if any(k in tl for k in ["remind", "schedule", "set a reminder", "task", "todo"]):
+        return "task_create"
+
     if any(k in tl for k in ["what did we", "what do you remember", "recall"]):
         return "recall_memory"
     if any(k in tl for k in ["who is", "what is", "price", "news", "weather", "search", "google"]):
@@ -75,8 +90,23 @@ def _extract_entities(intent: str, pre: Dict[str, Any], raw_text: str) -> Dict[s
         tr = resolve_time(raw_text)
         ents["target_time"] = tr.target_time_iso
         ents["source_of_time"] = tr.source_of_time
-        # Description fallback to working text
-        ents["task_name"] = raw_text
+        
+        # Clean task name: use time-stripped text
+        task_name = tr.resolved_text
+        
+        # Further strip common prefixes
+        prefixes = [
+            "remind me to", "remind me", "set a reminder to", 
+            "set a reminder", "schedule", "create a task to", 
+            "add a task to", "task to", "please"
+        ]
+        for p in prefixes:
+            pattern = re.compile(re.escape(p), re.IGNORECASE)
+            task_name = pattern.sub("", task_name)
+        
+        # Clean punctuation and spaces
+        task_name = re.sub(r'^\s*(that|to)\s+', '', task_name, flags=re.IGNORECASE)
+        ents["task_name"] = task_name.strip()
     elif intent == "task_update":
         ents["new_value"] = raw_text
         tr = resolve_time(raw_text)
@@ -86,7 +116,7 @@ def _extract_entities(intent: str, pre: Dict[str, Any], raw_text: str) -> Dict[s
         ents["task_id"] = None
     elif intent == "task_list":
         ents["status"] = "pending" if "pending" in raw_text.lower() else ("completed" if "completed" in raw_text.lower() else "all")
-    elif intent in ("web_search", "recall_memory", "deep_research"):
+    elif intent in ("web_search", "recall_memory", "deep_research", "media_play"):
         ents["query"] = raw_text
     return ents
 

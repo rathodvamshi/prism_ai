@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, StickyNote, Trash2, Save, Highlighter, Search } from "lucide-react";
+import { X, StickyNote, Trash2, Save, Highlighter, Search, CheckCircle2, Loader2 } from "lucide-react";
 import { Highlight } from "@/types/chat";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
@@ -29,11 +29,13 @@ export const HighlightsPanel = ({
   const [panelWidth, setPanelWidth] = useState(350); // Default 350px
   const [isResizing, setIsResizing] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [savingNoteId, setSavingNoteId] = useState<string | null>(null);
+  const [recentlyDeletedIds, setRecentlyDeletedIds] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Helper function to get the display color (supports both HEX and color names)
-  const getDisplayColor = (color: string): string => {
+  // 🚀 Memoize color conversion for performance
+  const getDisplayColor = useCallback((color: string): string => {
     // If it's already a HEX color, use it directly
     if (color.startsWith('#')) {
       return color;
@@ -57,29 +59,42 @@ export const HighlightsPanel = ({
     };
 
     return colorMap[color.toLowerCase()] || "#FFD93D"; // Default to yellow if not found
-  };
+  }, []);
 
-  const handleSaveNote = (highlightId: string) => {
+  const handleSaveNote = useCallback(async (highlightId: string) => {
     if (noteText.trim()) {
-      onUpdateNote(highlightId, noteText.trim());
+      setSavingNoteId(highlightId);
+      try {
+        await onUpdateNote(highlightId, noteText.trim());
+      } finally {
+        setSavingNoteId(null);
+      }
     }
     setEditingId(null);
     setNoteText("");
-  };
+  }, [noteText, onUpdateNote]);
 
-  const handleStartEdit = (highlight: Highlight) => {
+  const handleStartEdit = useCallback((highlight: Highlight) => {
     setEditingId(highlight.id);
     setNoteText(highlight.note || "");
-  };
+  }, []);
 
-  const handleDeleteHighlight = async (highlightId: string) => {
+  const handleDeleteHighlight = useCallback(async (highlightId: string) => {
     // Add to deleting set for loading state
     setDeletingIds(prev => new Set(prev).add(highlightId));
     
     try {
       await onDeleteHighlight(highlightId);
-      // The highlight will be removed from the list via store update
-      // No need to manually remove from deletingIds as component will re-render
+      // Add to recently deleted for smooth exit animation
+      setRecentlyDeletedIds(prev => new Set(prev).add(highlightId));
+      // Clean up after animation
+      setTimeout(() => {
+        setRecentlyDeletedIds(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(highlightId);
+          return newSet;
+        });
+      }, 300);
     } catch (error) {
       // Remove from deleting set if error occurs
       setDeletingIds(prev => {
@@ -88,7 +103,7 @@ export const HighlightsPanel = ({
         return newSet;
       });
     }
-  };
+  }, [onDeleteHighlight]);
 
   useEffect(() => {
     if (scrollRef.current) {

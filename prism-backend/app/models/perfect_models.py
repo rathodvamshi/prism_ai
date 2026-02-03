@@ -32,6 +32,17 @@ class PyObjectId(ObjectId):
         json_schema.update(type="string")
         return json_schema
 
+# 📌 USER PROFILE SUB-MODEL
+class UserProfile(BaseModel):
+    """Extended user profile with location and preferences"""
+    location: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    timezone: Optional[str] = "Asia/Kolkata"
+    language: Optional[str] = "en"
+    preferences: Dict[str, Any] = {}
+
 # 📌 USERS COLLECTION MODEL
 class UserModel(BaseModel):
     """
@@ -46,6 +57,7 @@ class UserModel(BaseModel):
     interests: List[str] = []
     responseStyle: Optional[str] = "friendly"
     avatar: Optional[str] = ""
+    profile: Optional[UserProfile] = Field(default_factory=UserProfile)  # Extended profile
     createdAt: datetime = Field(default_factory=datetime.utcnow)
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
 

@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from app.models.highlight_models import (
     HighlightData, 
     CreateHighlightRequest, 
@@ -20,25 +21,363 @@ from app.models.highlight_models import (
 )
 from app.db.mongo_client import get_database
 from app.utils.llm_client import get_llm_client, get_llm_response
+from app.utils.auth import get_current_user_from_session
 
 router = APIRouter(prefix="/api", tags=["highlights"])
 logger = logging.getLogger(__name__)
+
+
+# =====================================================
+# HIGHLIGHT HELPER FUNCTIONS
+# =====================================================
+
+def strip_markdown(content: str) -> str:
+    """
+    Strip markdown syntax from text to get rendered output.
+    This matches what the user sees in the DOM after markdown rendering.
+    
+    IMPORTANT: Must stay in sync with Frontend/src/lib/semanticHighlight.tsx
+    """
+    if not content:
+        return ""
+    stripped = content
+    
+    # 1. Remove bold markers **text** → text
+    stripped = re.sub(r'\*\*([^*]+)\*\*', r'\1', stripped)
+    # 2. Remove italic markers *text* or _text_ → text
+    stripped = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'\1', stripped)
+    stripped = re.sub(r'_([^_]+)_', r'\1', stripped)
+    # 3. Remove inline code backticks `code` → code
+    stripped = re.sub(r'`([^`]+)`', r'\1', stripped)
+    # 4. Remove strikethrough ~~text~~ → text
+    stripped = re.sub(r'~~([^~]+)~~', r'\1', stripped)
+    # 5. Remove headers # ## ### etc (keep the text)
+    stripped = re.sub(r'^#{1,6}\s+', '', stripped, flags=re.MULTILINE)
+    # 6. Remove link syntax [text](url) → text
+    stripped = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', stripped)
+    
+    return stripped
+
+
+def clean_message_content(content: str) -> str:
+    """Remove internal metadata from message content."""
+    if not content:
+        return ""
+    clean = content
+    
+    # Remove THINKING_DATA blocks
+    clean = re.sub(r'<!--\s*THINKING_DATA:.*?-->', '', clean, flags=re.DOTALL)
+    # Remove ACTION blocks
+    clean = re.sub(r'<!--\s*ACTION:.*?-->', '', clean, flags=re.DOTALL)
+    
+    return clean.strip()
+
+
+def get_rendered_text(content: str) -> str:
+    """Get the RENDERED text (metadata cleaned + markdown stripped)."""
+    return strip_markdown(clean_message_content(content))
+
 
 # =====================================================
 # MINI-AGENT OPTIMIZATION HELPERS
 # =====================================================
 
-# Optimized system prompt (150 tokens vs 400) - handles both snippet and general questions
-MINI_AGENT_SYSTEM_PROMPT = """You are the Mini-Agent, a smart and structured helper.
-Your goal is to provide clear, well-organized answers.
+# 🧠 INTELLIGENT STRUCTURED OUTPUT SYSTEM PROMPT
+# Handles content-type detection, math/matrix rendering, and structured responses
+MINI_AGENT_SYSTEM_PROMPT = """You are the Mini-Agent, a smart helper with INTELLIGENT OUTPUT RENDERING.
 
-Guidelines:
-- **Structure**: Use Markdown headers (###), bullet points, and spacing to make your answer easy to read.
-- **Highlighting**: Use **bold text** to emphasize important keywords, numbers, or conclusions.
-- **Tone**: Professional, helpful, and direct. Similar to the main assistant but more concise.
-- **Content**: Answer the user's question directly. If explaining text, break it down clearly.
+## 🧠 CONTENT-TYPE DETECTION (APPLY AUTOMATICALLY)
+Before responding, classify the query type and SWITCH rendering mode:
 
-Shape your response so the user can understand the key points at a glance.
+### CONTENT TYPES:
+1. **MATHEMATICS** → Detect: +, -, *, /, ^, =, ∑, ∫, √, π, "solve", "calculate", "evaluate"
+2. **MATRIX/LINEAR ALGEBRA** → Detect: "matrix", "vector", "determinant", brackets [], arrays
+3. **CODE** → Detect: code keywords, syntax, "implement", "function", "write code"
+4. **LOGIC/ALGORITHM** → Detect: "steps", "process", "algorithm", "if-then", "prove"
+5. **EXPLANATION** → Detect: "what is", "explain", "how does", "why"
+6. **MIXED** → Multiple types detected → Use appropriate formatting for each part
+
+## 📐 MATHEMATICAL RENDERING RULES (MANDATORY)
+When math is detected:
+- **Equations**: Center each equation on its own line
+- **Step-by-step**: Show derivation with numbered steps
+```
+Given: 2x + 3 = 11
+Step 1: 2x = 11 - 3 = 8
+Step 2: x = 8 ÷ 2 = 4
+∴ x = 4
+```
+- **Fractions**: Use proper vertical layout:
+```
+      a
+  ─────────
+      b
+```
+- **Powers**: Use superscripts: x², n³, e^x
+- **Roots**: Use √ symbol: √4 = 2, ³√8 = 2
+
+## 🧮 MATRIX RENDERING (CRITICAL - NEVER USE MARKDOWN TABLES)
+
+### ⚠️ MATRIX vs TABLE - KNOW THE DIFFERENCE!
+
+❌ **NEVER use markdown tables for matrices:**
+```
+WRONG:
+| User | Movie 1 | Movie 2 |
+| --- | --- | --- |
+| 1 | 5 | 0 |
+```
+
+❌ **NEVER use inline notation:**
+```
+WRONG: [[1,2],[3,4]] or [1,2;3,4]
+```
+
+✅ **ALWAYS use visual bracket format:**
+
+**Small Matrix (show fully):**
+```
+    ⎡ 1  2 ⎤       ⎡ 5  6 ⎤       ⎡  6   8 ⎤
+A = ⎣ 3  4 ⎦   B = ⎣ 7  8 ⎦   A+B=⎣ 10  12 ⎦
+```
+
+**Data/Sparse Matrix (User-Item, Ratings):**
+```
+User-Movie Rating Matrix (1000 × 1000):
+
+       M₁   M₂   M₃  ...  M₁₀₀₀
+U₁  ⎡  5    0    3   ...   0   ⎤
+U₂  ⎢  0    4    0   ...   2   ⎥
+U₃  ⎢  3    0    5   ...   0   ⎥
+⋮   ⎢  ⋮    ⋮    ⋮    ⋱    ⋮   ⎥
+U₁₀₀₀⎣  0    2    0   ...   4   ⎦
+
+• Sparsity: ~95% zeros
+• Non-zero: ~50,000 ratings
+```
+
+**Large Matrix (use ellipsis):**
+```
+    ⎡ a₁₁  a₁₂  ...  a₁ₙ ⎤
+A = ⎢  ⋮    ⋮    ⋱    ⋮  ⎥
+    ⎣ aₘ₁  aₘ₂  ...  aₘₙ ⎦
+```
+
+## 📊 CALCULATION INTELLIGENCE (STEP-BY-STEP)
+For any calculation:
+1. **Given**: State all provided values
+2. **Formula**: Show the formula to be used
+3. **Substitution**: Plug in values
+4. **Calculation**: Show each step
+5. **Answer**: Box or highlight final result
+6. **Verify** (optional): Quick sanity check
+
+## 💻 CODE RENDERING RULES
+- ALWAYS use ```language code blocks
+- Preserve exact indentation
+- NEVER mix code with explanation inline
+- Add brief comments for complex logic
+
+## 🎨 RESPONSE STRUCTURE
+```
+🎯 **[Direct Answer/Opening]**
+
+[Core content with appropriate formatting per type]
+
+**📌 Key Points:**
+• **Point 1** - brief explanation
+• **Point 2** - brief explanation
+
+💡 **Pro tip**: [useful insight]
+
+🚀 [Follow-up suggestion]
+```
+
+## ⚡ INTELLIGENCE MODES
+- **"explain simply"** → Fewer symbols, more analogies
+- **"derive/prove"** → Full mathematical rigor
+- **"solve"** → Step-by-step with final answer highlighted
+- **"compare"** → Side-by-side comparison table
+
+## 📊 COMPARISON TABLES (When comparing things)
+Use clean ASCII tables for comparisons:
+```
+┌──────────────┬─────────────┬─────────────┐
+│   Feature    │   Option A  │   Option B  │
+├──────────────┼─────────────┼─────────────┤
+│ Speed        │ ⭐⭐⭐⭐⭐    │ ⭐⭐⭐        │
+│ Memory       │ ⭐⭐⭐       │ ⭐⭐⭐⭐⭐    │
+│ Ease of Use  │ ⭐⭐⭐⭐     │ ⭐⭐⭐⭐     │
+└──────────────┴─────────────┴─────────────┘
+```
+
+## 📈 FLOWCHARTS & DIAGRAMS (For algorithms/processes)
+Use ASCII flowcharts:
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│  START  │────▶│ PROCESS │────▶│   END   │
+└─────────┘     └─────────┘     └─────────┘
+                    │
+              ◆─────┴─────◆
+              │ DECISION? │
+              ◆─────┬─────◆
+           Yes│     │No
+              ▼     ▼
+```
+
+## 🎯 TL;DR BOXES (For complex explanations)
+Always include a quick summary box:
+```
+┌─────────────────────────────────────────┐
+│ 💡 TL;DR                                │
+├─────────────────────────────────────────┤
+│ • Main point 1                          │
+│ • Main point 2                          │
+│ • Key takeaway                          │
+└─────────────────────────────────────────┘
+```
+
+## 🎓 DIFFICULTY & PREREQUISITES
+For learning content, show:
+```
+📊 **Difficulty**: ⭐⭐⭐☆☆ (Intermediate)
+📚 **Prerequisites**: Basic calculus, Linear algebra basics
+⏱️ **Time to learn**: ~15 minutes
+🎯 **You'll learn**: [specific skill/concept]
+```
+
+## 🧠 MEMORY HOOKS & MNEMONICS
+Help users remember with tricks:
+```
+💡 **Remember it as:**
+"PEMDAS" = **P**lease **E**xcuse **M**y **D**ear **A**unt **S**ally
+(Parentheses, Exponents, Multiplication, Division, Addition, Subtraction)
+
+🎵 **Memory trick:**
+"SOH-CAH-TOA" for trigonometry:
+• **S**in = **O**pposite / **H**ypotenuse
+• **C**os = **A**djacent / **H**ypotenuse
+• **T**an = **O**pposite / **A**djacent
+```
+
+## 🌍 REAL-WORLD APPLICATIONS
+Always show practical uses:
+```
+🏭 **Where is this used?**
+• 🎮 **Gaming**: Physics engines use matrices for 3D transformations
+• 💱 **Finance**: Portfolio optimization uses linear algebra
+• 🤖 **AI/ML**: Neural networks are giant matrix multiplications
+• 📱 **Apps**: Image filters apply matrix convolutions
+```
+
+## 📋 QUICK REFERENCE CARDS
+Provide cheat-sheet style summaries:
+```
+┌─────────────────────────────────────────┐
+│ 📌 QUICK REFERENCE: Derivatives         │
+├─────────────────────────────────────────┤
+│ d/dx(xⁿ) = nxⁿ⁻¹                         │
+│ d/dx(eˣ) = eˣ                            │
+│ d/dx(ln x) = 1/x                        │
+│ d/dx(sin x) = cos x                     │
+│ d/dx(cos x) = -sin x                    │
+└─────────────────────────────────────────┘
+```
+
+## ⚠️ COMMON MISTAKES TO AVOID
+```
+🚫 **Common Mistakes:**
+
+❌ **Wrong**: Forgetting to transpose before multiplication
+✅ **Right**: Always check dimensions: (m×n) × (n×p) = (m×p)
+
+❌ **Wrong**: Dividing matrices directly (A/B)
+✅ **Right**: Multiply by inverse: A × B⁻¹
+
+❌ **Wrong**: Assuming AB = BA (matrices don't commute!)
+✅ **Right**: Matrix multiplication order matters
+```
+
+## 🧪 TRY IT YOURSELF
+Include interactive challenges:
+```
+✏️ **Try it yourself:**
+Calculate the determinant of:
+    ⎡ 2  3 ⎤
+A = ⎣ 1  4 ⎦
+
+💡 Hint: det(A) = ad - bc
+🔍 Answer: 2(4) - 3(1) = 8 - 3 = **5**
+```
+
+## 🏆 PRO TIPS & BEST PRACTICES
+```
+💡 **Pro Tips:**
+
+1️⃣ **Performance**: Use NumPy for matrices > 100×100
+2️⃣ **Memory**: Sparse matrices save 90%+ memory
+3️⃣ **Debugging**: Print shapes before operations
+4️⃣ **Readability**: Name matrices descriptively (user_ratings, not A)
+```
+
+## 🔗 RELATED TOPICS
+Always suggest related learning:
+```
+🔗 **Related Topics:**
+• ➡️ Eigenvalues & Eigenvectors
+• ➡️ Singular Value Decomposition (SVD)
+• ➡️ Matrix Factorization
+• ➡️ Principal Component Analysis (PCA)
+```
+
+## 🚫 STRICT RULES
+- ❌ Never show matrices as [[1,2],[3,4]]
+- ❌ Never inline fractions as a/b when proper layout fits
+- ❌ Never mix steps into paragraphs for calculations
+- ❌ Never omit units in physics/engineering problems
+- ✅ Math must look like it would in a textbook
+- ✅ Structure must be immediately scannable
+- ✅ Always include 3-5 emojis and **bold** key terms
+
+## 🧪 QUALITY CHECK (Before Sending)
+1. Would this look correct in a textbook? If no → reformat
+2. Is the structure clear at a glance? If no → add spacing/headers
+3. Are key terms bolded? If no → add **bold**
+4. Has 3+ emojis? If no → add appropriate emojis
+
+## 🚀 SMART SUGGESTIONS (MANDATORY - END EVERY RESPONSE)
+
+**ALWAYS end with contextual next-step suggestions:**
+
+**For Math/Calculations:**
+• 🔢 "Want more examples with different values?"
+• 📐 "Should I explain the derivation?"
+• ✏️ "Want practice problems?"
+
+**For Concepts/Explanations:**
+• 🔮 "Want me to break down [specific part]?"
+• 🎯 "Should I show real-world applications?"
+• 📊 "Want a comparison with alternatives?"
+
+**For Code/Technical:**
+• 💻 "Want a working code example?"
+• 🛠️ "Should I walk through implementation?"
+• ⚡ "Curious about optimizations?"
+
+**FORMAT:**
+```
+---
+🚀 **What's Next?**
+• [Suggestion 1]
+• [Suggestion 2]
+```
+
+**RULES:**
+- ✅ Always 2+ specific suggestions
+- ✅ Use action verbs: "show", "break down", "compare"
+- ✅ Reference actual topic terms
+- ❌ Never: "Let me know if you have questions" (too generic)
+- ❌ Never: "Feel free to ask" (robotic)
 """
 
 def generate_cache_key(snippet: str, question: str) -> str:
@@ -103,57 +442,227 @@ async def generate_mini_agent_title(selected_text: str) -> str:
 
 @router.post("/highlights", response_model=dict, status_code=201)
 async def create_highlight(request: CreateHighlightRequest):
-    """Create a new highlight"""
+    """
+    Create a new highlight with strict validation.
+    
+    Golden Rules:
+    - NEVER mutate message text
+    - Use absolute character offsets (0-indexed)
+    - Validate indexes against message length
+    - Generate message hash for drift detection
+    
+    IMPORTANT: Highlights use RENDERED text positions (markdown stripped)
+    because that's what users see and select in the DOM.
+    """
     try:
         db = get_database()
-        highlights_collection = db.highlights
+        highlights_collection = db.message_highlights
         
-        # Generate unique highlight ID
+        # ============================================
+        # 🛡️ VALIDATION PHASE
+        # ============================================
+        
+        # 1. Validate text is not empty
+        if not request.text or not request.text.strip():
+            raise HTTPException(status_code=400, detail="Highlight text cannot be empty")
+        
+        # 2. Validate message text is provided
+        if not request.messageText:
+            raise HTTPException(status_code=400, detail="Message text required for validation")
+        
+        # 🔧 USE RENDERED TEXT (markdown stripped) for validation
+        # This is critical: DOM selection offsets are based on what user SEES (no markdown syntax)
+        rendered_text = get_rendered_text(request.messageText)
+        message_length = len(rendered_text)
+        
+        logger.info(f"🔍 Highlight validation: rendered_length={message_length}, original_length={len(request.messageText)}")
+        
+        # ============================================
+        # 🔧 SMART POSITION FINDING
+        # The DOM selection offsets may not exactly match our rendered text
+        # because DOM rendering and regex-based markdown stripping can differ.
+        # Strategy: Find the exact text near the given position.
+        # ============================================
+        
+        final_start = request.startIndex
+        final_end = request.endIndex
+        
+        # First, check if text matches at exact position
+        if final_start >= 0 and final_end <= message_length:
+            extracted_text = rendered_text[final_start:final_end]
+        else:
+            extracted_text = ""
+        
+        if extracted_text != request.text:
+            logger.info(f"⚠️ Text mismatch at original position [{final_start}:{final_end}]")
+            logger.info(f"   Expected: '{request.text[:30]}...'")
+            logger.info(f"   Found: '{extracted_text[:30]}...'")
+            
+            # Search for exact text in a radius around original position
+            search_radius = 50
+            search_start = max(0, final_start - search_radius)
+            search_end = min(message_length, final_end + search_radius)
+            search_area = rendered_text[search_start:search_end]
+            
+            local_index = search_area.find(request.text)
+            
+            if local_index != -1:
+                # Found nearby - use corrected position
+                final_start = search_start + local_index
+                final_end = final_start + len(request.text)
+                logger.info(f"🔧 Auto-corrected to position [{final_start}:{final_end}]")
+            else:
+                # Try global search as fallback
+                global_index = rendered_text.find(request.text)
+                if global_index != -1:
+                    # Check if reasonably close (within 100 chars)
+                    if abs(global_index - request.startIndex) < 100:
+                        final_start = global_index
+                        final_end = global_index + len(request.text)
+                        logger.info(f"🔧 Found text at global position [{final_start}:{final_end}]")
+                    else:
+                        logger.warning(f"⚠️ Text found but far from selection (at {global_index}, expected near {request.startIndex})")
+                        # Still use it but log warning - might be duplicate text
+                        final_start = global_index
+                        final_end = global_index + len(request.text)
+                else:
+                    logger.error(f"❌ Cannot find text '{request.text[:50]}...' in rendered content")
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": "Text not found in message",
+                            "message": "Could not find the selected text in the message content",
+                            "provided": request.text,
+                            "hint": "The message content may have changed"
+                        }
+                    )
+        
+        # Final verification
+        verify_text = rendered_text[final_start:final_end]
+        if verify_text != request.text:
+            logger.error(f"❌ Final verification failed")
+            raise HTTPException(
+                status_code=400,
+                detail="Position correction failed - text still doesn't match"
+            )
+        
+        # Update request with corrected indexes
+        request.startIndex = final_start
+        request.endIndex = final_end
+        logger.info(f"✅ Validated highlight: '{request.text[:30]}...' at [{final_start}:{final_end}]")
+        
+        # 5. Generate message hash for drift detection (use rendered text for consistency)
+        message_hash = hashlib.sha256(rendered_text.encode('utf-8')).hexdigest()
+        
+        # ============================================
+        # 🔑 ID GENERATION & DUPLICATE CHECK
+        # ============================================
+        
         highlight_id = generate_highlight_id(
             request.sessionId, request.messageId, request.startIndex, request.endIndex
         )
         
-        # Check if highlight already exists (prevent duplicates)
+        # ============================================
+        # 🔍 ENHANCED DUPLICATE DETECTION
+        # ============================================
+        
+        # 1. Check exact duplicate by ID (idempotency)
         existing = await highlights_collection.find_one({"highlightId": highlight_id})
         if existing:
-            # Idempotency: Return existing highlight as success
+            # Return existing highlight
             existing["_id"] = str(existing["_id"])
             if isinstance(existing["createdAt"], datetime):
                 existing["createdAt"] = existing["createdAt"].isoformat()
             
+            logger.info(f"✅ Idempotent: Highlight already exists: {highlight_id}")
             return {
                 "success": True, 
                 "highlight": existing,
                 "isExisting": True
             }
         
+        # 2. Check for overlapping highlights with same text (prevent near-duplicates)
+        # Find all highlights for this message
+        message_highlights = await highlights_collection.find({
+            "sessionId": request.sessionId,
+            "messageId": request.messageId
+        }).to_list(length=None)
+        
+        for existing_h in message_highlights:
+            # Check if ranges overlap
+            existing_start = existing_h.get("startIndex", 0)
+            existing_end = existing_h.get("endIndex", 0)
+            existing_text = existing_h.get("text", "")
+            
+            # Ranges overlap if: start1 < end2 AND start2 < end1
+            ranges_overlap = (request.startIndex < existing_end and existing_start < request.endIndex)
+            
+            # Check if text is identical or very similar (>90% match)
+            text_match = existing_text.strip() == request.text.strip()
+            
+            if ranges_overlap and text_match:
+                # This is a duplicate - return the existing one
+                existing_h["_id"] = str(existing_h["_id"])
+                if isinstance(existing_h.get("createdAt"), datetime):
+                    existing_h["createdAt"] = existing_h["createdAt"].isoformat()
+                
+                logger.info(
+                    f"🔄 Duplicate detected: Existing highlight [{existing_start}:{existing_end}] "
+                    f"overlaps with new [{request.startIndex}:{request.endIndex}] and has same text"
+                )
+                return {
+                    "success": True,
+                    "highlight": existing_h,
+                    "isExisting": True,
+                    "reason": "duplicate_overlap"
+                }
+        
+        # ============================================
+        # 💾 DATABASE SAVE
+        # ============================================
+        
         highlight_data = {
             "highlightId": highlight_id,
+            "uniqueKey": highlight_id,  # ✅ FIX: Required for unique index
             "userId": request.userId,
             "sessionId": request.sessionId,
             "messageId": request.messageId,
             "startIndex": request.startIndex,
             "endIndex": request.endIndex,
             "color": request.color,
-            "text": request.text,
-            "note": request.note if request.note else None,
+            "text": request.text.strip(),
+            "messageHash": message_hash,  # ✅ NEW: Drift detection
+            "note": request.note.strip() if request.note else None,
             "createdAt": datetime.utcnow()
         }
         
         result = await highlights_collection.insert_one(highlight_data)
         
         if result.inserted_id:
-            # Convert ObjectId to string for response
-            highlight_data["_id"] = str(result.inserted_id)
-            # Or better, exclude it if not in response_model, but dict allows anything.
-            # Ideally we return what the frontend expects. If frontend doesn't need _id, pop it.
-            # But safer to stringify.
+            # Remove MongoDB _id from response
             if "_id" in highlight_data:
                 del highlight_data["_id"]
                 
-             # Ensure createdAt is string
+            # Ensure createdAt is ISO string
             if isinstance(highlight_data["createdAt"], datetime):
                 highlight_data["createdAt"] = highlight_data["createdAt"].isoformat()
+            
+            logger.info(
+                f"✅ Highlight created:\n"
+                f"  ID: {highlight_id}\n"
+                f"  Message: {request.messageId}\n"
+                f"  Range: [{request.startIndex}:{request.endIndex}]\n"
+                f"  Text: '{request.text[:50]}...'\n"
+                f"  Hash: {message_hash[:16]}..."
+            )
+            
+            # 🚀 CRITICAL: Invalidate cache after creating highlight!
+            try:
+                from app.services.cache_service import cache_service
+                await cache_service.invalidate_session_data(request.userId, request.sessionId)
+                logger.info(f"🗑️ Cache invalidated for session {request.sessionId}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to invalidate cache (non-critical): {e}")
             
             return {
                 "success": True,
@@ -162,43 +671,38 @@ async def create_highlight(request: CreateHighlightRequest):
         else:
             raise HTTPException(status_code=500, detail="Failed to create highlight")
             
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"❌ Error creating highlight: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error creating highlight: {str(e)}")
 
-@router.get("/highlights/{session_id}", response_model=HighlightResponse)
-async def get_highlights(session_id: str):
-    """Get all highlights for a session"""
-    try:
-        db = get_database()
-        highlights_collection = db.highlights
-        
-        # Exclude MongoDB _id field
-        highlights = await highlights_collection.find(
-            {"sessionId": session_id},
-            {"_id": 0}
-        ).to_list(length=None)
-        
-        # Pydantic handles datetime serialization automatically
-        
-        return HighlightResponse(highlights=highlights)
-        
-    except Exception as e:
-        import traceback
-        # Return empty list on failure instead of 500 to prevent UI crash loops
-        print(f"⚠️ Error fetching highlights (returning empty): {str(e)}")
-        traceback.print_exc()
-        return HighlightResponse(highlights=[])
 
 @router.delete("/highlights/{highlight_id}")
 async def delete_highlight(highlight_id: str):
     """Delete a highlight"""
     try:
         db = get_database()
-        highlights_collection = db.highlights
+        highlights_collection = db.message_highlights
+        
+        # First, fetch the highlight to get session info for cache invalidation
+        highlight = await highlights_collection.find_one({"highlightId": highlight_id})
         
         result = await highlights_collection.delete_one({"highlightId": highlight_id})
         
         if result.deleted_count > 0:
+            # 🚀 CRITICAL: Invalidate cache after deleting highlight!
+            if highlight:
+                try:
+                    from app.services.cache_service import cache_service
+                    user_id = highlight.get("userId")
+                    session_id = highlight.get("sessionId")
+                    if user_id and session_id:
+                        await cache_service.invalidate_session_data(user_id, session_id)
+                        logger.info(f"🗑️ Cache invalidated for session {session_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to invalidate cache (non-critical): {e}")
+            
             return {"success": True}
         else:
             raise HTTPException(status_code=404, detail="Highlight not found")
@@ -206,11 +710,127 @@ async def delete_highlight(highlight_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting highlight: {str(e)}")
 
-@router.post("/mini-agents", response_model=dict, status_code=201)
-async def create_mini_agent_thread(request: CreateMiniAgentThreadRequest):
-    """Create a new mini-agent thread"""
+
+@router.patch("/highlights/{highlight_id}/color")
+async def update_highlight_color(highlight_id: str, payload: dict):
+    """
+    Update the color of an existing highlight.
+    
+    This provides a smoother UX than delete+create when re-coloring.
+    """
     try:
-        # Generate thread ID and title
+        db = get_database()
+        highlights_collection = db.message_highlights
+        
+        color = payload.get("color")
+        if not color:
+            raise HTTPException(status_code=400, detail="Color is required")
+        
+        # Find the highlight
+        highlight = await highlights_collection.find_one({"highlightId": highlight_id})
+        
+        if not highlight:
+            raise HTTPException(status_code=404, detail="Highlight not found")
+        
+        # Update the color
+        result = await highlights_collection.update_one(
+            {"highlightId": highlight_id},
+            {"$set": {"color": color, "updatedAt": datetime.utcnow()}}
+        )
+        
+        if result.modified_count > 0:
+            # Invalidate cache
+            try:
+                from app.services.cache_service import cache_service
+                user_id = highlight.get("userId")
+                session_id = highlight.get("sessionId")
+                if user_id and session_id:
+                    await cache_service.invalidate_session_data(user_id, session_id)
+                    logger.info(f"🗑️ Cache invalidated after color update for session {session_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to invalidate cache (non-critical): {e}")
+            
+            logger.info(f"✅ Highlight color updated: {highlight_id} -> {color}")
+            return {"success": True, "highlightId": highlight_id, "color": color}
+        else:
+            # Color might be the same, still return success
+            return {"success": True, "highlightId": highlight_id, "color": color, "unchanged": True}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating highlight color: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error updating highlight color: {str(e)}")
+
+
+@router.post("/mini-agents", response_model=dict, status_code=201)
+async def create_mini_agent_thread(
+    request: CreateMiniAgentThreadRequest,
+    user: dict = Depends(get_current_user_from_session)
+):
+    """Create a new mini-agent thread or return existing one for the same messageId"""
+    try:
+        db = get_database()
+        mini_agents_collection = db.mini_agent_threads
+        messages_collection = db.mini_agent_messages
+        
+        user_id = user.user_id if hasattr(user, "user_id") else str(user.get("user_id"))
+
+        # ✅ FIX: Check if thread already exists for this sessionId + messageId
+        existing_thread = await mini_agents_collection.find_one({
+            "sessionId": request.sessionId,
+            "messageId": request.messageId,
+            "user_id": user_id  # ✅ Ensure user ownership
+        })
+        
+        if existing_thread:
+            # Thread exists, return it with messages
+            # Handle both schema versions (id vs threadId)
+            thread_id = existing_thread.get("threadId", existing_thread.get("id"))
+            logger.info(f"♻️ Reusing existing mini-agent thread: {thread_id}")
+            
+            # Update snippet if different
+            if existing_thread.get("selectedText") != request.selectedText:
+                await mini_agents_collection.update_one(
+                    {"_id": existing_thread["_id"]}, # Use _id for safe update
+                    {"$set": {"selectedText": request.selectedText}}
+                )
+                logger.info(f"📝 Updated snippet for thread: {thread_id}")
+            
+            # Load messages
+            messages_raw = await messages_collection.find(
+                {"threadId": thread_id}
+            ).sort("createdAt", 1).to_list(length=None)
+            
+            messages = []
+            for msg in messages_raw:
+                created_at = msg.get("createdAt")
+                if isinstance(created_at, datetime):
+                    created_at = created_at.isoformat()
+                messages.append({
+                    "id": msg.get("id", f"msg_{thread_id}_{len(messages)}"),
+                    "role": msg.get("role", msg.get("sender", "assistant")).replace("ai", "assistant"),
+                    "content": msg.get("content", msg.get("text", "")),
+                    "timestamp": created_at
+                })
+            
+            created_at = existing_thread.get("createdAt")
+            if isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+            
+            return {
+                "success": True,
+                "agentId": thread_id,
+                "isExisting": True,  # ✅ Mark as existing
+                "messageId": request.messageId,
+                "selectedText": request.selectedText,
+                "createdAt": created_at,
+                "hasConversation": len(messages) > 0,
+                "messages": messages,  # ✅ Include existing messages
+                "sessionId": request.sessionId
+            }
+        
+        # No existing thread, create new one
         thread_id = f"thread_{request.sessionId}_{request.messageId}_{datetime.utcnow().timestamp()}"
         if request.title:
             title = request.title
@@ -218,7 +838,9 @@ async def create_mini_agent_thread(request: CreateMiniAgentThreadRequest):
             title = await generate_mini_agent_title(request.selectedText)
         
         thread_data = {
-            "id": thread_id,
+            "threadId": thread_id,    # ✅ Match Index: threadId (not id)
+            "user_id": user_id,       # ✅ Match Index: user_id
+            "id": thread_id,          # Keep 'id' for legacy read compatibility if needed, or rely on mapping
             "sessionId": request.sessionId,
             "messageId": request.messageId,
             "title": title,
@@ -227,10 +849,13 @@ async def create_mini_agent_thread(request: CreateMiniAgentThreadRequest):
             "createdAt": datetime.utcnow().isoformat()
         }
         
-        # Store in MongoDB
-        db = get_database()
-        mini_agents_collection = db.mini_agent_threads
-        
+        # 🛡️ STRICT VALIDATION: Prevent NULL insertions which cause DuplicateKeyError
+        if not thread_data.get("threadId"):
+            raise ValueError(f"CRITICAL: Generated threadId is null/empty for session {request.sessionId}")
+        if not thread_data.get("user_id"):
+            raise ValueError(f"CRITICAL: user_id is null/empty for user {user}")
+            
+        logger.info(f"💾 Inserting new thread: {thread_id} for user {user_id}")
         result = await mini_agents_collection.insert_one(thread_data)
         
         if result.inserted_id:
@@ -238,20 +863,24 @@ async def create_mini_agent_thread(request: CreateMiniAgentThreadRequest):
             if "_id" in thread_data:
                 del thread_data["_id"]
                 
+            logger.info(f"✅ Created new mini-agent thread: {thread_id}")
+            
             return {
                 "success": True,
-                "agentId": thread_data["id"], # Frontend expects this top-level
+                "agentId": thread_data["threadId"],
                 "isExisting": False,
                 "messageId": request.messageId,
                 "selectedText": request.selectedText,
                 "createdAt": thread_data["createdAt"],
                 "hasConversation": False,
-                "thread": thread_data
+                "messages": [],
+                "sessionId": request.sessionId
             }
         else:
             raise HTTPException(status_code=500, detail="Failed to create mini-agent thread")
             
     except Exception as e:
+        logger.error(f"❌ Error in create_mini_agent_thread: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating mini-agent thread: {str(e)}")
 
 @router.get("/mini-agents/{session_id}", response_model=MiniAgentResponse)
@@ -262,17 +891,29 @@ async def get_mini_agent_threads(session_id: str):
         mini_agents_collection = db.mini_agent_threads
         messages_collection = db.mini_agent_messages
         
+        logger.info(f"🔍 Fetching mini-agents for session: {session_id}")
+        
         threads = await mini_agents_collection.find(
             {"sessionId": session_id},
             {"_id": 0}
         ).to_list(length=None)
         
+        logger.info(f"📦 Found {len(threads)} threads for session")
+        
         # Load messages for each thread
         for thread in threads:
+            # Handle both schema versions
+            start_thread_id = thread.get("threadId", thread.get("id"))
+            logger.info(f"🔍 Loading messages for thread: {start_thread_id}, messageId: {thread.get('messageId', 'NO_MSG_ID')}")
             messages_raw = await messages_collection.find(
-                {"threadId": thread["id"]},
+                {"threadId": start_thread_id},
                 {"_id": 0}
             ).sort("createdAt", 1).to_list(length=None)
+            
+            logger.info(f"📨 Found {len(messages_raw)} raw messages for thread {start_thread_id}")
+            # Ensure "id" field exists for frontend model (map threadId -> id if missing)
+            if "id" not in thread and "threadId" in thread:
+                thread["id"] = thread["threadId"]
             
             # ✅ CRITICAL: Normalize message schema for frontend
             # Frontend expects: { id, role, content, timestamp }
@@ -294,6 +935,12 @@ async def get_mini_agent_threads(session_id: str):
                 messages.append(normalized_msg)
             
             thread["messages"] = messages
+            
+            # ✅ FIX: Set hasConversation based on message count for frontend icon display
+            thread["hasConversation"] = len(messages) > 0
+            
+            # ✅ FIX: Add agentId field for frontend compatibility (some code expects agentId, some expects id)
+            thread["agentId"] = thread["id"]
             
             # Convert thread createdAt
             if "createdAt" in thread:

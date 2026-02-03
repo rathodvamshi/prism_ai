@@ -11,9 +11,9 @@ except Exception:  # pragma: no cover
     deep_research = None  # fallback if module not available
 
 try:
-    from app.services.media_service import play_video  # type: ignore
+    from app.services.media_play_service import media_play_service  # type: ignore
 except Exception:  # pragma: no cover
-    play_video = None  # fallback if module not available
+    media_play_service = None  # fallback if module not available
 
 
 # ------------------------------------------------------
@@ -23,9 +23,11 @@ async def decide_intent(request: ChatRequest) -> str:
     """Rule-based intent detection. Keep it fast and clear."""
     msg = (request.message or "").lower()
 
-    # YouTube / media playback
-    if ("play" in msg or "watch" in msg) and any(k in msg for k in ["song", "video", "youtube", "music"]):
-        return "youtube_play"
+    # YouTube / media playback - Match "play X", "watch X", "listen X"
+    if ("play" in msg or "watch" in msg or "listen" in msg):
+        # Exclude task/reminder commands
+        if not any(x in msg for x in ["remind", "schedule", "task", "todo", "role", "game"]):
+            return "youtube_play"
 
     # Deep research for purchases and comparisons
     if any(k in msg for k in ["best", "top", "under", "vs", "compare", "buy"]):
@@ -69,20 +71,32 @@ async def process_chat(request: ChatRequest):
 
     try:
         if intent == "youtube_play":
-            # Media handling: fetch a video and ask LLM to introduce it nicely
-            if play_video is None:
+            # Media handling: use new hybrid intent pipeline
+            if media_play_service is None:
                 reply = "Media service unavailable right now."
             else:
-                video_json = await play_video(request.message)
-                # Truncate to avoid blowing up the context
-                summary_for_llm = f"Found video data: {str(video_json)[:1000]}"
-                reply = await generate_response(
-                    user_id=user_id,
-                    message=request.message,
-                    search_results=summary_for_llm,
-                    image_url=image_url,
+                media_response = await media_play_service.process_media_request(
+                    user_input=request.message,
+                    mode="redirect",  # Default to redirect mode
+                    user_id=user_id
                 )
-                action_data = video_json
+                
+                # Use the media service's generated message
+                reply = media_response.message
+                
+                # Build action payload for frontend
+                action_data = {
+                    "type": "media_play",
+                    "payload": {
+                        "mode": media_response.type,
+                        "url": media_response.url,
+                        "video_id": media_response.video_id,
+                        "query": media_response.query,
+                        "message": media_response.message,
+                        "cached": media_response.cached,
+                        "source": media_response.source,
+                    }
+                }
 
         elif intent == "deep_research":
             if deep_research is None:

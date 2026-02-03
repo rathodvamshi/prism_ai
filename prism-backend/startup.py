@@ -15,6 +15,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# 🔇 SUPPRESS NOISY LIBRARY LOGS (CRITICAL for clean logs)
+# =============================================================================
+# PyMongo background threads generate WinError 10060 on Windows
+# These are non-fatal but spam the logs - silence them
+# =============================================================================
+for noisy_logger in [
+    'pymongo', 'pymongo.pool', 'pymongo.topology', 'pymongo.connection',
+    'pymongo.serverSelection', 'pymongo.command', 'pymongo.monitor', 'motor',
+    'httpcore', 'httpx', 'urllib3', 'asyncio',
+]:
+    logging.getLogger(noisy_logger).setLevel(logging.CRITICAL)
+
 def check_environment():
     """Check if all required environment variables are set"""
     required_vars = [

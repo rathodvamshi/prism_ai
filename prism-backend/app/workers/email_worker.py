@@ -153,7 +153,6 @@ async def process_task(task_id: str):
                         "$set": {
                             "email_status": "sent",
                             "email_sent_at": datetime.now(timezone.utc),
-                            "status": "completed",
                         }
                     },
                 )

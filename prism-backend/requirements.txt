@@ -9,8 +9,7 @@ pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 
 # AI/ML Services
-groq>=0.4.1
-openai>=1.3.0                    # Optional OpenAI integration
+groq>=0.4.1                      # Primary LLM service (Groq API only)
 
 # Databases & Storage
 redis>=5.0.1

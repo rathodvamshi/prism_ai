@@ -8,14 +8,324 @@ Use Redis for things that expire:
 - Temporary chat storage before saving to MongoDB
 
 🟢 Rule: Redis keys always include userId to prevent mixing
+
+⚠️ IN-MEMORY FALLBACK: When Redis is unavailable, uses in-memory store
+   - Works for local development without Redis
+   - NOT recommended for production (no persistence, no TTL cleanup)
 """
 
 import redis.asyncio as redis
 import json
 import logging
+import asyncio
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from app.config import settings
+
+# Initialize logger early for use in InMemoryStore
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# 🧠 IN-MEMORY FALLBACK STORE (Used when Redis is unavailable)
+# =============================================================================
+class InMemoryStore:
+    """
+    Simple in-memory key-value store with TTL support.
+    Used as fallback when Redis connection fails.
+    ⚠️ WARNING: Not suitable for production - no persistence, no clustering!
+    """
+    
+    def __init__(self):
+        self._store: Dict[str, Any] = {}
+        self._expiry: Dict[str, float] = {}  # key -> expiry timestamp
+        self._lists: Dict[str, list] = {}
+        self._sorted_sets: Dict[str, Dict[str, float]] = {}
+        self._lock = asyncio.Lock()
+        logger.info("🧠 InMemoryStore initialized (Redis fallback mode)")
+    
+    def _is_expired(self, key: str) -> bool:
+        """Check if a key has expired"""
+        if key in self._expiry:
+            if time.time() > self._expiry[key]:
+                # Clean up expired key
+                self._store.pop(key, None)
+                self._expiry.pop(key, None)
+                return True
+        return False
+    
+    async def ping(self) -> bool:
+        """Always returns True for in-memory store"""
+        return True
+    
+    async def exists(self, key: str) -> bool:
+        """Check if key exists"""
+        async with self._lock:
+            if self._is_expired(key):
+                return False
+            return key in self._store or key in self._lists or key in self._sorted_sets
+    
+    async def get(self, key: str) -> Optional[str]:
+        """Get value"""
+        async with self._lock:
+            if self._is_expired(key):
+                return None
+            return self._store.get(key)
+    
+    async def set(self, key: str, value: str, ex: Optional[int] = None, nx: bool = False) -> bool:
+        """Set value with optional TTL"""
+        async with self._lock:
+            if nx and key in self._store and not self._is_expired(key):
+                return False  # Key exists and nx=True
+            self._store[key] = value
+            if ex:
+                self._expiry[key] = time.time() + ex
+            return True
+    
+    async def append(self, key: str, value: str) -> bool:
+        """Append to value"""
+        async with self._lock:
+            if self._is_expired(key):
+                self._store[key] = value
+            else:
+                self._store[key] = self._store.get(key, "") + value
+            return True
+    
+    async def setex(self, key: str, seconds: int, value: str) -> bool:
+        """Set with expiry"""
+        return await self.set(key, value, ex=seconds)
+    
+    async def delete(self, key: str) -> bool:
+        """Delete key"""
+        async with self._lock:
+            self._store.pop(key, None)
+            self._expiry.pop(key, None)
+            self._lists.pop(key, None)
+            self._sorted_sets.pop(key, None)
+            return True
+    
+    async def incr(self, key: str) -> int:
+        """Increment value"""
+        async with self._lock:
+            if self._is_expired(key):
+                self._store[key] = "0"
+            current = int(self._store.get(key, "0"))
+            current += 1
+            self._store[key] = str(current)
+            return current
+    
+    async def expire(self, key: str, seconds: int) -> bool:
+        """Set TTL on key"""
+        async with self._lock:
+            if key in self._store or key in self._lists or key in self._sorted_sets:
+                self._expiry[key] = time.time() + seconds
+                return True
+            return False
+    
+    async def lrange(self, key: str, start: int, end: int) -> list:
+        """Get list range"""
+        async with self._lock:
+            lst = self._lists.get(key, [])
+            if end == -1:
+                return lst[start:]
+            return lst[start:end+1]
+    
+    async def lpush(self, key: str, *values) -> bool:
+        """Left push to list"""
+        async with self._lock:
+            if key not in self._lists:
+                self._lists[key] = []
+            for v in reversed(values):
+                self._lists[key].insert(0, v)
+            return True
+    
+    async def rpush(self, key: str, *values) -> bool:
+        """Right push to list"""
+        async with self._lock:
+            if key not in self._lists:
+                self._lists[key] = []
+            self._lists[key].extend(values)
+            return True
+    
+    async def lpop(self, key: str) -> Optional[str]:
+        """Left pop from list"""
+        async with self._lock:
+            lst = self._lists.get(key, [])
+            if lst:
+                return lst.pop(0)
+            return None
+    
+    async def rpop(self, key: str) -> Optional[str]:
+        """Right pop from list"""
+        async with self._lock:
+            lst = self._lists.get(key, [])
+            if lst:
+                return lst.pop()
+            return None
+    
+    async def ltrim(self, key: str, start: int, end: int) -> bool:
+        """Trim list"""
+        async with self._lock:
+            if key in self._lists:
+                if end == -1:
+                    self._lists[key] = self._lists[key][start:]
+                else:
+                    self._lists[key] = self._lists[key][start:end+1]
+            return True
+    
+    async def zadd(self, key: str, mapping: dict, **kwargs) -> bool:
+        """Add to sorted set"""
+        async with self._lock:
+            if key not in self._sorted_sets:
+                self._sorted_sets[key] = {}
+            self._sorted_sets[key].update(mapping)
+            return True
+    
+    async def zrangebyscore(self, key: str, min_score: str, max_score: str, start: int = 0, num: int = -1) -> list:
+        """Get sorted set members by score"""
+        async with self._lock:
+            ss = self._sorted_sets.get(key, {})
+            min_s = float('-inf') if min_score == '-inf' else float(min_score)
+            max_s = float('inf') if max_score == '+inf' else float(max_score)
+            items = [(k, v) for k, v in ss.items() if min_s <= v <= max_s]
+            items.sort(key=lambda x: x[1])
+            members = [k for k, v in items]
+            if num == -1:
+                return members[start:]
+            return members[start:start+num]
+    
+    async def zrem(self, key: str, *members) -> bool:
+        """Remove from sorted set"""
+        async with self._lock:
+            if key in self._sorted_sets:
+                for m in members:
+                    self._sorted_sets[key].pop(m, None)
+            return True
+    
+    async def zcard(self, key: str) -> int:
+        """Get sorted set size"""
+        async with self._lock:
+            return len(self._sorted_sets.get(key, {}))
+    
+    async def keys(self, pattern: str) -> list:
+        """Get keys matching pattern (simple wildcard support)"""
+        async with self._lock:
+            import fnmatch
+            all_keys = list(self._store.keys()) + list(self._lists.keys()) + list(self._sorted_sets.keys())
+            return [k for k in all_keys if fnmatch.fnmatch(k, pattern)]
+    
+    async def info(self) -> Dict[str, Any]:
+        """Get store info"""
+        return {
+            "mode": "in-memory-fallback",
+            "keys": len(self._store) + len(self._lists) + len(self._sorted_sets),
+            "warning": "Using in-memory fallback - no persistence!"
+        }
+    
+    async def dbsize(self) -> int:
+        """Get total key count"""
+        return len(self._store) + len(self._lists) + len(self._sorted_sets)
+    
+    def register_script(self, script: str):
+        """
+        Register a Lua script for InMemoryStore fallback.
+        Returns a callable that simulates script execution.
+        ⚠️ Simplified fallback - supports GenerationManager CREATE_GENERATION_LUA pattern.
+        """
+        async def execute_script(keys: list = None, args: list = None):
+            """
+            Atomic Lua script simulator for InMemoryStore.
+            Handles CREATE_GENERATION_LUA pattern with proper locking.
+            """
+            keys = keys or []
+            args = args or []
+            
+            try:
+                # Validate minimum required keys/args
+                if len(keys) < 4 or len(args) < 5:
+                    logger.warning(f"Script called with insufficient params: keys={len(keys)}, args={len(args)}")
+                    return ['ERROR', '', 'Insufficient parameters']
+                
+                # Parse keys
+                cooldown_key = keys[0]
+                active_key = keys[1]
+                lock_key = keys[2]
+                gen_key = keys[3]
+                
+                # Parse args with type safety
+                lock_timeout = int(args[0]) if args[0] else 1
+                cooldown_ttl = int(args[1]) if args[1] else 1
+                state_ttl = int(args[2]) if args[2] else 3600
+                gen_id = str(args[3]) if args[3] else ""
+                state_json = str(args[4]) if args[4] else "{}"
+                
+                # ATOMIC BLOCK START (simulated via Python lock)
+                async with self._lock:
+                    # Step 1: Check cooldown (fast fail)
+                    if await self.exists(cooldown_key):
+                        return ['COOLDOWN', '', '']
+                    
+                    # Step 2: Try to acquire lock
+                    lock_acquired = await self.set(lock_key, 'locked', ex=lock_timeout, nx=True)
+                    if not lock_acquired:
+                        existing_gen_id = await self.get(active_key) or ''
+                        existing_state = ''
+                        if existing_gen_id:
+                            existing_state = await self.get(f'generation:{existing_gen_id}') or ''
+                        return ['LOCKED', existing_gen_id, existing_state]
+                    
+                    # Step 3: Set cooldown
+                    await self.setex(cooldown_key, cooldown_ttl, '1')
+                    
+                    # Step 4: Get existing active generation
+                    existing_gen_id = await self.get(active_key) or ''
+                    existing_state_json = ''
+                    if existing_gen_id:
+                        existing_state_json = await self.get(f'generation:{existing_gen_id}') or ''
+                    
+                    # Step 5: Create new generation atomically
+                    await self.setex(gen_key, state_ttl, state_json)
+                    await self.setex(active_key, state_ttl, gen_id)
+                    await self.delete(lock_key)  # Release lock
+                # ATOMIC BLOCK END
+                
+                return ['OK', existing_gen_id, existing_state_json]
+                
+            except Exception as e:
+                logger.error(f"InMemoryStore script error: {type(e).__name__}: {e}")
+                # Attempt lock cleanup on error
+                try:
+                    if len(keys) > 2:
+                        await self.delete(keys[2])  # Release lock_key
+                except:
+                    pass
+                return ['ERROR', '', str(e)]
+        
+        return execute_script
+    
+    async def hset(self, name: str, key: str = None, value: str = None, mapping: dict = None) -> int:
+        """Set hash field(s)"""
+        async with self._lock:
+            if name not in self._store:
+                self._store[name] = {}
+            if mapping:
+                self._store[name].update(mapping)
+                return len(mapping)
+            elif key is not None:
+                self._store[name][key] = value
+                return 1
+            return 0
+    
+    async def hget(self, name: str, key: str) -> Optional[str]:
+        """Get hash field"""
+        async with self._lock:
+            return self._store.get(name, {}).get(key)
+    
+    async def hgetall(self, name: str) -> dict:
+        """Get all hash fields"""
+        async with self._lock:
+            return dict(self._store.get(name, {}))
 
 # --------------------------------------------------
 # Email Queue Key Definitions (Dual-Lane Architecture)
@@ -25,8 +335,6 @@ EMAIL_SCHEDULED_QUEUE = "queue:email:scheduled"  # Task reminders lane (Sorted S
 EMAIL_DAILY_LIMIT_KEY_TEMPLATE = "limit:email:{user_id}:{date}"  # Per-user/day counter
 EMAIL_LOCK_KEY_TEMPLATE = "lock:email:{task_id}"  # Idempotency lock per task
 EMAIL_DLQ = "queue:email:dlq"  # Dead-letter queue for failed sends
-
-logger = logging.getLogger(__name__)
 
 # Create the connection pool with error handling
 def create_redis_client():
@@ -90,6 +398,7 @@ class RedisClient:
     - Only ONE instance exists (singleton)
     - Reuses connections from pool
     - Never creates clients per request
+    - ⚠️ Falls back to in-memory store if Redis unavailable
     
     ❌ NEVER DO THIS:
     ```python
@@ -118,11 +427,13 @@ class RedisClient:
         """Initialize Redis client only once"""
         if not self._initialized:
             self._client = None
+            self._fallback = None  # In-memory fallback
+            self._use_fallback = False
             self._initialize_client()
             RedisClient._initialized = True
     
     def _initialize_client(self):
-        """Initialize Redis client with connection pool"""
+        """Initialize Redis client with connection pool, fallback to in-memory if fails"""
         try:
             self._client = create_redis_client()
             logger.info("✅ Redis singleton client initialized with connection pool")
@@ -130,200 +441,416 @@ class RedisClient:
         except Exception as e:
             logger.error(f"Failed to initialize Redis client: {e}")
             self._client = None
+            self._enable_fallback()
+    
+    def _enable_fallback(self):
+        """Enable in-memory fallback mode"""
+        if not self._fallback:
+            self._fallback = InMemoryStore()
+        self._use_fallback = True
+        if settings.ENVIRONMENT != "development":
+             logger.warning("⚠️ Redis unavailable - using in-memory fallback (NOT for production!)")
+        else:
+             logger.info("ℹ️ Redis unavailable - using in-memory fallback (Development Mode)")
+    
+    async def _check_connection(self) -> bool:
+        """Check if Redis is connected, enable fallback if not"""
+        if self._use_fallback:
+            return True  # Fallback is always "connected"
+        
+        if not self._client:
+            self._enable_fallback()
+            return True
+        
+        try:
+            await self._client.ping()
+            return True
+        except Exception as e:
+            logger.warning(f"Redis connection check failed: {e}")
+            self._enable_fallback()
+            return True
+    
+    def _get_store(self):
+        """Get the active store (Redis or fallback)"""
+        if self._use_fallback:
+            return self._fallback
+        return self._client
     
     async def ping(self) -> bool:
-        """Test Redis connection"""
+        """Test Redis connection (or fallback)"""
+        if self._use_fallback:
+            return await self._fallback.ping()
         try:
             if self._client:
                 await self._client.ping()
                 return True
         except Exception as e:
             logger.error(f"Redis ping failed: {e}")
+            self._enable_fallback()
+            return await self._fallback.ping()
         return False
+
+    async def exists(self, key: str) -> bool:
+        """Check if key exists"""
+        await self._check_connection()
+        store = self._get_store()
+        try:
+            if self._use_fallback:
+                return await store.exists(key)
+            return await store.exists(key) > 0
+        except Exception as e:
+            logger.error(f"Redis EXISTS failed for key {key}: {e}")
+            self._enable_fallback()
+            return await self._fallback.exists(key)
     
     async def get(self, key: str) -> Optional[str]:
-        """Get value from Redis with error handling"""
+        """Get value with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.get(key)
+            return await store.get(key)
         except Exception as e:
             logger.error(f"Redis GET failed for key {key}: {e}")
-        return None
+            self._enable_fallback()
+            return await self._fallback.get(key)
     
     async def set(self, key: str, value: str, ex: Optional[int] = None, nx: bool = False) -> bool:
-        """Set value in Redis with error handling"""
+        """Set value with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                result = await self._client.set(key, value, ex=ex, nx=nx)
-                # When nx=True, returns True if key was set, None if key already exists
-                return result if nx else True
+            if self._use_fallback:
+                return await store.set(key, value, ex=ex, nx=nx)
+            result = await store.set(key, value, ex=ex, nx=nx)
+            return result if nx else True
         except Exception as e:
             logger.error(f"Redis SET failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.set(key, value, ex=ex, nx=nx)
+
+    async def append(self, key: str, value: str) -> bool:
+        """Append value with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
+        try:
+            if self._use_fallback:
+                return await store.append(key, value)
+            await store.append(key, value)
+            return True
+        except Exception as e:
+            logger.error(f"Redis APPEND failed for key {key}: {e}")
+            self._enable_fallback()
+            return await self._fallback.append(key, value)
     
     async def setex(self, key: str, seconds: int, value: str) -> bool:
-        """
-        Set value with TTL (seconds) in Redis with error handling.
-        This mirrors the low-level setex, but uses SET with ex= for compatibility.
-        """
+        """Set value with TTL with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.set(key, value, ex=seconds)
-                return True
+            if self._use_fallback:
+                return await store.setex(key, seconds, value)
+            await store.set(key, value, ex=seconds)
+            return True
         except Exception as e:
             logger.error(f"Redis SETEX failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.setex(key, seconds, value)
     
     async def delete(self, key: str) -> bool:
-        """Delete key from Redis with error handling"""
+        """Delete key with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.delete(key)
-                return True
+            if self._use_fallback:
+                return await store.delete(key)
+            await store.delete(key)
+            return True
         except Exception as e:
             logger.error(f"Redis DELETE failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.delete(key)
     
     async def incr(self, key: str) -> Optional[int]:
-        """Increment key in Redis with error handling"""
+        """Increment key with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.incr(key)
+            return await store.incr(key)
         except Exception as e:
             logger.error(f"Redis INCR failed for key {key}: {e}")
-        return None
+            self._enable_fallback()
+            return await self._fallback.incr(key)
     
     async def expire(self, key: str, seconds: int) -> bool:
-        """Set expiration for key in Redis with error handling"""
+        """Set expiration with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.expire(key, seconds)
-                return True
+            if self._use_fallback:
+                return await store.expire(key, seconds)
+            await store.expire(key, seconds)
+            return True
         except Exception as e:
             logger.error(f"Redis EXPIRE failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.expire(key, seconds)
     
     async def lrange(self, key: str, start: int, end: int) -> list:
-        """Get list range from Redis with error handling"""
+        """Get list range with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.lrange(key, start, end)
+            return await store.lrange(key, start, end)
         except Exception as e:
             logger.error(f"Redis LRANGE failed for key {key}: {e}")
-        return []
+            self._enable_fallback()
+            return await self._fallback.lrange(key, start, end)
     
     async def lpush(self, key: str, *values) -> bool:
-        """Left push to Redis list with error handling"""
+        """Left push with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.lpush(key, *values)
-                return True
+            if self._use_fallback:
+                return await store.lpush(key, *values)
+            await store.lpush(key, *values)
+            return True
         except Exception as e:
             logger.error(f"Redis LPUSH failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.lpush(key, *values)
     
     async def rpush(self, key: str, *values) -> bool:
-        """Right push to Redis list with error handling"""
+        """Right push with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.rpush(key, *values)
-                return True
+            if self._use_fallback:
+                return await store.rpush(key, *values)
+            await store.rpush(key, *values)
+            return True
         except Exception as e:
             logger.error(f"Redis RPUSH failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.rpush(key, *values)
     
     async def lpop(self, key: str) -> Optional[str]:
-        """Left pop from Redis list with error handling"""
+        """Left pop with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.lpop(key)
+            return await store.lpop(key)
         except Exception as e:
             logger.error(f"Redis LPOP failed for key {key}: {e}")
-        return None
+            self._enable_fallback()
+            return await self._fallback.lpop(key)
     
     async def rpop(self, key: str) -> Optional[str]:
-        """Right pop from Redis list with error handling"""
+        """Right pop with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.rpop(key)
+            return await store.rpop(key)
         except Exception as e:
             logger.error(f"Redis RPOP failed for key {key}: {e}")
-        return None
+            self._enable_fallback()
+            return await self._fallback.rpop(key)
     
     async def ltrim(self, key: str, start: int, end: int) -> bool:
-        """Trim Redis list with error handling"""
+        """Trim list with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.ltrim(key, start, end)
-                return True
+            if self._use_fallback:
+                return await store.ltrim(key, start, end)
+            await store.ltrim(key, start, end)
+            return True
         except Exception as e:
             logger.error(f"Redis LTRIM failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.ltrim(key, start, end)
     
     async def zadd(self, key: str, mapping: dict, **kwargs) -> bool:
-        """Add to sorted set with error handling"""
+        """Add to sorted set with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.zadd(key, mapping, **kwargs)
-                return True
+            if self._use_fallback:
+                return await store.zadd(key, mapping, **kwargs)
+            await store.zadd(key, mapping, **kwargs)
+            return True
         except Exception as e:
             logger.error(f"Redis ZADD failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.zadd(key, mapping, **kwargs)
     
     async def zrangebyscore(self, key: str, min_score: str, max_score: str, start: int = 0, num: int = -1) -> list:
-        """Get sorted set members by score range with error handling"""
+        """Get sorted set members by score with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.zrangebyscore(key, min_score, max_score, start=start, num=num)
+            if self._use_fallback:
+                return await store.zrangebyscore(key, min_score, max_score, start=start, num=num)
+            return await store.zrangebyscore(key, min_score, max_score, start=start, num=num)
         except Exception as e:
             logger.error(f"Redis ZRANGEBYSCORE failed for key {key}: {e}")
-        return []
+            self._enable_fallback()
+            return await self._fallback.zrangebyscore(key, min_score, max_score, start=start, num=num)
     
     async def zrem(self, key: str, *members) -> bool:
-        """Remove from sorted set with error handling"""
+        """Remove from sorted set with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                await self._client.zrem(key, *members)
-                return True
+            if self._use_fallback:
+                return await store.zrem(key, *members)
+            await store.zrem(key, *members)
+            return True
         except Exception as e:
             logger.error(f"Redis ZREM failed for key {key}: {e}")
-        return False
+            self._enable_fallback()
+            return await self._fallback.zrem(key, *members)
     
     async def zcard(self, key: str) -> int:
-        """Get sorted set size with error handling"""
+        """Get sorted set size with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.zcard(key)
+            return await store.zcard(key)
         except Exception as e:
             logger.error(f"Redis ZCARD failed for key {key}: {e}")
-        return 0
+            self._enable_fallback()
+            return await self._fallback.zcard(key)
     
     async def keys(self, pattern: str) -> list:
-        """Get keys matching pattern with error handling"""
+        """Get keys matching pattern with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.keys(pattern)
+            return await store.keys(pattern)
         except Exception as e:
             logger.error(f"Redis KEYS failed for pattern {pattern}: {e}")
-        return []
+            self._enable_fallback()
+            return await self._fallback.keys(pattern)
     
     async def info(self) -> Dict[str, Any]:
-        """Get Redis INFO with error handling"""
+        """Get info with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.info()
+            return await store.info()
         except Exception as e:
             logger.error(f"Redis INFO failed: {e}")
-        return {}
+            self._enable_fallback()
+            return await self._fallback.info()
     
     async def dbsize(self) -> int:
-        """Get Redis DB size with error handling"""
+        """Get DB size with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
         try:
-            if self._client:
-                return await self._client.dbsize()
+            return await store.dbsize()
         except Exception as e:
             logger.error(f"Redis DBSIZE failed: {e}")
-        return 0
+            self._enable_fallback()
+            return await self._fallback.dbsize()
+    
+    def is_using_fallback(self) -> bool:
+        """Check if using in-memory fallback"""
+        return self._use_fallback
+    
+    def register_script(self, script: str):
+        """
+        Register a Lua script for atomic Redis operations.
+        
+        🚀 LUA SCRIPTS:
+        - Execute multiple Redis commands atomically on the server
+        - Used by GenerationManager for race-condition-free generation creation
+        - Falls back to InMemoryStore simulation if Redis unavailable
+        
+        Returns a callable that can execute the script with keys and args.
+        """
+        # Check fallback status
+        if self._use_fallback:
+            return self._fallback.register_script(script)
+        
+        if not self._client:
+            self._enable_fallback()
+            return self._fallback.register_script(script)
+        
+        # Register script with real Redis client
+        try:
+            redis_script = self._client.register_script(script)
+        except Exception as e:
+            logger.error(f"Failed to register Redis script: {e}")
+            self._enable_fallback()
+            return self._fallback.register_script(script)
+        
+        # Wrapper with connection recovery
+        async def execute_script(keys: list = None, args: list = None):
+            """Execute the registered Lua script with error recovery"""
+            keys = keys or []
+            args = args or []
+            
+            try:
+                result = await redis_script(keys=keys, args=args)
+                return result
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Connection errors - switch to fallback for this execution
+                if any(x in error_str for x in ['connection', 'timeout', 'refused', 'reset']):
+                    logger.warning(f"Redis connection error during script: {e}")
+                    # Execute via fallback for this call only
+                    fallback_script = self._fallback.register_script(script) if self._fallback else None
+                    if fallback_script:
+                        return await fallback_script(keys=keys, args=args)
+                
+                logger.error(f"Redis script execution failed: {type(e).__name__}: {e}")
+                raise
+        
+        return execute_script
+    
+    # ─────────────────────────────────────────────────────────
+    # HASH OPERATIONS (for structured data storage)
+    # ─────────────────────────────────────────────────────────
+    
+    async def hset(self, name: str, key: str = None, value: str = None, mapping: dict = None) -> int:
+        """Set hash field(s) with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
+        try:
+            if self._use_fallback:
+                return await store.hset(name, key, value, mapping)
+            if mapping:
+                return await store.hset(name, mapping=mapping)
+            return await store.hset(name, key, value)
+        except Exception as e:
+            logger.error(f"Redis HSET failed for {name}: {e}")
+            self._enable_fallback()
+            return await self._fallback.hset(name, key, value, mapping)
+    
+    async def hget(self, name: str, key: str) -> Optional[str]:
+        """Get hash field with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
+        try:
+            return await store.hget(name, key)
+        except Exception as e:
+            logger.error(f"Redis HGET failed for {name}.{key}: {e}")
+            self._enable_fallback()
+            return await self._fallback.hget(name, key)
+    
+    async def hgetall(self, name: str) -> Dict[str, Any]:
+        """Get all hash fields with fallback handling"""
+        await self._check_connection()
+        store = self._get_store()
+        try:
+            return await store.hgetall(name)
+        except Exception as e:
+            logger.error(f"Redis HGETALL failed for {name}: {e}")
+            self._enable_fallback()
+            return await self._fallback.hgetall(name)
 
 # Global Redis client instance
 redis_client = RedisClient()
@@ -647,7 +1174,7 @@ async def add_message_to_history(user_id: str, role: str, content: str):
     except Exception as e:
         logger.error(f"Failed to add message to history: {e}")
 
-async def get_recent_history(user_id: str, limit: int = 10) -> str:
+async def get_recent_history(user_id: str, limit: int = 6) -> str:
     """
     Get recent chat history formatted for LLM context.
     Returns string:
@@ -777,3 +1304,7 @@ async def clear_mini_agent_context(user_id: str, message_id: str):
         logger.info(f"✅ Cleared mini-agent context for message {message_id}")
     except Exception as e:
         logger.error(f"Failed to clear mini-agent context: {e}")
+
+async def get_redis_client():
+    """FastAPI dependency to get Redis client singleton"""
+    return redis_client

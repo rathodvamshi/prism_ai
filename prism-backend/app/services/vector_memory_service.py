@@ -343,31 +343,115 @@ class VectorMemoryService:
     
     async def get_relevant_context(self, user_id: str, current_query: str) -> str:
         """
-        Get relevant context for current query from user's memory.
-        This powers intelligent AI responses.
+        🚀 PRO: Get relevant context for current query from user's memory.
+        This powers intelligent AI responses with comprehensive recall.
+        
+        PRO Enhancements:
+        - Lower threshold for better recall (0.6)
+        - Increased top_k for more context
+        - Category-aware retrieval
+        - Importance-based ranking
         """
         try:
-            # Search for relevant memories
+            # 🚀 PRO: Search for more memories with lower threshold
             memories = await self.search_memories(
                 user_id=user_id,
                 query=current_query,
-                top_k=3
+                top_k=7  # Increased from 3 to 7 for better context
             )
             
             if not memories:
                 return ""
             
-            # Format context
+            # 🚀 PRO: Format context with categories and scores
             context_parts = []
             for memory in memories:
-                if memory["score"] > 0.7:  # High similarity threshold
-                    context_parts.append(f"Previous context: {memory['text']}")
+                # 🚀 PRO: Lowered threshold to 0.6 for better recall
+                # High importance memories get lower threshold (0.55)
+                score = memory.get("score", 0)
+                memory_type = memory.get("type", "unknown")
+                
+                # Importance-based threshold
+                threshold = 0.55 if memory_type in ["name", "preference", "location", "occupation"] else 0.6
+                
+                if score > threshold:
+                    text = memory.get("text", "")
+                    if text:
+                        # Format with type for better AI understanding
+                        context_parts.append(f"[{memory_type.upper()}] {text} (relevance: {score:.0%})")
             
-            return "\n".join(context_parts)
+            if context_parts:
+                return "User's stored memories:\n" + "\n".join(context_parts)
+            return ""
             
         except Exception as e:
             print(f"[ERROR] Error getting relevant context: {e}")
             return ""
+    
+    async def search_memories_pro(
+        self, 
+        user_id: str, 
+        query: str, 
+        top_k: int = 10,
+        min_score: float = 0.5,
+        memory_types: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        🚀 PRO: Enhanced memory search with flexible filtering
+        
+        Args:
+            user_id: User identifier
+            query: Search query
+            top_k: Maximum results
+            min_score: Minimum similarity score (default 0.5 for comprehensive recall)
+            memory_types: Optional list of memory types to filter
+            
+        Returns:
+            List of memories sorted by score
+        """
+        if not self.index:
+            return []
+        
+        try:
+            # Generate query embedding
+            query_embedding = self._generate_embedding(query)
+            
+            # Build filter
+            filter_dict = {}
+            if memory_types:
+                filter_dict["type"] = {"$in": memory_types}
+            
+            # Search with higher top_k for better coverage
+            results = self.index.query(
+                vector=query_embedding,
+                top_k=top_k,
+                include_metadata=True,
+                namespace=user_id,
+                filter=filter_dict if filter_dict else None
+            )
+            
+            # 🚀 PRO: Process with flexible threshold
+            memories = []
+            for match in results.matches:
+                score = match.score if hasattr(match, "score") else 0.0
+                if score >= min_score:
+                    memories.append({
+                        "id": match.id,
+                        "text": match.metadata.get("text", ""),
+                        "type": match.metadata.get("type", "unknown"),
+                        "score": score,
+                        "timestamp": match.metadata.get("timestamp", "")
+                    })
+            
+            # Sort by score descending
+            memories.sort(key=lambda x: x["score"], reverse=True)
+            
+            print(f"[PRO Search] Found {len(memories)} memories (min_score={min_score}) for: {query[:50]}")
+            return memories
+            
+        except Exception as e:
+            print(f"[ERROR] PRO search error: {e}")
+            return []
 
 # Global instance - lazily initialized
 vector_memory = None

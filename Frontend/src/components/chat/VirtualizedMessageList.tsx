@@ -1,6 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { List } from 'react-window';
-import AutoSizer from 'react-virtualized-auto-sizer';
+import React, { useRef, useEffect, useCallback } from 'react';
 import { MessageBubble } from './MessageBubble';
 import type { Message } from '@/types/chat';
 
@@ -16,143 +14,22 @@ interface VirtualizedMessageListProps {
   onStopSpeaking?: () => void;
   scrollToBottom?: boolean;
   onScrollStateChange?: (isAtBottom: boolean) => void;
+  isStreamingLogic?: boolean;
+  isSendingMessage?: boolean;
+  onOpenMiniAgent?: (agentId: string) => void;
+  forceScrollSignal?: number; // 🆕 Signal to force scroll to bottom manually
 }
 
 /**
- * 🚀 VirtualizedMessageList - High Performance Message Rendering
+ * 🚀 MessageList - Simple Scrollable Message Rendering
  * 
- * ✅ Only renders visible messages (DOM stays light)
- * ✅ Handles 1000+ messages smoothly
+ * ✅ Renders all messages in a scrollable container
  * ✅ Auto-scrolls to bottom on new messages
- * ✅ Preserves scroll position on updates
- * ✅ Calculates dynamic heights for variable message sizes
+ * ✅ Works reliably without complex virtualization
  */
-export const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = React.memo(({
-  messages,
-  onHighlight,
-  onCreateMiniAgent,
-  getMiniAgentByMessage,
-  onOpenHighlightsPanel,
-  activeHighlightsMessageId,
-  isSpeaking,
-  onSpeak,
-  onStopSpeaking,
-  scrollToBottom = true,
-  onScrollStateChange
-}) => {
-  const listRef = useRef<any>(null);
-  const [rowHeights, setRowHeights] = useState<Record<number, number>>({});
-  const rowHeightCache = useRef<Record<number, number>>({});
-  const measurementCache = useRef<Record<string, number>>({});
-
-  // Estimate row height based on message content
-  const estimateRowHeight = useCallback((index: number): number => {
-    if (rowHeightCache.current[index]) {
-      return rowHeightCache.current[index];
-    }
-
-    const message = messages[index];
-    if (!message) return 100;
-
-    // Use cached measurement if available
-    if (measurementCache.current[message.id]) {
-      return measurementCache.current[message.id];
-    }
-
-    // Estimate based on content length
-    const baseHeight = 80; // Min height for avatar + padding
-    const contentLength = message.content?.length || 0;
-    const linesEstimate = Math.ceil(contentLength / 60); // ~60 chars per line
-    const contentHeight = linesEstimate * 24; // ~24px per line
-    const highlightHeight = (message.highlights?.length || 0) * 30;
-    const miniAgentHeight = getMiniAgentByMessage(message.id) ? 40 : 0;
-    
-    const estimated = baseHeight + contentHeight + highlightHeight + miniAgentHeight;
-    
-    // Cache the estimate
-    rowHeightCache.current[index] = estimated;
-    measurementCache.current[message.id] = estimated;
-    
-    return estimated;
-  }, [messages, getMiniAgentByMessage]);
-
-  // Get actual row height (uses cache or estimate)
-  const getRowHeight = (index: number): number => {
-    return rowHeights[index] || estimateRowHeight(index);
-  };
-
-  // Set row height after measurement
-  const setRowHeight = useCallback((index: number, height: number) => {
-    setRowHeights(prev => {
-      if (prev[index] === height) return prev;
-      
-      const newHeights = { ...prev, [index]: height };
-      rowHeightCache.current[index] = height;
-      
-      // Cache by message ID for persistence
-      const message = messages[index];
-      if (message) {
-        measurementCache.current[message.id] = height;
-      }
-      
-      return newHeights;
-    });
-
-    // Reset row height cache in list
-    if (listRef.current) {
-      listRef.current.resetAfterIndex(index, false);
-    }
-  }, [messages]);
-
-  // Auto-scroll to bottom on new messages
-  useEffect(() => {
-    if (scrollToBottom && messages.length > 0 && listRef.current) {
-      // Small delay to ensure heights are calculated
-      const timer = setTimeout(() => {
-        listRef.current?.scrollToItem(messages.length - 1, 'end');
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [messages.length, scrollToBottom]);
-
-  // Track scroll position
-  const handleScroll = useCallback(({ scrollOffset, scrollUpdateWasRequested }: any) => {
-    if (!scrollUpdateWasRequested && onScrollStateChange && listRef.current) {
-      // Check if user is at bottom (within 50px threshold)
-      const list = listRef.current;
-      // @ts-ignore - accessing private property
-      const totalHeight = list._outerRef?.scrollHeight || 0;
-      // @ts-ignore
-      const visibleHeight = list._outerRef?.clientHeight || 0;
-      const isAtBottom = totalHeight - (scrollOffset + visibleHeight) < 50;
-      
-      onScrollStateChange(isAtBottom);
-    }
-  }, [onScrollStateChange]);
-
-  // Row renderer
-  const Row = useCallback(({ index, style }: any) => {
-    const message = messages[index];
-    if (!message) return null;
-
-    return (
-      <div style={style}>
-        <MessageRow
-          message={message}
-          onHighlight={onHighlight}
-          onCreateMiniAgent={onCreateMiniAgent}
-          getMiniAgentByMessage={getMiniAgentByMessage}
-          onOpenHighlightsPanel={onOpenHighlightsPanel}
-          activeHighlightsMessageId={activeHighlightsMessageId}
-          isSpeaking={isSpeaking}
-          onSpeak={onSpeak}
-          onStopSpeaking={onStopSpeaking}
-          onHeightChange={(height) => setRowHeight(index, height)}
-        />
-      </div>
-    );
-  }, [
-    messages,
+export const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = React.memo((props) => {
+  const {
+    messages = [],
     onHighlight,
     onCreateMiniAgent,
     getMiniAgentByMessage,
@@ -161,24 +38,65 @@ export const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = Rea
     isSpeaking,
     onSpeak,
     onStopSpeaking,
-    setRowHeight
-  ]);
+    scrollToBottom = true,
+    onScrollStateChange,
+    isStreamingLogic,
+    isSendingMessage,
+    onOpenMiniAgent,
+    forceScrollSignal = 0,
+  } = props;
 
-  // Reset cache when messages change significantly
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const isUserScrolling = useRef(false);
+  const lastScrollTop = useRef(0);
+
+  console.log('📦 [MessageList] Rendering with', messages.length, 'messages');
+
+  // Manual force scroll trigger (e.g. from "Jump to Bottom" button)
   useEffect(() => {
-    const currentIds = messages.map(m => m.id).join(',');
-    const cachedIds = Object.keys(measurementCache.current).join(',');
-    
-    if (currentIds !== cachedIds) {
-      // Clear cache for messages that no longer exist
-      const currentIdSet = new Set(messages.map(m => m.id));
-      Object.keys(measurementCache.current).forEach(id => {
-        if (!currentIdSet.has(id)) {
-          delete measurementCache.current[id];
-        }
-      });
+    if (forceScrollSignal > 0 && bottomRef.current) {
+      console.log("⬇️ Forcing scroll to bottom (Signal received)");
+      isUserScrolling.current = false; // Reset user scrolling flag
+      bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [forceScrollSignal]);
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    if (scrollToBottom && bottomRef.current && !isUserScrolling.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages.length, scrollToBottom]);
+
+  // Initial scroll to bottom
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'auto' });
+    }
+  }, []);
+
+  // Track scroll position
+  const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    const atBottom = scrollHeight - (scrollTop + clientHeight) < 100;
+
+    // Detect if user is scrolling up
+    if (scrollTop < lastScrollTop.current - 10) {
+      isUserScrolling.current = true;
+    }
+
+    // Reset user scrolling flag if at bottom
+    if (atBottom) {
+      isUserScrolling.current = false;
+    }
+
+    lastScrollTop.current = scrollTop;
+    onScrollStateChange?.(atBottom);
+  }, [onScrollStateChange]);
 
   if (messages.length === 0) {
     return (
@@ -189,115 +107,47 @@ export const VirtualizedMessageList: React.FC<VirtualizedMessageListProps> = Rea
   }
 
   return (
-    <AutoSizer>
-      {({ height, width }) => {
-        const ListComponent = List as any;
-        return (
-          <ListComponent
-            ref={listRef}
-            height={height}
-            width={width}
-            itemCount={messages.length}
-            itemSize={getRowHeight}
-            onScroll={handleScroll}
-            overscanCount={5}
-          >
-            {Row}
-          </ListComponent>
-        );
-      }}
-    </AutoSizer>
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="absolute inset-0 overflow-y-auto overflow-x-hidden scroll-smooth will-change-scroll conversation-scrollbar"
+    >
+      <div className="w-full pt-16 sm:pt-24 pb-4">
+        {messages.map((message, index) => {
+          const isLast = index === messages.length - 1;
+          const isStreaming = isStreamingLogic && isLast && message.role === "assistant";
+          const isThinking = isSendingMessage && isLast && message.role === "assistant" && !message.content;
+
+          return (
+            <div key={message.id} className="w-full max-w-[850px] mx-auto px-4 pl-6 sm:pl-8 lg:pl-12 py-2">
+              <MessageBubble
+                message={message}
+                onHighlight={onHighlight}
+                onCreateMiniAgent={onCreateMiniAgent}
+                miniAgent={getMiniAgentByMessage(message.id)}
+                onOpenHighlightsPanel={() => onOpenHighlightsPanel(message.id)}
+                showHighlightsPanel={activeHighlightsMessageId === message.id}
+                isSpeaking={isSpeaking === message.id}
+                onSpeak={onSpeak}
+                onStopSpeaking={onStopSpeaking}
+                isStreaming={isStreaming}
+                isThinking={isThinking}
+                hasMiniAgent={!!getMiniAgentByMessage(message.id)}
+                onOpenMiniAgent={() => {
+                  const agent = getMiniAgentByMessage(message.id);
+                  if (agent) {
+                    onOpenMiniAgent?.(agent.id);
+                  }
+                }}
+              />
+            </div>
+          );
+        })}
+        {/* Scroll anchor */}
+        <div ref={bottomRef} className="h-1" />
+      </div>
+    </div>
   );
 });
 
 VirtualizedMessageList.displayName = 'VirtualizedMessageList';
-
-/**
- * MessageRow - Individual message with height measurement
- */
-interface MessageRowProps {
-  message: Message;
-  onHighlight: (messageId: string, text: string, startIndex: number, endIndex: number) => void;
-  onCreateMiniAgent: (messageId: string, selectedText: string) => void;
-  getMiniAgentByMessage: (messageId: string) => any;
-  onOpenHighlightsPanel: (messageId: string) => void;
-  activeHighlightsMessageId: string | null;
-  isSpeaking?: string | null;
-  onSpeak?: (messageId: string, text: string) => void;
-  onStopSpeaking?: () => void;
-  onHeightChange: (height: number) => void;
-}
-
-const MessageRow: React.FC<MessageRowProps> = React.memo(({
-  message,
-  onHighlight,
-  onCreateMiniAgent,
-  getMiniAgentByMessage,
-  onOpenHighlightsPanel,
-  activeHighlightsMessageId,
-  isSpeaking,
-  onSpeak,
-  onStopSpeaking,
-  onHeightChange
-}) => {
-  const rowRef = useRef<HTMLDivElement>(null);
-
-  // Measure height after render
-  useEffect(() => {
-    if (rowRef.current) {
-      const height = rowRef.current.offsetHeight;
-      if (height > 0) {
-        onHeightChange(height);
-      }
-    }
-  }, [message.content, message.highlights?.length, onHeightChange]);
-
-  // Use ResizeObserver for dynamic height changes
-  useEffect(() => {
-    if (!rowRef.current) return;
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const height = entry.contentRect.height;
-        if (height > 0) {
-          onHeightChange(height);
-        }
-      }
-    });
-
-    resizeObserver.observe(rowRef.current);
-
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [onHeightChange]);
-
-  return (
-    <div ref={rowRef} className="px-4 py-2">
-      <MessageBubble
-        message={message}
-        onHighlight={onHighlight}
-        onCreateMiniAgent={onCreateMiniAgent}
-        miniAgent={getMiniAgentByMessage(message.id)}
-        onOpenHighlightsPanel={onOpenHighlightsPanel}
-        showHighlightsPanel={activeHighlightsMessageId === message.id}
-        isSpeaking={isSpeaking === message.id}
-        onSpeak={onSpeak}
-        onStopSpeaking={onStopSpeaking}
-      />
-    </div>
-  );
-}, (prevProps, nextProps) => {
-  // Custom comparison for optimal re-rendering
-  return (
-    prevProps.message.id === nextProps.message.id &&
-    prevProps.message.content === nextProps.message.content &&
-    prevProps.message.highlights?.length === nextProps.message.highlights?.length &&
-    prevProps.activeHighlightsMessageId === nextProps.activeHighlightsMessageId &&
-    prevProps.isSpeaking === nextProps.isSpeaking &&
-    prevProps.getMiniAgentByMessage(prevProps.message.id) === 
-      nextProps.getMiniAgentByMessage(nextProps.message.id)
-  );
-});
-
-MessageRow.displayName = 'MessageRow';

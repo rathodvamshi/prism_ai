@@ -34,6 +34,7 @@ from app.utils.preprocess import preprocess as safe_preprocess
 from app.cognitive.router_engine import route_message
 from app.cognitive.context_stack import push_context, peek_context, pop_context
 from app.db.mongo_client import tasks_collection
+from app.services.task_service import create_task
 from bson import ObjectId
 from app.services.email_queue_service import remove_scheduled_email, schedule_task_reminder
 logger = logging.getLogger(__name__)
@@ -123,6 +124,268 @@ async def create_new_chat(
     except Exception as e:
         print(f"❌ Error creating session: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
+
+class RenameChatRequest(BaseModel):
+    title: str
+
+class PinChatRequest(BaseModel):
+    isPinned: bool
+
+class SaveChatRequest(BaseModel):
+    isSaved: bool
+
+@router.patch("/{chat_id}/title")
+async def rename_chat_title(
+    chat_id: str,
+    request: RenameChatRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """
+    Renames a chat session.
+    """
+    try:
+        user_id = ObjectId(current_user.user_id)
+        # Find and update
+        result = await sessions_collection.update_one(
+            {
+                "$or": [{"chat_id": chat_id}, {"sessionId": chat_id}],
+                "user_id": user_id
+            },
+            {"$set": {"title": request.title, "updated_at": datetime.utcnow()}}
+        )
+        
+        if result.modified_count == 0 and result.matched_count == 0:
+             raise HTTPException(status_code=404, detail="Chat not found or unauthorized")
+             
+        return {"status": "success", "title": request.title}
+    except Exception as e:
+        print(f"❌ Error renaming chat: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/{chat_id}/pin")
+async def pin_chat_session(
+    chat_id: str,
+    request: PinChatRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """Pins or Unpins a chat."""
+    try:
+        user_id = ObjectId(current_user.user_id)
+        result = await sessions_collection.update_one(
+            {
+                "$or": [{"chat_id": chat_id}, {"sessionId": chat_id}],
+                "user_id": user_id
+            },
+            {"$set": {"isPinned": request.isPinned, "updated_at": datetime.utcnow()}}
+        )
+        if result.matched_count == 0:
+             raise HTTPException(status_code=404, detail="Chat not found")
+        return {"status": "success", "isPinned": request.isPinned}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/{chat_id}/save")
+async def save_chat_session(
+    chat_id: str,
+    request: SaveChatRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """Saves or Unsaves a chat."""
+    try:
+        user_id = ObjectId(current_user.user_id)
+        result = await sessions_collection.update_one(
+            {
+                "$or": [{"chat_id": chat_id}, {"sessionId": chat_id}],
+                "user_id": user_id
+            },
+            {"$set": {"isSaved": request.isSaved, "updated_at": datetime.utcnow()}}
+        )
+        if result.matched_count == 0:
+             raise HTTPException(status_code=404, detail="Chat not found")
+        return {"status": "success", "isSaved": request.isSaved}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- TASKS ENDPOINTS ---
+class TaskConfirmRequest(BaseModel):
+    description: str
+    due_date: Optional[str] = None 
+
+class TaskUpdateRequest(BaseModel):
+    due_date: Optional[str] = None
+    description: Optional[str] = None
+
+@router.get("/tasks/{status}")
+async def get_tasks(
+    status: str,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """Fetch tasks (pending or completed)."""
+    try:
+        user_id = str(current_user.user_id)
+        
+        query = {"userId": user_id}
+        
+        if status == "completed":
+            query["status"] = "completed"
+        elif status == "pending":
+            query["status"] = {"$in": ["pending", "queued"]}
+        
+        cursor = tasks_collection.find(query).sort("created_at", -1).limit(50)
+        
+        tasks_list = []
+        async for t in cursor:
+            # Handle due_date serialization
+            d = t.get("due_date")
+            if isinstance(d, datetime): d = d.isoformat()
+            
+            # Map MongoDB doc to Frontend Task interface
+            tasks_list.append({
+                "task_id": str(t["_id"]),
+                "description": t.get("description"),
+                "due_date": d,
+                "completed": t.get("status") == "completed",
+                "created_at": t.get("created_at")
+            })
+        return tasks_list
+    except Exception as e:
+        logger.error(f"Error fetching tasks: {e}")
+        return []
+
+@router.post("/tasks/confirm")
+async def confirm_task(
+    request: TaskConfirmRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    """Create a new task."""
+    try:
+        user_id = str(current_user.user_id)
+        due_date_obj = None
+        if request.due_date:
+            try:
+                # Basic ISO parsing
+                due_date_obj = datetime.fromisoformat(request.due_date.replace('Z', '+00:00'))
+            except:
+                due_date_obj = datetime.utcnow()
+
+        new_task = {
+            "userId": user_id,
+            "description": request.description,
+            "due_date": due_date_obj,
+            "status": "pending",
+            "email_status": "queued",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        res = await tasks_collection.insert_one(new_task)
+        
+        return {
+            "task_id": str(res.inserted_id),
+            "description": new_task["description"],
+            "due_date": new_task["due_date"].isoformat() if new_task["due_date"] else None,
+            "confirmation_message": f"Reminder set: {new_task['description']}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/tasks/{task_id}")
+async def update_task(
+    task_id: str,
+    request: TaskUpdateRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    try:
+        user_id = ObjectId(current_user.user_id)
+        from app.services.task_service import reschedule_task
+        
+        # We only support rescheduling via this endpoint for now
+        # Description updates could be added similarly
+        if request.due_date:
+            res = await reschedule_task(task_id, request.due_date, str(user_id))
+            return {"success": True, "message": res["message"]}
+            
+        return {"success": False, "message": "No changes requested"}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error updating task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update task")
+
+@router.delete("/tasks/{task_id}")
+async def delete_task_endpoint(
+    task_id: str,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    try:
+        user_id = ObjectId(current_user.user_id)
+        from app.services.task_service import cancel_task
+        
+        res = await cancel_task(task_id, str(user_id))
+        return {"success": True, "message": res["message"]}
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error terminating task: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete task")
+
+# --- MINI AGENT ENDPOINTS ---
+class CreateMiniAgentRequest(BaseModel):
+    name: str = "New Agent"
+    snippet: str
+
+@router.get("/mini-agents")
+async def get_mini_agents(current_user: User = Depends(get_current_user_from_session)):
+    try:
+        user_id = ObjectId(current_user.user_id)
+        cursor = mini_agents_collection.find({"user_id": user_id}).sort("created_at", -1)
+        agents = []
+        async for a in cursor:
+            agents.append({
+                "id": str(a["_id"]),
+                "name": a.get("name", "Mini Agent"),
+                "snippet": a.get("snippet", ""),
+                "messages": a.get("messages", []),
+                "created_at": a.get("created_at")
+            })
+        return agents
+    except Exception:
+         return []
+
+@router.post("/mini-agents")
+async def create_mini_agent(
+    request: CreateMiniAgentRequest,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    user_id = ObjectId(current_user.user_id)
+    new_agent = {
+        "user_id": user_id,
+        "name": request.name,
+        "snippet": request.snippet,
+        "messages": [],
+        "created_at": datetime.utcnow()
+    }
+    res = await mini_agents_collection.insert_one(new_agent)
+    return {
+        "success": True, 
+        "data": {
+            "id": str(res.inserted_id),
+            "name": new_agent["name"], 
+            "snippet": new_agent["snippet"]
+        }
+    }
+
+@router.delete("/mini-agents/{agent_id}")
+async def delete_mini_agent(
+    agent_id: str,
+    current_user: User = Depends(get_current_user_from_session)
+):
+    try:
+        user_id = ObjectId(current_user.user_id)
+        res = await mini_agents_collection.delete_one({"_id": ObjectId(agent_id), "user_id": user_id})
+        return {"success": res.deleted_count > 0}
+    except:
+        return {"success": False}
 
 @router.get("/chats")
 async def get_user_chats(
@@ -339,6 +602,27 @@ async def get_session_data(
                 "sessionId": agent.get("sessionId")
             })
 
+        # 🚀 EMBED HIGHLIGHTS INTO MESSAGES (Frontend Requirement)
+        session_messages = session.get("messages", [])
+        
+        # Create a map of messageId -> highlights list
+        highlights_by_message = {}
+        for h in formatted_highlights:
+            mid = h.get("messageId")
+            if mid:
+                if mid not in highlights_by_message:
+                    highlights_by_message[mid] = []
+                highlights_by_message[mid].append(h)
+        
+        # Attach highlights to messages
+        for msg in session_messages:
+            # Handle various ID fields (id, message_id)
+            msg_id = msg.get("id") or msg.get("message_id")
+            if msg_id and msg_id in highlights_by_message:
+                msg["highlights"] = highlights_by_message[msg_id]
+            else:
+                msg["highlights"] = []
+
         # Serialize session timestamps
         session_updated = session.get("updated_at")
         if isinstance(session_updated, datetime):
@@ -352,8 +636,8 @@ async def get_session_data(
                 "isPinned": session.get("isPinned", False),
                 "isSaved": session.get("isSaved", False)
             },
-            "messages": session.get("messages", []),
-            "highlights": formatted_highlights,
+            "messages": session_messages, # Includes embedded highlights
+            "highlights": formatted_highlights, # Kept for backward compatibility
             "miniAgents": formatted_mini_agents
         }
 
@@ -399,14 +683,7 @@ async def delete_chat(chat_id: str, current_user: User = Depends(get_current_use
 
     return {"message": "Chat session deleted successfully", "deleted": True}
 
-class RenameChatRequest(BaseModel):
-    title: str
 
-class PinChatRequest(BaseModel):
-    isPinned: bool
-
-class SaveChatRequest(BaseModel):
-    isSaved: bool
 
 @router.put("/{chat_id}/rename")
 async def rename_chat(
@@ -923,6 +1200,97 @@ async def send_message_stream(
                         yield f"event: token\ndata: {done_msg}\n\n"
                         yield f"event: done\ndata: {json.dumps({'usage': {'prompt': len(_working_text or ''), 'completion': len(done_msg)}})}\n\n"
                         return
+
+                    elif act_intent == "task_create":
+                        # Validate
+                        desc = act_entities.get("task_name") or act_entities.get("description")
+                        d_iso = act_entities.get("target_time") or act_entities.get("due_date_iso")
+                        
+                        if not desc or not d_iso:
+                            err = "❌ Missing task details (need description and time)."
+                            yield f"event: token\ndata: {err}\n\n"
+                            yield f"event: done\ndata: {json.dumps({'usage': {'prompt': 0, 'completion': 0}})}\n\n"
+                            return
+
+                        # Get user details for email
+                        user_email_val = current_user.email if hasattr(current_user, 'email') else None
+                        
+                        try:
+                            # Create using the service (handles DB + Email Queue)
+                            res = await create_task(
+                                user_id=str(user_id),
+                                description=desc,
+                                due_date_iso=d_iso,
+                                user_email=user_email_val
+                            )
+                            
+                            # Log and Notify
+                            logger.info(f"✅ Task created via Chat confirmation: {desc} for {d_iso}")
+                            
+                            await pop_context(str(user_id), request.chatId)
+                            
+                            # Friendly message
+                            time_str = ""
+                            try:
+                                import datetime as _dt
+                                t_obj = _dt.datetime.fromisoformat(d_iso.replace("Z", "+00:00"))
+                                # Convert to IST for display if possible, or just formatted
+                                time_str = t_obj.strftime("%I:%M %p")
+                            except:
+                                time_str = "scheduled time"
+
+                            confirm_msg = f"✅ Reminder set: {desc} at {time_str}"
+                            yield f"event: token\ndata: {confirm_msg}\n\n"
+                            
+                            # Emit action to refresh tasks on frontend
+                            action_payload = {
+                                "type": "task_created",
+                                "data": res.get("task")
+                            }
+                            yield f"event: action\ndata: {json.dumps(action_payload)}\n\n"
+
+                            yield f"event: done\ndata: {json.dumps({'usage': {'prompt': 0, 'completion': len(confirm_msg)}})}\n\n"
+                            return
+                        except Exception as e:
+                             logger.error(f"❌ Failed to create task via Chat: {e}")
+                             
+                             # Check if it's a daily limit error
+                             error_str = str(e)
+                             if "daily_limit_reached" in error_str:
+                                 # Extract the formatted error message
+                                 parts = error_str.split("|", 1)
+                                 limit_message = parts[1] if len(parts) > 1 else "You've reached your daily limit of 3 tasks! 🎯"
+                                 
+                                 # Send limit message with upgrade suggestion
+                                 yield f"event: token\ndata: {limit_message}\n\n"
+                                 
+                                 # Optional: Send action for upgrade modal
+                                 upgrade_action = {
+                                     "type": "daily_limit_reached",
+                                     "data": {
+                                         "message": limit_message,
+                                         "limit": 3,
+                                         "upgrade_url": "/pricing"  # Future: link to pricing page
+                                     }
+                                 }
+                                 yield f"event: action\ndata: {json.dumps(upgrade_action)}\n\n"
+                             else:
+                                 # Generic error
+                                 err = "❌ Sorry, I failed to save that task. Please try again."
+                                 yield f"event: token\ndata: {err}\n\n"
+                             
+                             yield f"event: done\ndata: {json.dumps({'usage': {'prompt': 0, 'completion': 0}})}\n\n"
+                             return
+                        return
+                elif pending.get("type") == "pending_action" and msg_clean in {"no", "cancel", "don't", "stop"}:
+                    await pop_context(str(user_id), request.chatId)
+                    # Use a minimal message so frontend can show the red failure text
+                    cancel_msg = "❌ Task creation cancelled. When would you like to create it? Or do you want to change the date/time?"
+                    yield f"event: token\ndata: {cancel_msg}\n\n"
+                    # Also try to emit a cancellation event if the frontend supports it to update the card
+                    yield f"event: action\ndata: {json.dumps({'type': 'task_cancelled'})}\n\n"
+                    yield f"event: done\ndata: {json.dumps({'usage': {'prompt': 0, 'completion': len(cancel_msg)}})}\n\n"
+                    return
                 elif pending.get("type") == "pending_selection":
                     # Handle numeric selection (1..N) or description match
                     opts = pending.get("options", [])
@@ -1057,17 +1425,10 @@ async def send_message_stream(
                     logger.info(f"✅ [Step] Generating response via Main Brain (intent: {intent})")
                     logger.info(f"✅ [Step] Memory-aware pipeline active for recall questions")
                     
-                    # ⚡ AUTO-RENAME: Start title generation in parallel
-                    title_task = None
-                    current_title = session.get("title", "Untitled")
-                    if current_title in ["New Chat", "Untitled", "", None]:
-                        # Generate based on user message only for speed ("instant")
-                        title_task = asyncio.create_task(generate_chat_title(request.message))
-
                     # Pass session_id to main_brain for conversation history fetching
                     session_id_for_brain = str(session.get("_id")) if session else request.chatId
                     
-                    # Run Brain + Title in parallel
+                    # Run Brain
                     brain_pending = asyncio.create_task(main_brain_generate_response(
                         user_id=str(user_id),
                         message=_working_text,
@@ -1079,11 +1440,12 @@ async def send_message_stream(
                     # Wait for brain response
                     full_response = await brain_pending
                     
-                    # Handle title if task exists
-                    if title_task:
-                        try:
-                            # It might be done by now since brain is slow
-                            new_title = await title_task
+                    # ⚡ AUTO-RENAME: Generate AFTER response for perfect naming
+                    try:
+                        current_title = session.get("title", "Untitled")
+                        if current_title in ["New Chat", "Untitled", "", None]:
+                            # Use BOTH user query and AI response for a truly "sweet" title
+                            new_title = await generate_chat_title(request.message, full_response)
                             if new_title and new_title not in ["New Chat", "Untitled"]:
                                 await sessions_collection.update_one(
                                      {"_id": session["_id"]},
@@ -1091,8 +1453,8 @@ async def send_message_stream(
                                 )
                                 yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
                                 logger.info(f"✅ [Step] Auto-renamed chat to: {new_title}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Title generation failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Title generation failed: {e}")
 
                     logger.info(f"✅ [Step] Response generated (length: {len(full_response)})")
                     # Stream the full response as a single logical token
@@ -1112,45 +1474,25 @@ async def send_message_stream(
                     if context_for_prompt:
                         system_prompt += f"\n\nContext:\n{context_for_prompt}"
 
-                    # ⚡ AUTO-RENAME: Start title generation in parallel (Tool Flow)
-                    title_task = None
-                    title_sent = False
-                    current_title = session.get("title", "Untitled")
-                    if current_title in ["New Chat", "Untitled", "", None]:
-                        title_task = asyncio.create_task(generate_chat_title(request.message))
-
                     async for chunk in get_llm_response_stream(_working_text, system_prompt):
                         full_response += chunk
                         # Send token as SSE (raw text chunk)
                         yield f"event: token\ndata: {chunk}\n\n"
-                        
-                        # Check if title is ready mid-stream
-                        if title_task and not title_sent and title_task.done():
-                             try:
-                                 new_title = await title_task
-                                 if new_title and new_title not in ["New Chat", "Untitled"]:
-                                     await sessions_collection.update_one(
-                                         {"_id": session["_id"]},
-                                         {"$set": {"title": new_title}}
-                                     )
-                                     yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
-                                     title_sent = True
-                             except Exception:
-                                 pass # Ignore errors mid-stream
 
-                    # Ensure title is sent if finished after stream
-                    if title_task and not title_sent:
-                        try:
-                            # Await it now if not done yet
-                            new_title = await title_task
+                    # ⚡ AUTO-RENAME: Generate AFTER response for perfect context
+                    # if not title_task: # Removed check as title_task is separate
+                    try:
+                        current_title = session.get("title", "Untitled")
+                        if current_title in ["New Chat", "Untitled", "", None]:
+                            new_title = await generate_chat_title(request.message, full_response)
                             if new_title and new_title not in ["New Chat", "Untitled"]:
                                 await sessions_collection.update_one(
-                                     {"_id": session["_id"]},
-                                     {"$set": {"title": new_title}}
+                                        {"_id": session["_id"]},
+                                        {"$set": {"title": new_title}}
                                 )
                                 yield f"event: title\ndata: {json.dumps({'title': new_title})}\n\n"
-                        except Exception:
-                            pass 
+                    except Exception as e:
+                        logger.warning(f"⚠️ Title generation failed: {e}") 
 
                     # Send completion signal with basic usage info
                     usage = {
@@ -1280,6 +1622,107 @@ async def test_memory_endpoint():
         return {"status": "Memory manager imported successfully", "success": True}
     except Exception as e:
         return {"error": str(e), "success": False}
+
+
+@router.get("/debug-location/{user_id}")
+async def debug_location_endpoint(user_id: str):
+    """
+    🔧 DEBUG ENDPOINT: Check location resolution for a user
+    
+    Tests:
+    1. MongoDB profile lookup
+    2. Location intelligence resolution
+    3. Memory orchestrator holographic context
+    """
+    try:
+        from bson import ObjectId
+        from app.services.location_intelligence import location_intelligence, get_location_context
+        from app.services.unified_memory_orchestrator import unified_memory_orchestrator
+        
+        debug_info = {
+            "user_id": user_id,
+            "tests": {}
+        }
+        
+        # Test 1: Direct MongoDB lookup
+        try:
+            user = await users_collection.find_one(
+                {"_id": ObjectId(user_id)},
+                {"profile": 1, "name": 1, "email": 1}
+            )
+            debug_info["tests"]["mongodb_direct"] = {
+                "found": user is not None,
+                "profile": user.get("profile") if user else None,
+                "name": user.get("name") if user else None
+            }
+        except Exception as e:
+            debug_info["tests"]["mongodb_direct"] = {"error": str(e)}
+        
+        # Test 2: Location intelligence
+        try:
+            location_data = await location_intelligence.resolve_location(
+                user_id, "test query near me", None
+            )
+            debug_info["tests"]["location_intelligence"] = location_data
+        except Exception as e:
+            debug_info["tests"]["location_intelligence"] = {"error": str(e)}
+        
+        # Test 3: Location context string
+        try:
+            context_str = await get_location_context(user_id, "temples near me", None)
+            debug_info["tests"]["location_context_string"] = context_str
+        except Exception as e:
+            debug_info["tests"]["location_context_string"] = {"error": str(e)}
+        
+        # Test 4: Holographic context
+        try:
+            holo_context, logs = await unified_memory_orchestrator.get_holographic_context(
+                user_id=user_id,
+                query="temples near me",
+                intent="general"
+            )
+            debug_info["tests"]["holographic_context"] = {
+                "profile": holo_context.get("profile"),
+                "logs": logs
+            }
+        except Exception as e:
+            debug_info["tests"]["holographic_context"] = {"error": str(e)}
+        
+        # Test 5: Cache status
+        try:
+            cached = unified_memory_orchestrator._get_cached_profile(user_id)
+            debug_info["tests"]["cache_status"] = {
+                "cached": cached is not None,
+                "cached_data": cached
+            }
+        except Exception as e:
+            debug_info["tests"]["cache_status"] = {"error": str(e)}
+        
+        return debug_info
+        
+    except Exception as e:
+        return {"error": str(e), "user_id": user_id}
+
+
+@router.post("/clear-cache/{user_id}")
+async def clear_cache_endpoint(user_id: str):
+    """
+    🗑️ Clear cache for a user to force fresh data fetch
+    """
+    try:
+        from app.services.unified_memory_orchestrator import unified_memory_orchestrator
+        from app.services.location_intelligence import location_intelligence
+        
+        # Clear orchestrator cache
+        unified_memory_orchestrator.invalidate_cache(user_id)
+        
+        # Clear location intelligence cache
+        if user_id in location_intelligence.location_cache:
+            del location_intelligence.location_cache[user_id]
+        
+        return {"success": True, "message": f"Cache cleared for user {user_id}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 # Pydantic models for new endpoints

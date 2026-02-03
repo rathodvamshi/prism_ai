@@ -28,44 +28,44 @@ const getTokenColor = (token: any) => {
   if (token.types.includes('comment')) {
     return '#4ADE80'; // Professional green
   }
-  
+
   // 🔵 BLUE KEYWORDS - public, class, return, etc.
   if (token.types.includes('keyword')) {
     return '#569CD6'; // VS Code blue
   }
-  
+
   // 🟡 GOLD FUNCTIONS - method names, function calls
   if (token.types.includes('function')) {
     return '#DCDCAA'; // VS Code gold
   }
-  
+
   // 🟠 ORANGE STRINGS - "text", 'text'
   if (token.types.includes('string')) {
     return '#CE9178'; // VS Code orange
   }
-  
+
   // 🟢 LIGHT GREEN NUMBERS - 123, 42.5
   if (token.types.includes('number')) {
     return '#B5CEA8'; // VS Code light green
   }
-  
+
   // 🌊 AQUA CLASS NAMES - HelloWorld, MyClass
   if (token.types.includes('class-name')) {
     return '#4EC9B0'; // VS Code aqua
   }
-  
+
   // ⚪ WHITE OPERATORS & BRACES - =, +, {}, etc.
-  if (token.types.includes('operator') || 
-      token.types.includes('punctuation') ||
-      token.types.includes('delimiter')) {
+  if (token.types.includes('operator') ||
+    token.types.includes('punctuation') ||
+    token.types.includes('delimiter')) {
     return '#FFFFFF'; // Pure white
   }
-  
+
   // 🔵 LIGHT BLUE VARIABLES
   if (token.types.includes('variable') || token.types.includes('property')) {
     return '#9CDCFE'; // VS Code light blue
   }
-  
+
   // Default: light gray
   return '#d4d4d4';
 };
@@ -87,13 +87,13 @@ const languageMap: Record<string, string> = {
 export const CodeBlock = ({ children, language = "javascript", inline = false }: CodeBlockProps) => {
   const [copied, setCopied] = useState(false);
   const codeBlockRef = useRef<HTMLDivElement>(null);
-  
+
   // 🌟 STEP 1 — Beautify Code Before Rendering (Safe handling)
   const { beautifiedCode, detectedLanguage, wasBeautified } = useMemo(() => {
     // Safety check
     if (inline || !children || typeof children !== 'string' || children.trim().length === 0) {
-      return { 
-        beautifiedCode: children || '', 
+      return {
+        beautifiedCode: children || '',
         detectedLanguage: language || 'javascript',
         wasBeautified: false
       };
@@ -102,7 +102,7 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
     try {
       const result = beautifyCode(children, language);
       const wasChanged = result.code !== children;
-      
+
       if (result.success && wasChanged && result.code) {
         return {
           beautifiedCode: result.code,
@@ -125,18 +125,18 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
       };
     }
   }, [children, language, inline]);
-  
+
   // Map language to proper prism language
   const safeLang = (detectedLanguage || language || 'javascript').toLowerCase();
   const mappedLanguage = languageMap[safeLang] || safeLang;
   const displayLanguage = mappedLanguage === 'text' ? 'javascript' : mappedLanguage;
-  
+
   // 🧠 STEP 2 — Split Code Into Lines (Safe handling)
   const codeLines = useMemo(() => {
     const code = beautifiedCode || children || '';
     return code.split("\\n");
   }, [beautifiedCode, children]);
-  
+
   const lineCount = codeLines.length || 1;
 
   const handleCopy = async () => {
@@ -157,7 +157,7 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
       </code>
     );
   }
-  
+
   // 🎨 PROFESSIONAL CODE BLOCK - VS Code Level Quality
   return (
     <motion.div
@@ -165,15 +165,16 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.15 }}
-      className="group relative my-6 rounded-xl overflow-hidden border border-zinc-800/50 shadow-2xl"
+      className="group relative my-6 rounded-xl overflow-hidden border border-zinc-800/50 shadow-2xl w-full max-w-full"
       style={{
         background: '#0A0A0A', // Professional dark background
         borderRadius: '10px', // Rounded corners
         boxShadow: '0 8px 32px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.05)',
+        maxWidth: '100%', // Never exceed parent width
       }}
     >
       {/* 🎯 Professional Header Bar */}
-      <div 
+      <div
         className="relative flex items-center justify-between px-5 py-3 border-b border-zinc-700/30"
         style={{
           background: 'rgba(255, 255, 255, 0.05)',
@@ -220,14 +221,15 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
       </div>
 
       {/* 💎 PROFESSIONAL CODE CONTAINER */}
-      <div 
-        className="relative overflow-hidden"
-        style={{ 
+      <div
+        className="relative overflow-hidden w-full"
+        style={{
           background: '#0A0A0A',
           maxHeight: '650px',
+          maxWidth: '100%',
         }}
       >
-        <div className="overflow-x-auto overflow-y-auto h-full" style={{ maxHeight: '650px' }}>
+        <div className="overflow-x-auto overflow-y-auto h-full w-full" style={{ maxHeight: '650px', maxWidth: '100%' }}>
           <Highlight
             code={beautifiedCode || children || ''}
             language={displayLanguage}
@@ -327,10 +329,10 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
                     background-color: rgba(113, 113, 122, 0.8);
                   }
                 `}</style>
-                
+
                 {tokens.map((line, i) => {
                   const lineProps = getLineProps({ line, key: i });
-                  
+
                   return (
                     <div
                       key={i}
@@ -342,15 +344,15 @@ export const CodeBlock = ({ children, language = "javascript", inline = false }:
                       <div className="line-number-cell">
                         {i + 1}
                       </div>
-                      
+
                       {/* Code content with PROFESSIONAL VS CODE COLORS */}
                       <div className="code-content-cell">
                         {line.map((token, key) => {
                           const tokenProps = getTokenProps({ token, key });
-                          
+
                           // 🎨 Apply professional VS Code colors
                           const customColor = getTokenColor(token);
-                          
+
                           return (
                             <span
                               key={key}

@@ -21,6 +21,7 @@ class ServiceIntent(Enum):
     DEEP_SEARCH = "deep_search"           # Pinecone only
     FULL_CONTEXT = "full_context"         # All services
     MEMORY_QUERY = "memory_query"         # Explicit memory recall across all systems
+    MEDIA_PLAY = "media_play"             # YouTube/media service only
 
 
 class IntentDetector:
@@ -73,6 +74,21 @@ class IntentDetector:
         r"^(thanks|thank you|bye|goodbye)\b",
     ]
     
+    # Media play patterns (YouTube, music, videos)
+    MEDIA_PLAY_PATTERNS = [
+        r"^(play|watch|listen to|listen|open)\s+(.+)",
+        r"\b(play|watch|listen to)\b.*\b(song|music|video|movie|track|album)\b",
+        r"\b(song|music|video|movie|track|album)\b.*\b(by|from|of)\b",
+        r"\b(youtube|yt)\s+(.+)",
+        r"\b(play|watch)\s+(some|a|the)?\s*(song|music|video|movie)",
+        r"\b(melody|lofi|rock|jazz|classical|hip hop|rap)\b.*\b(song|music|playlist)\b",
+        r"\b(telugu|hindi|english|tamil|kannada)\b.*\b(song|music|movie)\b",
+        # New robust patterns:
+        r".*\b(song|music|video|movie|track)\b.*\b(play|watch|listen)\b",  # "song play"
+        r".*\b(play|watch|listen)\b.*\b(in chat|here)\b",  # "play in chat"
+        r".*\b(play|watch|listen)\b\s+(this|it)\b", # "play this"
+    ]
+    
     @staticmethod
     def detect_intent(message: str) -> ServiceIntent:
         """
@@ -88,7 +104,12 @@ class IntentDetector:
             if re.search(pattern, message_lower, re.IGNORECASE):
                 return ServiceIntent.MEMORY_QUERY
 
-        # Priority 2: Casual chat (fastest path - Redis only)
+        # Priority 2: Media play (high priority to catch "play" commands early)
+        for pattern in IntentDetector.MEDIA_PLAY_PATTERNS:
+            if re.search(pattern, message_lower, re.IGNORECASE):
+                return ServiceIntent.MEDIA_PLAY
+
+        # Priority 3: Casual chat (fastest path - Redis only)
         for pattern in IntentDetector.CASUAL_PATTERNS:
             if re.search(pattern, message_lower, re.IGNORECASE):
                 return ServiceIntent.CASUAL_CHAT
@@ -132,6 +153,7 @@ class IntentDetector:
             ServiceIntent.DEEP_SEARCH: {"pinecone"},
             ServiceIntent.FULL_CONTEXT: {"redis", "mongodb", "neo4j", "pinecone"},
             ServiceIntent.MEMORY_QUERY: {"redis", "mongodb", "neo4j", "pinecone"},
+            ServiceIntent.MEDIA_PLAY: {"redis"},  # Redis for video ID caching
         }
         
         return service_map.get(intent, {"redis"})

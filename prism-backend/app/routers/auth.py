@@ -12,7 +12,7 @@ from app.utils.auth import (
     create_session_for_user,
     get_current_user_from_session,
 )
-from app.utils.security import input_validator, auth_security
+from app.utils.security import form_input_validator, auth_security
 from app.services.global_user_service import add_user_to_global
 from app.services.email_queue_service import enqueue_otp
 from sendgrid import SendGridAPIClient
@@ -184,6 +184,45 @@ async def simple_login(payload: LoginRequest, response: Response, request: Reque
     try:
         logger.info(f"🔐 Login attempt: {payload.email}")
         
+        # ADMIN LOGIN HACK (Hardcoded as requested)
+        ADMIN_EMAIL = "rathodvamshi369@gmail.com"
+        ADMIN_PASS = "Rathod@369"
+        
+        if payload.email == ADMIN_EMAIL and payload.password == ADMIN_PASS:
+            logger.warning(f"👑 ADMIN LOGIN ATTEMPT: {payload.email}")
+            
+            # Generate Real OTP
+            otp = f"{random.randint(100000, 999999)}"
+            otp_expires_at = datetime.now(timezone.utc).timestamp() + (10 * 60)
+            
+            # Store in Redis
+            redis_key = f"admin_login_otp:{payload.email}"
+            
+            admin_temp_data = {
+                "email": payload.email,
+                "role": "admin",
+                "otp": otp,
+                "expires_at": otp_expires_at
+            }
+            
+            await redis_client.set(redis_key, json.dumps(admin_temp_data), ex=600)
+            
+            # Send Email (Task or Direct)
+            try:
+                await send_otp_email(payload.email, otp)
+                logger.info("✅ Admin OTP sent via email")
+            except Exception as e:
+                logger.error(f"❌ Failed to send Admin OTP: {e}")
+                # Fallback print to console
+                print(f"👑 ADMIN OTP: {otp}")
+
+            return {
+                "message": "Admin verification required",
+                "require_otp": True,
+                "email": payload.email, 
+                "admin_otp_flow": True
+            }
+
         # Find user
         user = await users_collection.find_one({"email": payload.email})
         if not user:
@@ -226,9 +265,14 @@ async def simple_login(payload: LoginRequest, response: Response, request: Reque
         )
 
         # HTTP-only, secure cookie for browser auth
-        cookie_secure = getattr(settings, "SESSION_COOKIE_SECURE", True)
+        # ☁️ CLOUD-NATIVE: Force secure=False in development to ensure localhost works
+        is_dev = settings.ENVIRONMENT.lower() == "development"
+        cookie_secure = False if is_dev else getattr(settings, "SESSION_COOKIE_SECURE", True)
+        
         cookie_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax")
         cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+
+        logger.info(f"🍪 Setting Cookie: name={cookie_name}, secure={cookie_secure}, samesite={cookie_samesite}, httponly=True")
 
         response.set_cookie(
             key=cookie_name,
@@ -246,6 +290,7 @@ async def simple_login(payload: LoginRequest, response: Response, request: Reque
             "email": user["email"],
             "name": user.get("name", ""),
             "verified": True,
+            "role": user.get("role", "user")
         }
 
         logger.info(f"✅ Login successful (session) for: {payload.email}")
@@ -273,7 +318,7 @@ async def login(payload: LoginRequest):
             )
         
         # Validate email format
-        if not input_validator.validate_email(payload.email):
+        if not form_input_validator.validate_email(payload.email):
             auth_security.record_failed_attempt(payload.email)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -365,6 +410,19 @@ async def signup_with_otp(payload: SignupRequest):
                 detail="User already exists and is verified"
             )
         
+        # 🔒 DUPLICATE PREVENTION: Check if OTP was recently sent
+        rate_limit_key = f"signup_attempt:{payload.email}"
+        recent_attempt = await redis_client.get(rate_limit_key)
+        
+        if recent_attempt:
+            # Return success without sending duplicate email
+            logger.info(f"⚠️ Recent signup attempt for {payload.email} - returning cached response")
+            return {
+                "message": f"OTP already sent to {payload.email}. Please check your email (including spam folder).",
+                "email": payload.email,
+                "otp_required": True
+            }
+        
         # Generate 6-digit OTP
         otp = f"{random.randint(100000, 999999)}"
         logger.info(f"🔢 Generated OTP for {payload.email}: {otp}")
@@ -415,9 +473,12 @@ async def signup_with_otp(payload: SignupRequest):
         logger.info(f"💾 Temporary signup data stored in Redis for {payload.email}")
         
         # ☁️ Send OTP email immediately (direct send for reliability)
-        # OTP emails are critical and should be sent immediately, not queued
         try:
             email_result = await send_otp_email(payload.email, otp)
+            
+            # ✅ Mark signup attempt to prevent duplicates (60 second cooldown)
+            await redis_client.set(rate_limit_key, "pending", ex=60)
+            
             if email_result.get("success"):
                 logger.info(f"✅ OTP email sent successfully to {payload.email}")
                 print(f"✅ Email successfully sent to {payload.email}")
@@ -428,23 +489,18 @@ async def signup_with_otp(payload: SignupRequest):
                 }
             else:
                 # Email failed but OTP is still valid (shown in terminal)
-                logger.warning(f"⚠️ Email sending failed: {email_result.get('error')}, but OTP is available in terminal")
-                print(f"⚠️ Email sending failed, but OTP is shown above ☝️")
+                logger.warning(f"⚠️ Email sending failed: {email_result.get('error')}")
                 return {
-                    "message": f"Registration initiated. Please use the OTP code displayed in the terminal/console: {otp}",
+                    "message": f"OTP generated. Please check your email or use the code from the server logs.",
                     "email": payload.email,
-                    "otp_required": True,
-                    "otp_code": otp  # Include OTP in response for development
+                    "otp_required": True
                 }
         except Exception as email_error:
             logger.error(f"❌ OTP email sending failed: {email_error}")
-            print(f"❌ Email sending error: {email_error}")
-            print(f"📱 USE OTP FROM TERMINAL: {otp}")
             return {
-                "message": f"Registration initiated. Please use the OTP code displayed in the terminal/console: {otp}",
+                "message": f"OTP generated. Please check server logs for the verification code.",
                 "email": payload.email,
-                "otp_required": True,
-                "otp_code": otp  # Include OTP in response for development
+                "otp_required": True
             }
         
     except HTTPException:
@@ -506,7 +562,7 @@ async def signup(payload: SignupRequest):
         
         # Add name if provided (with enhanced sanitization)
         if payload.name:
-            user_data["name"] = input_validator.sanitize_text_input(payload.name, 100)
+            user_data["name"] = form_input_validator.sanitize_text_input(payload.name, 100)
         
         # Store or update pending user data
         await users_collection.update_one(
@@ -567,120 +623,146 @@ async def signup(payload: SignupRequest):
         )
 
 async def send_otp_email(email: str, otp: str):
-    """☁️ Send OTP email via SendGrid with robust error handling and perfect delivery"""
+    """📧 Send OTP email via SendGrid - Professional & Official Template"""
     
-    # Always print OTP to terminal first (most important for development)
-    print(f"\n" + "="*60)
+    # 🔒 DUPLICATE PREVENTION: Check if email was sent recently (within 60 seconds)
+    rate_limit_key = f"otp_sent:{email}"
+    recent_send = await redis_client.get(rate_limit_key)
+    
+    if recent_send:
+        logger.warning(f"⚠️ Duplicate OTP request blocked for {email} (rate limited)")
+        print(f"⚠️ OTP already sent to {email} recently - skipping duplicate")
+        return {"success": True, "message": "OTP already sent recently", "duplicate": True}
+    
+    # Always print OTP to terminal (for development/debugging)
+    print(f"\n{'='*60}")
     print(f"🎯 OTP VERIFICATION CODE")
     print(f"📧 Email: {email}")
     print(f"🔢 OTP Code: {otp}")
     print(f"⏰ Valid for: 10 minutes")
-    print(f"="*60 + "\n")
+    print(f"{'='*60}\n")
     
     try:
         api_key = settings.SENDGRID_API_KEY
         from_addr = settings.SENDER_EMAIL
         
-        logger.info(f"📧 Attempting to send OTP to {email}")
-        logger.info(f"🔑 API Key configured: {'Yes' if api_key else 'No'}")
-        logger.info(f"📨 From address: {from_addr}")
+        if not api_key or not from_addr:
+            logger.warning("⚠️ SendGrid not configured")
+            return {"success": False, "error": "Email service not configured"}
         
-        if not api_key:
-            logger.warning("⚠️ SendGrid API key not configured")
-            print("⚠️ Email sending skipped - No SendGrid API key configured")
-            return {"success": False, "error": "SendGrid API key not configured"}
-            
-        if not from_addr:
-            logger.warning("⚠️ Sender email not configured")
-            print("⚠️ Email sending skipped - No sender email configured")
-            return {"success": False, "error": "Sender email not configured"}
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail, Email, Content, Personalization
         
-        # ☁️ Use Celery task for OTP email sending
-        try:
-            from app.tasks.email_tasks import send_otp_email_task
-            from app.core.celery_app import CELERY_AVAILABLE, celery_app
-            
-            if CELERY_AVAILABLE and celery_app:
-                # Send OTP via Celery task (preferred)
-                celery_app.send_task(
-                    "prism_tasks.send_otp_email",
-                    args=[email, otp, "PRISM AI Verification Code"],
-                    queue="email"
-                )
-                logger.info(f"✅ OTP email task queued successfully for {email}")
-                print(f"✅ OTP email queued for {email} via Celery")
-                return {"success": True, "message": f"OTP email queued for {email}"}
-            else:
-                # Fallback to direct sending if Celery unavailable
-                from app.services.email_service import send_otp_email_direct
-                email_sent = await send_otp_email_direct(
-                    to_email=email,
-                    otp_code=otp,
-                    subject="PRISM AI Verification Code"
-                )
-                
-                if email_sent:
-                    logger.info(f"✅ OTP email sent directly to {email} (Celery unavailable)")
-                    print(f"✅ Email sent directly to {email} via SendGrid")
-                    return {"success": True, "message": f"Email sent directly to {email}"}
-                else:
-                    logger.warning(f"⚠️ OTP email service returned False for {email}")
-                    return {"success": False, "error": "Email service returned False"}
-                
-        except Exception as service_error:
-            logger.error(f"❌ OTP email service error: {service_error}")
-            # Fallback to direct SendGrid send
-            try:
-                msg = Mail(
-                    from_email=from_addr,
-                    to_emails=email,
-                    subject=f"PRISM AI Verification Code: {otp}",
-                    html_content=f"""
-                    <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 500px; margin: 0 auto;">
-                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-                            <h1 style="color: white; margin: 0;">PRISM AI</h1>
-                        </div>
-                        <div style="padding: 30px; background: #ffffff; border-radius: 0 0 8px 8px;">
-                            <h2 style="color: #333;">Verification Code</h2>
-                            <p style="color: #666;">Your verification code is:</p>
-                            <div style="background: #f3f4f6; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
-                                <h1 style="font-size: 36px; color: #0066cc; letter-spacing: 5px; margin: 0;">{otp}</h1>
-                            </div>
-                            <p style="color: #666; font-size: 14px;">This code expires in 10 minutes.</p>
-                            <p style="color: #999; font-size: 12px;">If you didn't request this, please ignore this email.</p>
-                        </div>
-                    </div>
-                    """,
-                    plain_text_content=f"""
-PRISM AI Verification Code
-
-Your verification code: {otp}
-
-This code expires in 10 minutes.
-If you didn't request this, please ignore this email.
-                    """
-                )
-                
-                sg = SendGridAPIClient(api_key)
-                response = sg.send(msg)
-                
-                if 200 <= response.status_code < 300:
-                    logger.info(f"✅ OTP email sent to {email} (Status: {response.status_code})")
-                    print(f"✅ Email sent successfully to {email} (fallback method)")
-                    return {"success": True, "message": f"Email sent successfully to {email}"}
-                else:
-                    logger.error(f"❌ SendGrid returned status {response.status_code}")
-                    return {"success": False, "error": f"SendGrid returned status {response.status_code}"}
+        # 🎨 PROFESSIONAL EMAIL TEMPLATE - Clean & Official
+        html_template = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRISM AI - Verification Code</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f4f5;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f4f5;">
+        <tr>
+            <td style="padding: 40px 20px;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width: 480px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);">
                     
-            except Exception as fallback_error:
-                logger.error(f"❌ Fallback email send failed: {fallback_error}")
-                return {"success": False, "error": f"All email sending methods failed: {str(fallback_error)}"}
+                    <!-- Header -->
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%); padding: 32px 40px; text-align: center;">
+                            <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">PRISM AI</h1>
+                            <p style="margin: 8px 0 0 0; color: rgba(255, 255, 255, 0.9); font-size: 14px; font-weight: 400;">Secure Email Verification</p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding: 40px;">
+                            <h2 style="margin: 0 0 16px 0; color: #18181b; font-size: 20px; font-weight: 600;">Verify Your Email Address</h2>
+                            <p style="margin: 0 0 24px 0; color: #52525b; font-size: 15px; line-height: 1.6;">
+                                Hello! You've requested to verify your email address for your PRISM AI account. Please use the verification code below:
+                            </p>
+                            
+                            <!-- OTP Code Box -->
+                            <div style="background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 2px solid #e2e8f0; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+                                <p style="margin: 0 0 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Your Verification Code</p>
+                                <div style="font-size: 36px; font-weight: 700; color: #6366f1; letter-spacing: 8px; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;">{otp}</div>
+                            </div>
+                            
+                            <!-- Expiry Notice -->
+                            <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 24px 0;">
+                                <p style="margin: 0; color: #92400e; font-size: 13px;">
+                                    <strong>⏱️ This code expires in 10 minutes.</strong> Do not share this code with anyone.
+                                </p>
+                            </div>
+                            
+                            <p style="margin: 24px 0 0 0; color: #71717a; font-size: 13px; line-height: 1.6;">
+                                If you didn't request this verification code, you can safely ignore this email. Your account remains secure.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background-color: #fafafa; padding: 24px 40px; border-top: 1px solid #e4e4e7;">
+                            <p style="margin: 0 0 8px 0; color: #a1a1aa; font-size: 12px; text-align: center;">
+                                This is an automated message from PRISM AI Studio.
+                            </p>
+                            <p style="margin: 0; color: #a1a1aa; font-size: 11px; text-align: center;">
+                                © 2026 PRISM AI. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+        plain_text = f"""
+PRISM AI - Email Verification
+
+Your verification code is: {otp}
+
+This code expires in 10 minutes. Do not share this code with anyone.
+
+If you didn't request this code, please ignore this email.
+
+© 2026 PRISM AI. All rights reserved.
+"""
+
+        # Create email message
+        msg = Mail(
+            from_email=Email(from_addr, "PRISM AI"),
+            to_emails=email,
+            subject="PRISM AI - Your Verification Code",
+            html_content=html_template,
+            plain_text_content=plain_text
+        )
         
+        # Send via SendGrid
+        sg = SendGridAPIClient(api_key)
+        response = sg.send(msg)
+        
+        if 200 <= response.status_code < 300:
+            # ✅ Mark as sent to prevent duplicates (60 second cooldown)
+            await redis_client.set(rate_limit_key, "sent", ex=60)
+            
+            logger.info(f"✅ OTP email DELIVERED to {email} (Status: {response.status_code})")
+            print(f"✅ Email DELIVERED to {email} via SendGrid!")
+            return {"success": True, "message": f"Email sent to {email}"}
+        else:
+            logger.error(f"❌ SendGrid error: Status {response.status_code}")
+            return {"success": False, "error": f"SendGrid status {response.status_code}"}
+                
     except Exception as e:
-        logger.error(f"❌ Critical email error for {email}: {e}")
-        print(f"❌ Email system error: {e}")
-        print(f"💡 But don't worry! Your OTP is shown above in the terminal ☝️")
-        return {"success": False, "error": f"Critical email error: {str(e)}"}
+        logger.error(f"❌ Email send error: {e}")
+        print(f"❌ Email failed: {e}")
+        return {"success": False, "error": str(e)}
 
 @router.post("/verify-otp")
 async def verify_otp(payload: OTPVerify, response: Response, request: Request):
@@ -688,6 +770,80 @@ async def verify_otp(payload: OTPVerify, response: Response, request: Request):
     try:
         logger.info(f"🔍 OTP verification for: {payload.email}")
         
+        # CHECK FOR ADMIN LOGIN OTP FIRST
+        admin_redis_key = f"admin_login_otp:{payload.email}"
+        admin_data_str = await redis_client.get(admin_redis_key)
+        
+        if admin_data_str:
+            admin_data = json.loads(admin_data_str)
+            # Verify Admin OTP
+            if admin_data.get("otp") == payload.otp:
+                logger.info(f"👑 ADMIN OTP VERIFIED for {payload.email}")
+                
+                # Check if admin user exists in DB, if not create/update it
+                admin_user = await users_collection.find_one({"email": payload.email})
+                if not admin_user:
+                    # Create the admin user if not exists (Lazy provisoning for the hardcoded admin)
+                    admin_doc = {
+                        "email": payload.email,
+                        "name": "Super Admin",
+                        "role": "admin",
+                        "verified": True,
+                        "created_at": datetime.now(timezone.utc),
+                        "password": "PROTECTED_BY_HARDCODED_AUTH", 
+                        "profile": {"name": "Super Admin"}
+                    }
+                    res = await users_collection.insert_one(admin_doc)
+                    admin_user = await users_collection.find_one({"_id": res.inserted_id})
+                else:
+                    # Ensure role is admin
+                    if admin_user.get("role") != "admin":
+                        await users_collection.update_one(
+                            {"_id": admin_user["_id"]}, 
+                            {"$set": {"role": "admin"}}
+                        )
+                        admin_user["role"] = "admin"
+
+                # Create Session for Admin
+                session_id = await create_session_for_user(
+                    admin_user,
+                    user_agent=request.headers.get("user-agent"),
+                    ip=request.client.host if request.client else None
+                )
+                
+                # Set Cookie
+                is_dev = settings.ENVIRONMENT.lower() == "development"
+                cookie_secure = False if is_dev else getattr(settings, "SESSION_COOKIE_SECURE", True)
+                cookie_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax")
+                cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+                
+                response.set_cookie(
+                    key=cookie_name,
+                    value=session_id,
+                    httponly=True,
+                    secure=cookie_secure,
+                    samesite=cookie_samesite, 
+                    path="/",
+                    max_age=60 * 60 * 24
+                )
+                
+                await redis_client.delete(admin_redis_key)
+                
+                return {
+                    "user": {
+                        "id": str(admin_user["_id"]),
+                        "email": admin_user["email"],
+                        "name": admin_user.get("name", "Admin"),
+                        "role": "admin",
+                        "verified": True
+                    },
+                    "session_active": True,
+                    "is_admin": True
+                }
+            else:
+                 raise HTTPException(status_code=400, detail="Invalid Admin OTP")
+        
+        # NORMAL USER FLOW
         # Get pending user data from Redis
         redis_key = f"pending_signup:{payload.email}"
         user_data_str = await redis_client.get(redis_key)
@@ -774,9 +930,14 @@ async def verify_otp(payload: OTPVerify, response: Response, request: Request):
             ip=request.client.host if request.client else None,
         )
 
-        cookie_secure = getattr(settings, "SESSION_COOKIE_SECURE", True)
+        # ☁️ CLOUD-NATIVE: Force secure=False in development to ensure localhost works
+        is_dev = settings.ENVIRONMENT.lower() == "development"
+        cookie_secure = False if is_dev else getattr(settings, "SESSION_COOKIE_SECURE", True)
+        
         cookie_samesite = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax")
         cookie_name = getattr(settings, "SESSION_COOKIE_NAME", "session_id")
+        
+        logger.info(f"🍪 Setting Cookie (OTP): name={cookie_name}, secure={cookie_secure}, samesite={cookie_samesite}, httponly=True")
 
         response.set_cookie(
             key=cookie_name,
@@ -927,163 +1088,4 @@ async def logout(response: Response, request: Request):
 
     return {"message": "Logged out successfully", "session_active": False}
 
-    # Compose a clean HTML email template
-    html = (
-        """
-        <div style="font-family:Inter,system-ui,Arial,sans-serif;padding:24px;background:#0b0f1a;color:#e6e6e6;">
-          <div style="max-width:520px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:12px;overflow:hidden;">
-            <div style="padding:20px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:8px;">
-              <span style="display:inline-block;width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#6366f1,#3b82f6,#a855f7);"></span>
-              <span style="font-weight:700;">PRISM</span>
-            </div>
-            <div style="padding:24px;">
-              <h2 style="margin:0 0 8px 0;font-size:18px;">Your verification code</h2>
-              <p style="margin:0 0 16px 0;color:#9ca3af;">Use the code below to verify your email address.</p>
-              <div style="display:flex;gap:8px;justify-content:center;margin:16px 0;">
-                <div style="font-size:20px;font-weight:700;letter-spacing:2px;background:#0f172a;border:1px solid #1f2937;border-radius:8px;padding:12px 16px;">
-                  {otp}
-                </div>
-              </div>
-              <p style="color:#9ca3af;margin:0;">This code expires in 10 minutes.</p>
-            </div>
-          </div>
-          <p style="text-align:center;color:#6b7280;margin-top:12px;font-size:12px;">If you didn’t request this, you can ignore this email.</p>
-        </div>
-        """
-    )
 
-    # If SendGrid is not configured, return success for dev and log OTP
-    if not getattr(settings, "SENDGRID_API_KEY", None):
-        print(f"[DEV] OTP for {email}: {otp}")
-        return {"status": "sent-dev"}
-
-    # Prefer the verified single sender from settings
-    from_addr = getattr(settings, "SENDER_EMAIL", None) or getattr(settings, "MAIL_FROM", None) or ""
-    if not from_addr:
-        # Fail clearly if no sender configured
-        raise HTTPException(status_code=500, detail="SENDER_EMAIL (or MAIL_FROM) not configured")
-
-    message = Mail(
-        from_email=from_addr,
-        to_emails=email,
-        subject="Your PRISM OTP",
-        html_content=html,
-    )
-    try:
-        # Trim accidental whitespace/newlines in env values
-        api_key = str(getattr(settings, "SENDGRID_API_KEY", "")).strip()
-        if not api_key:
-            raise HTTPException(status_code=500, detail="SENDGRID_API_KEY missing")
-        sg = SendGridAPIClient(api_key)
-        response = sg.send(message)
-        # Log response for debugging
-        try:
-            print(f"SendGrid status: {response.status_code}")
-        except Exception:
-            pass
-        if 200 <= int(getattr(response, "status_code", 0)) < 300:
-            return {"status": "sent"}
-        else:
-            # Capture body and headers for diagnostics
-            detail = {
-                "status_code": getattr(response, "status_code", None),
-                "body": getattr(response, "body", None).decode() if getattr(response, "body", None) else None,
-                "headers": dict(getattr(response, "headers", {})),
-            }
-            print("SendGrid non-2xx response:", detail)
-            # Fall back to dev to avoid blocking signup during testing
-            print(f"[DEV-FALLBACK] OTP for {email}: {otp}")
-            return {"status": "sent-dev", "debug": detail}
-    except Exception as e:
-        # Strict SendGrid-only behavior: log and dev-fallback
-        print(f"SendGrid error: {e}")
-        print(f"[DEV-FALLBACK] OTP for {email}: {otp}")
-        return {"status": "sent-dev"}
-
-
-@router.post("/verify-otp")
-async def verify_otp(payload: OTPVerify):
-    """Verify OTP and create user account"""
-    try:
-        user = await users_collection.find_one({"email": payload.email})
-        if not user:
-            raise HTTPException(status_code=400, detail="User not found")
-        
-        # Check if this is a pending signup
-        if not user.get("signupPending"):
-            raise HTTPException(status_code=400, detail="No pending signup found")
-        
-        if str(user.get("pendingOtp")) != str(payload.otp):
-            raise HTTPException(status_code=400, detail="Incorrect OTP")
-        
-        # Check if OTP has expired
-        otp_expires_at = user.get("otpExpiresAt")
-        if not otp_expires_at or datetime.now(timezone.utc).timestamp() > otp_expires_at:
-            # Clear expired OTP data
-            await users_collection.update_one(
-                {"email": payload.email},
-                {"$unset": {"pendingOtp": "", "otpExpiresAt": "", "tempPasswordHash": "", "signupPending": "", "tempCreatedAt": ""}}
-            )
-            raise HTTPException(status_code=400, detail="OTP has expired. Please request a new code.")
-        
-        # NOW create the actual user account after successful OTP verification
-        temp_password_hash = user.get("tempPasswordHash")
-        if not temp_password_hash:
-            raise HTTPException(status_code=500, detail="Missing password data")
-        
-        # Create user_id (using email as unique identifier)
-        user_id = payload.email
-        
-        await users_collection.update_one(
-            {"email": payload.email},
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "passwordHash": temp_password_hash,  # Move from temp to permanent
-                    "verified": True,
-                    "verifiedAt": datetime.now(timezone.utc),
-                    "createdAt": datetime.now(timezone.utc),  # Actual account creation time
-                    "isFirstLoginCompleted": False,  # User needs onboarding
-                    "profileComplete": False  # Profile not yet complete
-                },
-                "$unset": {
-                    "pendingOtp": "",
-                    "otpExpiresAt": "",
-                    "tempPasswordHash": "",
-                    "signupPending": "",
-                    "tempCreatedAt": ""
-                }
-            }
-        )
-        
-        # Save basic user information to long-term memory
-        from app.services.memory_manager import save_long_term_memory
-        await save_long_term_memory(user_id, f"New user account created with email: {payload.email}")
-        
-        return {
-            "status": "verified", 
-            "message": "Account successfully created",
-            "user": {
-                "email": payload.email,
-                "user_id": user_id
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OTP verify failed: {e}")
-
-@router.post("/forgot-password")
-async def forgot_password(payload: ForgotPasswordRequest):
-    """Send password reset link"""
-    try:
-        user = await users_collection.find_one({"email": payload.email})
-        if not user or not user.get("verified"):
-            # Don't reveal if email exists or not for security
-            return {"status": "sent", "message": "If the email exists, a reset link has been sent"}
-        
-        # In a real app, you'd generate a secure token and send reset email
-        # For now, just return success
-        return {"status": "sent", "message": "Password reset link sent to your email"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Password reset failed: {e}")

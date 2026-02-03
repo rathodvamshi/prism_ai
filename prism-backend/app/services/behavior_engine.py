@@ -34,6 +34,83 @@ class BehaviorEngine:
     """
 
     def __init__(self):
+        # 🛡️ REGRESSION SAFETY GUARDRAILS (LOCKED) - ANTI-ROBOTIC PHRASES
+        # Any occurrence of these phrases in output is a SEVERITY-1 BUG.
+        self.prohibited_phrases = [
+            # AI/Robot Identity Phrases
+            "as an ai",
+            "as an artificial",
+            "i am an ai",
+            "i'm an ai",
+            "language model",
+            "large language model",
+            "llm",
+            "machine learning model",
+            "trained on",
+            "my training data",
+            "my training",
+            "i was trained",
+            "neural network",
+            "artificial intelligence",
+            "i don't have feelings",
+            "i don't have emotions",
+            "i cannot feel",
+            "i'm just a",
+            "i am just a",
+            "i'm only a",
+            "as a text-based",
+            "text-based assistant",
+            "virtual assistant",
+            "digital assistant",
+            "chatbot",
+            "chat bot",
+            "i'm programmed to",
+            "i am programmed",
+            "my programming",
+            "my algorithms",
+            "based on my programming",
+            
+            # Robotic Memory Phrases
+            "i remember you said",
+            "according to my memory",
+            "from our previous conversation",
+            "you're referring to",
+            "as we discussed",
+            "as mentioned earlier",
+            "in our last chat",
+            "based on what you asked",
+            
+            # Robotic Confirmations
+            "role exited",
+            "just to confirm again",
+            "certainly! i'd be happy to",
+            "certainly, i can",
+            "of course! as",
+            "absolutely! let me",
+            "sure thing!",
+            
+            # Robotic Limitations
+            "i cannot browse",
+            "i don't have access to",
+            "i cannot access",
+            "real-time information",
+            "my knowledge cutoff",
+            "knowledge cutoff date",
+            "i cannot see images",
+            "i cannot view",
+            
+            # Overly Formal/Robotic
+            "i hope this helps",
+            "hope that helps",
+            "feel free to ask",
+            "don't hesitate to",
+            "is there anything else",
+            "let me know if you need",
+            "happy to help further",
+            "i'd be delighted to",
+            "it would be my pleasure"
+        ]
+
         # 🧱 SYSTEM BASELINE (ONLY CONSTANT)
         self.baseline_traits = {
             "tone": "Warm",
@@ -211,13 +288,26 @@ class BehaviorEngine:
     # But wait, build_dynamic_prompt is called from main_brain which is async.
     # However, build_dynamic_prompt itself was sync. We need to make it async to call get_interaction_anchor (which is now async).
     
-    async def build_dynamic_prompt_async(self, core_identity: str, behavior_profile: BehaviorProfile, memory_context: str, user_id: str = None) -> str:
+    async def build_dynamic_prompt_async(self, core_identity: str, behavior_profile: BehaviorProfile, memory_context: str, user_id: str = None, user_profile: Dict = None) -> str:
         """
         Async version of prompt builder to support database lookups.
         """
         # 🔹 INTERACTION ANCHOR BLENDING
         anchor = None
         anchor_instruction = ""
+        
+        # 🔹 STATIC PROFILE BLENDING
+        bio_instruction = ""
+        if user_profile:
+             # Extract key fields nicely
+             name = user_profile.get("username", "User")
+             email = user_profile.get("email", "")
+             # If we have explicit preferences/bio in user_profile, usage them
+             bio_instruction = f"""
+### USER BIO (Static Profile)
+- **Name**: {name}
+- **Email**: {email}
+""" 
         
         if user_id:
             anchor = await self.get_interaction_anchor(user_id)
@@ -228,7 +318,7 @@ class BehaviorEngine:
 You have been assigned a specific persona/mode by the user:
 - **Relationship Tone**: {anchor.get('relationship_style', 'standard')}
 - **My Nickname**: {anchor.get('assistant_nickname', 'Prism')}
-- **User Nickname**: {anchor.get('user_nickname', 'User')}
+- **User Nickname**: {anchor.get('user_nickname', name)}
 - **Emotional Mode**: {anchor.get('emotional_mode', behavior_profile.tone)}
 
 **CRITICAL IDENTITY RULE**: Do NOT self-identify as a generic AI or mentioning 'Prism' unless explicitly asked. 
@@ -241,51 +331,72 @@ If the user asks "who are you", answer softly as {anchor.get('assistant_nickname
                      behavior_profile.warmth = max(behavior_profile.warmth, 0.8)
 
         # Reuse sync logic for the rest
-        return self._construct_prompt_text(core_identity, behavior_profile, memory_context, anchor_instruction, anchor)
+        return self._construct_prompt_text(core_identity, behavior_profile, memory_context, anchor_instruction, anchor, bio_instruction)
 
-    def _construct_prompt_text(self, core_identity, behavior_profile, memory_context, anchor_instruction, anchor):
-        # Translate profile processing to instructions
-        tone_instruction = f"Be {behavior_profile.tone} and {self.baseline_traits['style']}."
+    def _construct_prompt_text(self, core_identity, behavior_profile, memory_context, anchor_instruction, anchor, bio_instruction=""):
+        """
+        ENHANCED: Rich formatting guidelines for pro-quality responses.
+        """
+        # Build style hints
+        style_hints = []
         if behavior_profile.warmth > 0.7:
-            tone_instruction += " Show deep empathy and warmth."
+            style_hints.append("warm & empathetic")
         elif behavior_profile.warmth < 0.4:
-            tone_instruction += " Be professional and objective."
-            
-        style_instruction = ""
-        if behavior_profile.vocabulary_style == "simple":
-            style_instruction = "Use simple, easy-to-understand language. Avoid jargon."
-        elif behavior_profile.vocabulary_style == "technical":
-            style_instruction = "Use precise, technical terminology. Be rigorous."
-            
-        length_instruction = ""
+            style_hints.append("professional")
+        
         if behavior_profile.response_length == "concise":
-            length_instruction = "Keep your response brief and to the point."
+            style_hints.append("brief answers")
         elif behavior_profile.response_length == "detailed":
-            length_instruction = "Provide a comprehensive, detailed explanation."
-
-        follow_up_instr = 'After your response, optionally add a short follow-up asking if they want a simpler or deeper explanation, if appropriate.'
-
-        dynamic_prompt = f"""
-{core_identity}
+            style_hints.append("comprehensive explanations")
+        
+        style_str = ", ".join(style_hints) if style_hints else "balanced"
+        
+        # ENHANCED PROMPT with better structure
+        dynamic_prompt = f"""{core_identity}
+{bio_instruction}
 {anchor_instruction}
 
-### CURRENT BEHAVIORAL MODE (Computed Dynamically)
-- **Tone**: {tone_instruction}
-- **Style**: {style_instruction}
-- **Depth**: Level {int(behavior_profile.emotional_depth * 10)}/10
-- **Length**: {length_instruction}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 CURRENT CONTEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{memory_context if memory_context else "No prior context available."}
 
-### MEMORY CONTEXT
-{memory_context}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎨 ACTIVE STYLE: {style_str} | Tone: {behavior_profile.tone}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-### INSTRUCTIONS
-1. Analyze the user's need.
-2. Adapt your language to the defined style above.
-3. {follow_up_instr}
-4. **Emotional Alignment**: Start with a very short acknowledgement of their state if emotion is strong.
-5. **Transparency**: Do not hide that you are an AI, but be the AI they need via the behavior defined above. { "However, fully embody the nickname and style defined in the Active Interaction Mode." if anchor else "" }
+🌟 MANDATORY RESPONSE FORMAT:
 
-Remember: Sweet, Polite, Warm, Solution-Oriented is your baseline.
+1. **OPENING** (REQUIRED): Start with emoji + warm phrase
+   Examples: "✨ Great question!", "🎯 Let me help!", "💡 Interesting!"
+
+2. **STRUCTURE** (REQUIRED):
+   • Use **bold** for key terms
+   • Use standard Markdown lists (start lines with - or *)
+   • Numbers (1. 2. 3.) for steps
+   • Short paragraphs (2-3 sentences)
+   • ⚠️ IMPORTANT: Put each list item on a NEW LINE. Do NOT inline them.
+
+3. **EMOJIS** (REQUIRED - 3-5 per response):
+   📌 For tips/notes
+   🔑 For key points
+   ✅ For confirmations
+   💡 For ideas
+   🚀 For actions
+   ⚡ For important info
+
+4. **CLOSING**: Brief warm summary (optional)
+
+5. **SUGGESTIONS** (CRITICAL):
+   Must end with logical next steps using the "➤" format defined above.
+   Example:
+   ---
+   **🎯 What would you like to explore next?**
+   ➤ [Suggestion 1]
+   ➤ [Suggestion 2]
+   ---
+
+❌ NEVER respond without emojis - use them to convey warmth & intelligence!
 """
         return dynamic_prompt.strip()
 

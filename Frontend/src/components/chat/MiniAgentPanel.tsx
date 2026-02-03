@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useChatStore } from "@/stores/chatStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 import {
   Tooltip,
@@ -35,6 +36,7 @@ import { MiniAgentMessageActions } from "./MiniAgentMessageActions";
  * - Resizable width (min/max limits)
  */
 export const MiniAgentPanel = () => {
+  const isMobile = useIsMobile();
   const {
     miniAgents,
     activeMiniAgentId,
@@ -189,12 +191,23 @@ export const MiniAgentPanel = () => {
     }
   };
 
+  // Close panel and auto-delete if empty (no messages)
+  const handleClosePanel = () => {
+    if (activeAgent && activeAgent.messages.length === 0 && !activeAgent.hasConversation) {
+      // Auto-delete empty mini-agent threads
+      console.log('🧹 Auto-deleting empty Mini Agent:', activeAgent.id);
+      deleteMiniAgent(activeAgent.id);
+    } else {
+      setActiveMiniAgent(null);
+    }
+  };
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // ESC to close panel
       if (e.key === 'Escape' && activeAgent) {
-        setActiveMiniAgent(null);
+        handleClosePanel();
       }
     };
 
@@ -449,31 +462,59 @@ export const MiniAgentPanel = () => {
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: "100%", opacity: 0 }}
           transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          style={{ width: `${panelWidth}px` }}
-          className="h-full w-full bg-card border-l border-border flex flex-col shadow-xl relative overflow-hidden min-h-0"
+          style={isMobile ? { width: '100vw' } : { width: `${panelWidth}px` }}
+          className={cn(
+            "h-full bg-card border-l border-border flex flex-col shadow-xl relative overflow-hidden min-h-0",
+            isMobile && "fixed inset-0 z-50 w-full border-l-0"
+          )}
         >
-          {/* Resize Handle */}
-          <div
-            onMouseDown={handleMouseDown}
-            className={`absolute left-0 top-0 bottom-0 w-1 hover:w-1.5 bg-transparent hover:bg-primary/50 cursor-col-resize transition-all z-50 ${isResizing ? 'bg-primary w-1.5' : ''}`}
-            title="Drag to resize"
-          />
+          {/* Resize Handle - Hidden on mobile */}
+          {!isMobile && (
+            <div
+              onMouseDown={handleMouseDown}
+              className={`absolute left-0 top-0 bottom-0 w-1 hover:w-1.5 bg-transparent hover:bg-primary/50 cursor-col-resize transition-all z-50 ${isResizing ? 'bg-primary w-1.5' : ''}`}
+              title="Drag to resize"
+            />
+          )}
           {/* Header */}
-          <div className="shrink-0 h-14 px-4 border-b border-border flex items-center justify-between bg-gradient-to-r from-primary/10 via-primary/5 to-transparent backdrop-blur-sm">
+          <div className={cn(
+            "shrink-0 px-4 border-b border-border flex items-center justify-between bg-gradient-to-r from-primary/10 via-primary/5 to-transparent backdrop-blur-sm",
+            isMobile ? "h-16 pt-safe" : "h-14"
+          )}>
             <div className="flex items-center gap-2">
+              {/* Mobile back button */}
+              {isMobile && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={handleClosePanel}
+                  className="text-muted-foreground mr-1"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </Button>
+              )}
               <motion.div
-                className="w-5 h-5 rounded-md bg-primary/10 flex items-center justify-center shrink-0"
+                className={cn(
+                  "rounded-md bg-primary/10 flex items-center justify-center shrink-0",
+                  isMobile ? "w-8 h-8" : "w-5 h-5"
+                )}
                 animate={{ scale: [1, 1.05, 1] }}
                 transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
               >
-                <Bot className="w-3 h-3 text-primary" />
+                <Bot className={cn("text-primary", isMobile ? "w-5 h-5" : "w-3 h-3")} />
               </motion.div>
               <div className="min-w-0 flex items-baseline gap-2">
-                <h3 className="text-xs font-semibold text-foreground flex items-center gap-1.5 truncate">
+                <h3 className={cn(
+                  "font-semibold text-foreground flex items-center gap-1.5 truncate",
+                  isMobile ? "text-base" : "text-xs"
+                )}>
                   Sub-Brain
                 </h3>
-                {panelWidth >= 300 && (
-                  <span className="text-[10px] text-muted-foreground/80 truncate font-medium">Clarifier</span>
+                {(panelWidth >= 300 || isMobile) && (
+                  <span className={cn(
+                    "text-muted-foreground/80 truncate font-medium",
+                    isMobile ? "text-xs" : "text-[10px]"
+                  )}>Clarifier</span>
                 )}
               </div>
             </div>
@@ -505,7 +546,7 @@ export const MiniAgentPanel = () => {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      onClick={() => setActiveMiniAgent(null)}
+                      onClick={handleClosePanel}
                       className="text-muted-foreground"
                     >
                       <X className="w-4 h-4" />

@@ -239,9 +239,9 @@ const MobileSettings = () => {
               <TabsContent value="api" className="space-y-4">
                 <div className="p-4 bg-secondary/50 rounded-xl border border-border">
                   <h4 className="font-medium text-sm mb-2">Bring Your Own Key (BYOK)</h4>
-                  <p className="text-xs text-muted-foreground mb-4">Enter your OpenAI API key to unlock premium models and unlimited usage.</p>
+                  <p className="text-xs text-muted-foreground mb-4">Enter your Groq API key to unlock unlimited usage. Get your free key at console.groq.com</p>
                   <div className="flex gap-2">
-                    <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." className="flex-1" />
+                    <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="gsk_..." className="flex-1" />
                     <Button onClick={handleVerifyApiKey} disabled={!apiKey || isVerifying}>
                       {isVerifying ? <Loader2 className="w-4 h-4 animate-spin" /> : isVerified ? <CheckCircle className="w-4 h-4" /> : "Verify"}
                     </Button>
@@ -249,7 +249,7 @@ const MobileSettings = () => {
                   <AnimatePresence>
                     {isVerified && (
                       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mt-3 flex items-center gap-2 text-success text-sm">
-                        <CheckCircle className="w-4 h-4" /> API Key verified! Premium features enabled.
+                        <CheckCircle className="w-4 h-4" /> API Key verified! Unlimited usage enabled.
                       </motion.div>
                     )}
                   </AnimatePresence>

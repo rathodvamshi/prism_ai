@@ -61,6 +61,12 @@ INTENTS: Dict[str, IntentSpec] = {
         memory_write=[],
         requires_confirmation=True,
     ),
+    "media_play": IntentSpec(
+        required_slots=["query"],
+        memory_read=[],
+        memory_write=[],
+        requires_confirmation=False,
+    ),
 
     # Category C: System & Meta
     "correction": IntentSpec(
