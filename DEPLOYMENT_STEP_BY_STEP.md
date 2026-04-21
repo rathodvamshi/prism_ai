@@ -92,7 +92,7 @@ Fill in the following:
 Name:                    prism-api
 Environment:             Python 3
 Build Command:           pip install -r requirements.txt
-Start Command:           gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 4 --timeout 120
+Start Command:           python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 4
 Instance Type:           Standard
 Region:                  (Choose closest to you)
 Branch:                  main
