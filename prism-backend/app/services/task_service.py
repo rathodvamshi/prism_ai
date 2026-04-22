@@ -597,7 +597,15 @@ async def create_task(user_id: str, description: str, due_date_iso: str, user_em
         relative_str = f"in {days} day{'s' if days != 1 else ''}"
     
     # Beautiful confirmation message
-    friendly_msg = f"✅ Reminder set! I'll remind you to **{description}** at **{time_display} IST** ({relative_str})"
+    friendly_msg = f"""✅ **Reminder Successfully Created!**
+
+📝 **Task:** {description}
+⏰ **Scheduled:** {time_display} IST ({relative_str})
+📧 **Notification:** Email reminder will be sent
+
+---
+
+Your reminder is now active and you'll receive an email notification at the scheduled time. 🎉"""
 
     return {
         "message": friendly_msg,

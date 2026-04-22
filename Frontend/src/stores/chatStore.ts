@@ -1124,17 +1124,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
         // onAction - attach structured action data to the streaming AI message
         (action: any) => {
-          set(state => ({
-            chats: state.chats.map(chat => {
-              if (chat.id === chatId) {
-                const updatedMessages = chat.messages.map(m =>
-                  m.id === aiTempId ? { ...m, action } : m
-                );
-                return { ...chat, messages: updatedMessages };
-              }
-              return chat;
-            })
-          }));
+          // Handle REFRESH_TASKS action
+          if (action?.type === 'REFRESH_TASKS') {
+            console.log('🔄 REFRESH_TASKS action detected - reloading tasks');
+            // Trigger tasks reload in the sidebar or wherever tasks are displayed
+            // This will be handled by the Chat component listening to this action
+            set(state => ({
+              chats: state.chats.map(chat => {
+                if (chat.id === chatId) {
+                  const updatedMessages = chat.messages.map(m =>
+                    m.id === aiTempId ? { ...m, action, shouldRefreshTasks: true } : m
+                  );
+                  return { ...chat, messages: updatedMessages };
+                }
+                return chat;
+              })
+            }));
+          } else {
+            // Handle other actions (media_play, suggestions, etc.)
+            set(state => ({
+              chats: state.chats.map(chat => {
+                if (chat.id === chatId) {
+                  const updatedMessages = chat.messages.map(m =>
+                    m.id === aiTempId ? { ...m, action } : m
+                  );
+                  return { ...chat, messages: updatedMessages };
+                }
+                return chat;
+              })
+            }));
+          }
         },
         // onStatus - update streaming status for long-running tasks (e.g., deep research)
         (status: string) => {
@@ -1441,8 +1460,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
 
       const tasks = [...mapTasks(pending, false), ...mapTasks(completed, true)];
+      console.log("🔄 Setting tasks in store:", tasks);
       set({ tasks });
       console.log(`✅ Loaded ${tasks.length} tasks from backend (${pending.data?.length || 0} pending, ${completed.data?.length || 0} completed)`);
+      
+      // Force a state update to ensure React re-renders
+      const state = get();
+      console.log("📊 Current store state - tasks count:", state.tasks.length);
     } catch (e) {
       console.error("❌ Failed to load tasks from backend", e);
     }

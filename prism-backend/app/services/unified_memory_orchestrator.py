@@ -519,12 +519,6 @@ class UnifiedMemoryOrchestrator:
                 }
             )
             
-            # 🧠 ALSO check semantic_memories collection for stored facts/preferences
-            semantic_memories = await self.db["semantic_memories"].find(
-                {"user_id": user_id, "type": {"$in": ["preference", "fact", "identity"]}},
-                {"_id": 0, "content": 1, "type": 1, "value": 1}
-            ).sort("created_at", -1).limit(20).to_list(length=20)
-            
             query_time = (datetime.now() - start).total_seconds() * 1000
             
             # 🧠 MERGE DATA from both collections
@@ -576,18 +570,9 @@ class UnifiedMemoryOrchestrator:
                 if not memory_data["interests"]:
                     memory_data["interests"] = user_memory.get("interests", [])[:5]
                 memory_data["preferences"] = user_memory.get("preferences", [])[:5]
-            
-            # 🧠 Merge semantic memories (recent facts/preferences)
-            if semantic_memories:
-                logger.info(f"🧠 [MongoDB] Found {len(semantic_memories)} semantic memories")
-                for mem in semantic_memories:
-                    mem_value = mem.get("value") or mem.get("content")
-                    if mem_value and mem_value not in memory_data["preferences"]:
-                        memory_data["preferences"].append(mem_value)
-                # Limit to 10 total
-                memory_data["preferences"] = memory_data["preferences"][:10]
-                
-                # Check for location in memory_collection too
+
+            # Fill location from memory_collection.profile (needed when users_collection.profile is missing)
+            if user_memory:
                 mem_profile = user_memory.get("profile", {})
                 if isinstance(mem_profile, dict):
                     if not memory_data["location"]:

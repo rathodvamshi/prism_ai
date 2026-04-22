@@ -38,25 +38,25 @@ class ConnectionPoolConfig:
     """
     
     # =========================================================================
-    # MongoDB Connection Pool (HARDENED for Atlas + Windows stability)
+    # MongoDB Connection Pool (OPTIMIZED for Atlas + Windows stability)
     # =========================================================================
-    # Issue: WinError 10060 / NetworkTimeout from background pool refresh
-    # Solution: Conservative pool + long timeouts + reduced heartbeat
+    # Issue: Conservative pool causes connection starvation under load
+    # Solution: Balanced pool + reasonable timeouts + proper keepalive
     # =========================================================================
-    MONGODB_MIN_POOL_SIZE = 3          # Minimal warm connections (reduce background churn)
-    MONGODB_MAX_POOL_SIZE = 20         # Conservative max (prevent pool thrashing)
-    MONGODB_MAX_IDLE_TIME_MS = 60000   # 1 minute (recycle connections aggressively to avoid stale sockets)
-    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 30000  # 30 seconds (Increased for stability)
-    MONGODB_CONNECT_TIMEOUT_MS = 60000   # 60 seconds (Generous for initial TCP handshake)
-    MONGODB_SOCKET_TIMEOUT_MS = 60000    # 60 seconds (per-operation timeout)
-    MONGODB_HEARTBEAT_FREQUENCY_MS = 10000  # 10 seconds (check health more often to detect drops)
+    MONGODB_MIN_POOL_SIZE = 10         # Warm connections ready (prevent cold starts)
+    MONGODB_MAX_POOL_SIZE = 50         # Increased max (handle concurrent requests)
+    MONGODB_MAX_IDLE_TIME_MS = 300000  # 5 minutes (recycle stale connections, not aggressive)
+    MONGODB_SERVER_SELECTION_TIMEOUT_MS = 10000  # 10 seconds (fail fast on unavailable)
+    MONGODB_CONNECT_TIMEOUT_MS = 30000   # 30 seconds (reasonable TCP handshake time)
+    MONGODB_SOCKET_TIMEOUT_MS = 5000    # 5 seconds (per-operation timeout - fail fast)
+    MONGODB_HEARTBEAT_FREQUENCY_MS = 10000  # 10 seconds (check health regularly)
     MONGODB_LOCAL_THRESHOLD_MS = 15     # 15ms (standard latency preference)
-    MONGODB_WAIT_QUEUE_TIMEOUT_MS = 10000  # 10 seconds (wait for pool slot)
+    MONGODB_WAIT_QUEUE_TIMEOUT_MS = 5000  # 5 seconds (wait for pool slot - fail fast)
     
-    # Redis Connection Pool (ULTRA-OPTIMIZED)
-    REDIS_MAX_CONNECTIONS = 50         # Max 50 connections (reduced)
-    REDIS_SOCKET_TIMEOUT = 1           # 1 second (Cache should be instant or fail)
-    REDIS_SOCKET_CONNECT_TIMEOUT = 3   # 3 seconds
+    # Redis Connection Pool (OPTIMIZED)
+    REDIS_MAX_CONNECTIONS = 50         # Max 50 connections
+    REDIS_SOCKET_TIMEOUT = 5           # 5 seconds (reasonable for network jitter)
+    REDIS_SOCKET_CONNECT_TIMEOUT = 5   # 5 seconds
     REDIS_SOCKET_KEEPALIVE = True
     REDIS_RETRY_ON_TIMEOUT = True
     REDIS_HEALTH_CHECK_INTERVAL = 30   # Check every 30s

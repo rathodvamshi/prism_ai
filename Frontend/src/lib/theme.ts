@@ -20,7 +20,7 @@ export function applyTheme(theme: Theme) {
 }
 
 export function initTheme(): Theme {
-  const theme: Theme = "light"; // Default to light theme
+  const theme: Theme = "black"; // Default to AMOLED black theme
   if (typeof document !== "undefined") {
     applyTheme(theme);
   }

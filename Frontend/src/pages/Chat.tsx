@@ -399,6 +399,23 @@ const Chat = () => {
     } catch { }
   };
 
+  // 🔄 Handle REFRESH_TASKS action from AI responses
+  useEffect(() => {
+    if (currentChat?.messages && currentChat.messages.length > 0) {
+      const lastMessage = currentChat.messages[currentChat.messages.length - 1];
+      if (lastMessage?.shouldRefreshTasks) {
+        console.log('🔄 Refreshing tasks from AI action');
+        console.log('📋 Last message:', lastMessage);
+        
+        // Reload tasks in the sidebar
+        const { loadTasksFromBackend } = useChatStore.getState();
+        loadTasksFromBackend()
+          .then(() => console.log('✅ Tasks reloaded successfully'))
+          .catch(err => console.error('❌ Failed to refresh tasks:', err));
+      }
+    }
+  }, [currentChat?.messages?.length]);
+
   const handleSend = async (message: string, attachments?: any[]) => {
     // Validate message - don't create session for empty/trivial input
     const trimmedMessage = message.trim();
@@ -820,7 +837,7 @@ const Chat = () => {
                 );
               }
 
-              // Priority 5: Empty welcome (draft mode or no messages)
+              // Priority 5: Empty session / draft welcome
               return (
                 <ScrollArea className="flex-1 h-full scroll-smooth will-change-scroll" viewportRef={scrollRef}>
                   <div className="w-full max-w-[850px] mx-auto pt-16 sm:pt-24 pb-4 sm:pb-10 px-4 pl-6 sm:pl-8 lg:pl-12">
@@ -830,7 +847,22 @@ const Chat = () => {
                       transition={{ duration: 0.4, ease: "easeOut" }}
                       className="py-8 sm:py-16"
                     >
-                      <EmptyWelcome onSend={handleSend} />
+                      {currentChat ? (
+                        <div className="text-center space-y-3">
+                          <h2 className="text-2xl sm:text-3xl font-semibold tracking-tight">
+                            {currentChat.title || "Session"}
+                          </h2>
+                          <p className="text-muted-foreground text-sm sm:text-base max-w-xl mx-auto">
+                            This session loaded successfully, but no messages are saved yet.
+                          </p>
+                          <p className="text-muted-foreground/80 text-xs sm:text-sm max-w-xl mx-auto">
+                            If the previous response failed to generate or finalize, the chat stays empty.
+                            Send a new message to start this session.
+                          </p>
+                        </div>
+                      ) : (
+                        <EmptyWelcome onSend={handleSend} />
+                      )}
                     </motion.div>
                   </div>
                 </ScrollArea>

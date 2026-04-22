@@ -17,6 +17,8 @@ export interface Message {
   // 🆕 API source info - shows which API key generated this response
   keySource?: "platform" | "user";  // "platform" = app's API, "user" = user's own BYOK
   model?: string;  // e.g., "llama-3.1-8b-instant"
+  // 🆕 Task refresh flag - set when backend sends REFRESH_TASKS action
+  shouldRefreshTasks?: boolean;
 }
 
 export interface Highlight {

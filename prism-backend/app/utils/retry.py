@@ -27,8 +27,8 @@ T = TypeVar('T')
 async def smart_retry(
     operation: Callable[[], Any],
     operation_name: str,
-    max_retries: int = 2,
-    base_delay_ms: int = 50,
+    max_retries: int = 3,
+    base_delay_ms: int = 100,
     fail_silently: bool = True,
     fallback: Optional[T] = None
 ) -> Optional[T]:
@@ -38,8 +38,8 @@ async def smart_retry(
     Args:
         operation: Async function to retry
         operation_name: Name for logging (e.g., "MongoDB query")
-        max_retries: Maximum retry attempts (default: 2)
-        base_delay_ms: Base delay in milliseconds (default: 50ms)
+        max_retries: Maximum retry attempts (default: 3)
+        base_delay_ms: Base delay in milliseconds (default: 100ms)
         fail_silently: If True, return fallback on failure; if False, raise
         fallback: Value to return on failure (default: None)
     
@@ -51,7 +51,7 @@ async def smart_retry(
         user = await smart_retry(
             operation=lambda: users_collection.find_one({"_id": user_id}),
             operation_name="MongoDB find user",
-            max_retries=2
+            max_retries=3
         )
         
         # Redis get with fallback

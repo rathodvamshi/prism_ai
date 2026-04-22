@@ -21,7 +21,7 @@ import {
   InputOTPSeparator,
 } from "@/components/ui/input-otp";
 
-type AuthMode = "login" | "signup" | "forgot" | "otp";
+type AuthMode = "login" | "signup" | "forgot" | "otp" | "reset-otp" | "reset";
 
 const Auth = () => {
   const [searchParams] = useSearchParams();
@@ -32,6 +32,8 @@ const Auth = () => {
     signup,
     verifyOTP,
     forgotPassword,
+    verifyResetOTP,
+    resetPassword,
     isLoading: authLoading,
     error,
     showAccountCreatedAnimation,
@@ -56,6 +58,11 @@ const Auth = () => {
 
   // OTP States
   const [otp, setOtp] = useState("");
+  const [resetOtp, setResetOtp] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [timeLeft, setTimeLeft] = useState(60);
   const [canResend, setCanResend] = useState(false);
 
@@ -190,11 +197,63 @@ const Auth = () => {
         const result = await forgotPassword(email);
 
         if (result.success) {
-          toast({ title: "Reset link sent!", description: "Check your email inbox." });
+          toast({ title: "Code Sent! 📧", description: "Check your email for the reset code." });
+          setTimeLeft(60);
+          setCanResend(false);
+          setMode("reset-otp");
         } else {
           toast({
             title: "Error",
             description: result.error || "Failed to send reset email",
+            variant: "destructive"
+          });
+        }
+      } else if (mode === "reset-otp") {
+        const result = await verifyResetOTP(email, resetOtp);
+
+        if (result.success) {
+          toast({ title: "Code Verified! ✓", description: "Now set your new password." });
+          setMode("reset");
+        } else {
+          toast({
+            title: "Verification Failed",
+            description: result.error || "Invalid or expired code",
+            variant: "destructive"
+          });
+        }
+      } else if (mode === "reset") {
+        if (newPassword !== confirmPassword) {
+          toast({
+            title: "Passwords Don't Match",
+            description: "Please make sure both passwords are the same.",
+            variant: "destructive"
+          });
+          setIsLoading(false);
+          return;
+        }
+
+        if (newPassword.length < 8) {
+          toast({
+            title: "Password Too Short",
+            description: "Password must be at least 8 characters.",
+            variant: "destructive"
+          });
+          setIsLoading(false);
+          return;
+        }
+
+        const result = await resetPassword(email, resetOtp, newPassword, confirmPassword);
+
+        if (result.success) {
+          toast({ title: "Password Reset! 🎉", description: "You can now login with your new password." });
+          setNewPassword("");
+          setConfirmPassword("");
+          setResetOtp("");
+          setMode("login");
+        } else {
+          toast({
+            title: "Reset Failed",
+            description: result.error || "Failed to reset password",
             variant: "destructive"
           });
         }
@@ -296,6 +355,8 @@ const Auth = () => {
                   {mode === "signup" && "Create account"}
                   {mode === "forgot" && "Reset password"}
                   {mode === "otp" && "Verify Email"}
+                  {mode === "reset-otp" && "Enter Reset Code"}
+                  {mode === "reset" && "Create New Password"}
                 </motion.h1>
                 <motion.p
                   initial={{ opacity: 0 }}
@@ -305,12 +366,18 @@ const Auth = () => {
                 >
                   {mode === "login" && "Sign in to continue to PRISM"}
                   {mode === "signup" && "Start your journey with PRISM"}
-                  {mode === "forgot" && "We'll send you a reset link"}
+                  {mode === "forgot" && "Enter your email to receive a reset code"}
                   {mode === "otp" && (
                     <span className="flex items-center justify-center gap-1.5">
                       Enter the 6-digit code sent to <span className="font-medium text-foreground">{email}</span>
                     </span>
                   )}
+                  {mode === "reset-otp" && (
+                    <span className="flex items-center justify-center gap-1.5">
+                      Enter the 6-digit code sent to <span className="font-medium text-foreground">{email}</span>
+                    </span>
+                  )}
+                  {mode === "reset" && "Choose a strong password for your account"}
                 </motion.p>
               </div>
 
@@ -339,7 +406,7 @@ const Auth = () => {
                   </motion.div>
                 )}
 
-                {mode !== "otp" && (
+                {(mode === "login" || mode === "signup" || mode === "forgot") && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -464,6 +531,148 @@ const Auth = () => {
                   </motion.div>
                 )}
 
+                {mode === "reset-otp" && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: 0.1 }}
+                    className="flex flex-col items-center gap-4 my-2"
+                  >
+                    <div className="flex justify-center w-full">
+                      <InputOTP
+                        maxLength={6}
+                        value={resetOtp}
+                        onChange={(value) => setResetOtp(value)}
+                      >
+                        <InputOTPGroup className="gap-2">
+                          {[0, 1, 2].map((idx) => (
+                            <InputOTPSlot
+                              key={idx}
+                              index={idx}
+                              className="w-12 h-14 text-xl sm:text-2xl font-bold border-2 rounded-lg bg-background/50 focus:ring-primary/50 focus:border-primary transition-all duration-200"
+                            />
+                          ))}
+                        </InputOTPGroup>
+                        <InputOTPSeparator className="hidden sm:block mx-2" />
+                        <InputOTPGroup className="gap-2">
+                          {[3, 4, 5].map((idx) => (
+                            <InputOTPSlot
+                              key={idx}
+                              index={idx}
+                              className="w-12 h-14 text-xl sm:text-2xl font-bold border-2 rounded-lg bg-background/50 focus:ring-primary/50 focus:border-primary transition-all duration-200"
+                            />
+                          ))}
+                        </InputOTPGroup>
+                      </InputOTP>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-sm">
+                      {canResend ? (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setIsLoading(true);
+                            const result = await forgotPassword(email);
+                            if (result.success) {
+                              toast({ title: "Code Resent! 📧", description: "Check your email." });
+                              setTimeLeft(60);
+                              setCanResend(false);
+                            }
+                            setIsLoading(false);
+                          }}
+                          className="flex items-center gap-2 text-primary hover:text-primary/80 font-medium transition-colors"
+                          disabled={isLoading}
+                        >
+                          <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                          Resend Code
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Timer className="w-4 h-4" />
+                          <span>Resend in {timeLeft}s</span>
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+
+                {mode === "reset" && (
+                  <>
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.1 }}
+                      className="space-y-1"
+                    >
+                      <Label htmlFor="newPassword" className="text-foreground text-sm">New Password</Label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          id="newPassword"
+                          type={showNewPassword ? "text" : "password"}
+                          placeholder="••••••••"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          className="pl-10 pr-10 h-10 bg-background/50 border-border/50 focus:border-primary transition-colors text-sm"
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowNewPassword(!showNewPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </motion.div>
+
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.2 }}
+                      className="space-y-1"
+                    >
+                      <Label htmlFor="confirmPassword" className="text-foreground text-sm">Confirm Password</Label>
+                      <div className="relative">
+                        <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                        <Input
+                          id="confirmPassword"
+                          type={showConfirmPassword ? "text" : "password"}
+                          placeholder="••••••••"
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          className={`pl-10 pr-10 h-10 bg-background/50 border-border/50 focus:border-primary transition-colors text-sm ${
+                            confirmPassword && newPassword !== confirmPassword ? 'border-red-500 focus:border-red-500' : ''
+                          }`}
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      {confirmPassword && newPassword !== confirmPassword && (
+                        <p className="text-xs text-red-500 mt-1">Passwords don't match</p>
+                      )}
+                      {confirmPassword && newPassword === confirmPassword && confirmPassword.length >= 8 && (
+                        <p className="text-xs text-green-500 mt-1">✓ Passwords match</p>
+                      )}
+                    </motion.div>
+
+                    <div className="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
+                      <p className="font-medium text-foreground">Password requirements:</p>
+                      <ul className="space-y-0.5 ml-2">
+                        <li className={newPassword.length >= 8 ? 'text-green-500' : ''}>
+                          {newPassword.length >= 8 ? '✓' : '•'} At least 8 characters
+                        </li>
+                      </ul>
+                    </div>
+                  </>
+                )}
+
                 {mode === "login" && (
                   <div className="flex justify-end">
                     <button
@@ -485,7 +694,13 @@ const Auth = () => {
                     type="submit"
                     className="w-full bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg hover:shadow-xl transition-all duration-200 h-10 font-semibold"
                     size="default"
-                    disabled={isLoading || authLoading || (mode === "otp" && otp.length < 6)}
+                    disabled={
+                      isLoading || 
+                      authLoading || 
+                      (mode === "otp" && otp.length < 6) ||
+                      (mode === "reset-otp" && resetOtp.length < 6) ||
+                      (mode === "reset" && (newPassword.length < 8 || newPassword !== confirmPassword))
+                    }
                   >
                     {isLoading ? (
                       <div className="flex items-center gap-2">
@@ -496,8 +711,10 @@ const Auth = () => {
                       <>
                         {mode === "login" && "Sign In"}
                         {mode === "signup" && "Create Account"}
-                        {mode === "forgot" && "Send Reset Link"}
+                        {mode === "forgot" && "Send Reset Code"}
                         {mode === "otp" && "Verify Email"}
+                        {mode === "reset-otp" && "Verify Code"}
+                        {mode === "reset" && "Reset Password"}
                       </>
                     )}
                   </Button>
@@ -585,11 +802,14 @@ const Auth = () => {
                     </button>
                   </p>
                 )}
-                {(mode === "forgot" || mode === "otp") && (
+                {(mode === "forgot" || mode === "otp" || mode === "reset-otp" || mode === "reset") && (
                   <button
                     onClick={() => {
                       setMode("login");
                       setOtp("");
+                      setResetOtp("");
+                      setNewPassword("");
+                      setConfirmPassword("");
                     }}
                     className="inline-flex items-center gap-1 text-primary font-medium hover:text-primary/80 hover:underline transition-colors"
                   >

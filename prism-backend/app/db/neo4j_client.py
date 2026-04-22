@@ -44,8 +44,8 @@ def create_neo4j_driver():
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
             max_connection_lifetime=3600,       # Keep connections alive for 1 hour
             max_connection_pool_size=50,        # Increase pool size
-            connection_timeout=60,              # 60 second timeout for Neo4j Aura
-            connection_acquisition_timeout=60,  # 60s to acquire connection from pool
+            connection_timeout=15,              # 15 second timeout (fail fast)
+            connection_acquisition_timeout=15,  # 15s to acquire connection from pool
             keep_alive=True,                    # Enable TCP keepalive
             resolver=None                       # Use default DNS resolver
         )

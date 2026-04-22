@@ -7,9 +7,9 @@ const THEME_KEY = "theme";
 const getStoredTheme = (): Theme => {
   try {
     const stored = localStorage.getItem(THEME_KEY) as Theme;
-    return stored === "dark" || stored === "light" || stored === "black" ? stored : "light";
+    return stored === "dark" || stored === "light" || stored === "black" ? stored : "black";
   } catch {
-    return "light";
+    return "black";
   }
 };
 

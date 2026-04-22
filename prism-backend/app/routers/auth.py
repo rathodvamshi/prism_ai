@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Response, Request
+from fastapi import APIRouter, HTTPException, Depends, status, Response, Request, BackgroundTasks
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, validator
 from app.db.mongo_client import users_collection, auth_sessions_collection
@@ -64,6 +64,30 @@ class OTPVerify(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+
+class VerifyResetOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+    confirm_password: str
+    
+    @validator('confirm_password')
+    def passwords_match(cls, v, values):
+        if 'new_password' in values and v != values['new_password']:
+            raise ValueError('Passwords do not match')
+        return v
+    
+    @validator('new_password')
+    def password_strength(cls, v):
+        if len(v) < 8:
+            raise ValueError('Password must be at least 8 characters')
+        if len(v) > 40:
+            raise ValueError('Password is too long (max 40 characters)')
+        return v
 
 class AuthResponse(BaseModel):
     access_token: str
@@ -969,11 +993,13 @@ async def verify_otp(payload: OTPVerify, response: Response, request: Request):
         )
 
 @router.post("/forgot-password")
-async def forgot_password(payload: ForgotPasswordRequest):
-    """Send password reset OTP"""
+async def forgot_password(payload: ForgotPasswordRequest, background_tasks: BackgroundTasks):
+    """Send password reset OTP - Fast async response with background email"""
     try:
+        email = payload.email.lower().strip()
+        
         # Check if user exists and is verified
-        user = await AuthUtils.get_user_by_email(payload.email)
+        user = await AuthUtils.get_user_by_email(email)
         if not user or not user.get("verified"):
             # Return success even if user doesn't exist for security
             return {"message": "If an account exists, a reset code will be sent."}
@@ -988,22 +1014,32 @@ async def forgot_password(payload: ForgotPasswordRequest):
             {
                 "$set": {
                     "reset_otp": reset_otp,
-                    "reset_otp_expires_at": otp_expires_at
+                    "reset_otp_expires_at": otp_expires_at,
+                    "reset_otp_verified": False
                 }
             }
         )
         
-        # Send reset email
-        await send_reset_email(payload.email, reset_otp)
+        # Print OTP to terminal for development
+        print(f"\n{'='*60}")
+        print(f"🔐 PASSWORD RESET CODE")
+        print(f"📧 Email: {email}")
+        print(f"🔢 Reset Code: {reset_otp}")
+        print(f"⏰ Valid for: 15 minutes")
+        print(f"{'='*60}\n")
         
+        # Queue email sending in background (non-blocking)
+        background_tasks.add_task(send_reset_email_sync, email, reset_otp)
+        
+        logger.info(f"Password reset initiated for {email}")
         return {"message": "If an account exists, a reset code will be sent."}
         
     except Exception as e:
         logger.error(f"Forgot password failed: {e}")
         return {"message": "If an account exists, a reset code will be sent."}
 
-async def send_reset_email(email: str, reset_otp: str):
-    """Send password reset email"""
+def send_reset_email_sync(email: str, reset_otp: str):
+    """Send password reset email (synchronous for background task)"""
     try:
         from_addr = getattr(settings, "SENDER_EMAIL", "") or getattr(settings, "MAIL_FROM", "")
         api_key = getattr(settings, "SENDGRID_API_KEY", "")
@@ -1012,29 +1048,234 @@ async def send_reset_email(email: str, reset_otp: str):
             logger.warning("Email sending disabled - missing configuration")
             return
         
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PRISM AI - Password Reset</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f4f4f5;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f4f5;">
+        <tr>
+            <td style="padding: 40px 20px;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width: 480px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);">
+                    
+                    <!-- Header -->
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%); padding: 32px 40px; text-align: center;">
+                            <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">PRISM AI</h1>
+                            <p style="margin: 8px 0 0 0; color: rgba(255, 255, 255, 0.9); font-size: 14px; font-weight: 400;">Password Reset Request</p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding: 40px;">
+                            <h2 style="margin: 0 0 16px 0; color: #18181b; font-size: 20px; font-weight: 600;">Reset Your Password</h2>
+                            <p style="margin: 0 0 24px 0; color: #52525b; font-size: 15px; line-height: 1.6;">
+                                You've requested to reset your password. Use the verification code below to continue:
+                            </p>
+                            
+                            <!-- OTP Code Box -->
+                            <div style="background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 2px solid #e2e8f0; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+                                <p style="margin: 0 0 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600;">Your Reset Code</p>
+                                <div style="font-size: 36px; font-weight: 700; color: #6366f1; letter-spacing: 8px; font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;">{reset_otp}</div>
+                            </div>
+                            
+                            <!-- Expiry Notice -->
+                            <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 24px 0;">
+                                <p style="margin: 0; color: #92400e; font-size: 13px;">
+                                    <strong>⏱️ This code expires in 15 minutes.</strong> Do not share this code with anyone.
+                                </p>
+                            </div>
+                            
+                            <!-- Security Note -->
+                            <p style="margin: 24px 0 0 0; color: #71717a; font-size: 13px; line-height: 1.5;">
+                                If you didn't request this password reset, you can safely ignore this email. Your password will remain unchanged.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background-color: #f9fafb; padding: 20px 40px; border-top: 1px solid #e5e7eb;">
+                            <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center;">
+                                Secured by PRISM AI • Your Personal AI Assistant
+                            </p>
+                        </td>
+                    </tr>
+                    
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+        
+        plain_text = f"""
+PRISM AI - Password Reset
+
+Your password reset code: {reset_otp}
+
+This code expires in 15 minutes.
+Do not share this code with anyone.
+
+If you didn't request this, please ignore this email.
+
+- PRISM AI Team
+"""
+        
         msg = Mail(
             from_email=from_addr,
             to_emails=email,
-            subject="PRISM - Password Reset Code",
-            html_content=f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #333;">Password Reset Request</h2>
-                <p>Your password reset code is:</p>
-                <div style="background: #f4f4f4; padding: 20px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; margin: 20px 0;">
-                    {reset_otp}
-                </div>
-                <p>This code will expire in 15 minutes.</p>
-                <p>If you didn't request a password reset, please ignore this email.</p>
-            </div>
-            """
+            subject="PRISM AI - Password Reset Code",
+            html_content=html_content,
+            plain_text_content=plain_text
         )
         
         sg = SendGridAPIClient(api_key)
-        sg.send(msg)
-        logger.info(f"Password reset email sent to {email}")
+        response = sg.send(msg)
+        logger.info(f"Password reset email sent to {email} (status: {response.status_code})")
         
     except Exception as e:
         logger.error(f"Failed to send reset email: {e}")
+
+async def send_reset_email(email: str, reset_otp: str):
+    """Send password reset email (async wrapper - kept for compatibility)"""
+    send_reset_email_sync(email, reset_otp)
+
+@router.post("/verify-reset-otp")
+async def verify_reset_otp(payload: VerifyResetOTPRequest):
+    """Verify the password reset OTP"""
+    try:
+        email = payload.email.lower().strip()
+        
+        # Find user and check reset OTP
+        user = await users_collection.find_one({"email": email})
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset code"
+            )
+        
+        stored_otp = user.get("reset_otp")
+        otp_expires_at = user.get("reset_otp_expires_at", 0)
+        
+        # Check if OTP is valid and not expired
+        current_time = datetime.now(timezone.utc).timestamp()
+        if not stored_otp or stored_otp != payload.otp:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset code"
+            )
+        
+        if current_time > otp_expires_at:
+            # Clear expired OTP
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$unset": {"reset_otp": "", "reset_otp_expires_at": ""}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset code has expired. Please request a new one."
+            )
+        
+        # Mark OTP as verified (but don't delete yet - need it for reset)
+        await users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"reset_otp_verified": True}}
+        )
+        
+        logger.info(f"Reset OTP verified for {email}")
+        return {"message": "Code verified successfully", "verified": True}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reset OTP verification failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Verification failed"
+        )
+
+@router.post("/reset-password")
+async def reset_password(payload: ResetPasswordRequest):
+    """Reset password after OTP verification"""
+    try:
+        email = payload.email.lower().strip()
+        
+        # Find user
+        user = await users_collection.find_one({"email": email})
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid request"
+            )
+        
+        # Verify OTP again and check if verified
+        stored_otp = user.get("reset_otp")
+        otp_expires_at = user.get("reset_otp_expires_at", 0)
+        otp_verified = user.get("reset_otp_verified", False)
+        
+        current_time = datetime.now(timezone.utc).timestamp()
+        
+        if not stored_otp or stored_otp != payload.otp:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset code"
+            )
+        
+        if current_time > otp_expires_at:
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$unset": {"reset_otp": "", "reset_otp_expires_at": "", "reset_otp_verified": ""}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset code has expired. Please request a new one."
+            )
+        
+        if not otp_verified:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please verify your code first"
+            )
+        
+        # Hash new password using AuthUtils (bcrypt)
+        hashed_password = AuthUtils.hash_password(payload.new_password)
+        
+        # Update password and clear reset data
+        # Store in both passwordHash (primary) and password (legacy) for compatibility
+        await users_collection.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "passwordHash": hashed_password,
+                    "password": hashed_password,
+                    "password_updated_at": datetime.now(timezone.utc)
+                },
+                "$unset": {
+                    "reset_otp": "",
+                    "reset_otp_expires_at": "",
+                    "reset_otp_verified": ""
+                }
+            }
+        )
+        
+        logger.info(f"Password reset successful for {email}")
+        return {"message": "Password reset successful! You can now login with your new password.", "success": True}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Password reset failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Password reset failed"
+        )
 
 @router.get("/me")
 async def get_current_user_info(current_user: User = Depends(get_current_user_from_session)):

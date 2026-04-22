@@ -31,6 +31,8 @@ interface AuthState {
   signup: (email: string, password: string, name?: string) => Promise<{ success: boolean; error?: string }>;
   verifyOTP: (email: string, otp: string) => Promise<{ success: boolean; error?: string; accountCreated?: boolean; isAdmin?: boolean }>;
   forgotPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
+  verifyResetOTP: (email: string, otp: string) => Promise<{ success: boolean; error?: string }>;
+  resetPassword: (email: string, otp: string, newPassword: string, confirmPassword: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   checkAuth: () => void;
   clearError: () => void;
@@ -149,6 +151,51 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     try {
       const response = await authAPI.forgotPassword(email);
+
+      if (response.error) {
+        set({ error: response.error, isLoading: false });
+        return { success: false, error: response.error };
+      }
+
+      set({ isLoading: false, error: null });
+      return { success: true };
+    } catch (error) {
+      const errorMsg = 'Network error. Please check your connection.';
+      set({ error: errorMsg, isLoading: false });
+      return { success: false, error: errorMsg };
+    }
+  },
+
+  verifyResetOTP: async (email: string, otp: string) => {
+    set({ isLoading: true, error: null });
+
+    try {
+      const response = await authAPI.verifyResetOTP({ email, otp });
+
+      if (response.error) {
+        set({ error: response.error, isLoading: false });
+        return { success: false, error: response.error };
+      }
+
+      set({ isLoading: false, error: null });
+      return { success: true };
+    } catch (error) {
+      const errorMsg = 'Network error. Please check your connection.';
+      set({ error: errorMsg, isLoading: false });
+      return { success: false, error: errorMsg };
+    }
+  },
+
+  resetPassword: async (email: string, otp: string, newPassword: string, confirmPassword: string) => {
+    set({ isLoading: true, error: null });
+
+    try {
+      const response = await authAPI.resetPassword({ 
+        email, 
+        otp, 
+        new_password: newPassword, 
+        confirm_password: confirmPassword 
+      });
 
       if (response.error) {
         set({ error: response.error, isLoading: false });

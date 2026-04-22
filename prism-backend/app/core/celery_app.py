@@ -97,10 +97,13 @@ if CELERY_AVAILABLE:
         worker_disable_rate_limits=False,  # Keep rate limits for stability
         
         # Connection Resilience
-        broker_connection_retry_on_startup=True,  # Retry connection on startup
-        broker_connection_retry=True,  # Retry connection on failure
-        broker_connection_max_retries=10,  # Max retries for connection
-        broker_connection_timeout=30,  # Connection timeout in seconds
+        broker_connection_retry_on_startup=True,
+        broker_connection_retry=True,
+        broker_connection_max_retries=10,
+        broker_connection_timeout=30,
+        broker_transport_options={
+            "socket_keepalive": True,
+        },
         
         # Worker Configuration
         worker_pool=worker_pool,  # Platform-specific pool

@@ -30,7 +30,7 @@ const AdminRoute = ({ children }: { children: React.ReactNode }) => {
     
     // While loading, show nothing or spinner. 
     // Usually authStore.checkAuth() runs on mount if authLoading is true.
-    if (authLoading) return <div className="h-screen w-full flex items-center justify-center bg-zinc-950 text-white">Loading Security Protocols...</div>;
+    if (authLoading) return <div className="h-screen w-full flex items-center justify-center bg-background text-foreground">Loading Security Protocols...</div>;
     
     if (!user || !isAdmin) {
         return <Auth />; // Redirect to normal login or show 403

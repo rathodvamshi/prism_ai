@@ -589,16 +589,18 @@ async def generate_response(
         # Improved Regex: Capture between markers rather than assuming quote structure
         # This robustness handles inputs containing quotes or newlines correctly
         if "<<<SELECTED_TEXT>>>" in message:
-            ask_flow_match = re.search(r'<<<SELECTED_TEXT>>>([\s\S]*?)<<<END_SELECTED_TEXT>>>[\s\S]*?The user\'s instruction is:([\s\S]*?)Your task:', message, re.DOTALL | re.IGNORECASE)
-            
+            # Must match the exact template built in:
+            # Frontend/src/components/chat/ChatInput.tsx
+            ask_flow_match = re.search(
+                r'The user has selected the following text:\s*<<<SELECTED_TEXT>>>\s*([\s\S]*?)\s*<<<END_SELECTED_TEXT>>>\s*The user\'s instruction is:\s*"([\s\S]*?)"',
+                message,
+                re.DOTALL | re.IGNORECASE
+            )
+
             if ask_flow_match:
                 selected_text = ask_flow_match.group(1).strip()
-                # Instruction might be wrapped in quotes, remove them
-                instruction_raw = ask_flow_match.group(2).strip()
-                if instruction_raw.startswith('"') and instruction_raw.endswith('"'):
-                    instruction = instruction_raw[1:-1].strip()
-                else:
-                    instruction = instruction_raw
+                # Group 2 already comes from inside quotes in the frontend template
+                instruction = ask_flow_match.group(2).strip()
                 
                 logger.info(f"🧠 [AskFlow] Detected selection context ({len(selected_text)} chars)")
                 
@@ -717,14 +719,13 @@ Your goal is to explain/analyze/act on THIS TEXT.
     
     # Preference Storage
     if any(k in lowered for k in ["i like", "i love", "my favorite", "i prefer"]):
-         # We'll use a simplified extraction for now or rely on an async task if we had one.
-         # For reliability, we trigger the orchestrator's semantic storage
-         await unified_memory_orchestrator.store_memory(
-             user_id=user_id,
-             memory_content=message,
-             memory_type=MemoryType.SEMANTIC, # Store full sentence relative to preference
-             metadata={"type": "potential_preference"}
-         )
+         try:
+             # Use the enhanced extractor so categories like `food_preference` map
+             # into user `preferences` (MongoDB) and can be recalled for preference queries.
+             from app.services.enhanced_memory_system import enhanced_memory
+             await enhanced_memory.process_message(user_id, message)
+         except Exception as e:
+             logger.warning(f"⚠️ Preference extraction/storage failed: {e}")
 
     # 6️⃣ THINKING SUMMARY (Append to response or log)
     # The requirement is "Thinking Transparency" exposed to backend/frontend.
@@ -783,6 +784,44 @@ async def generate_response_stream(
     """
     logger.info(f"[MainBrain] HIT generate_response_stream for user_id={user_id}")
     
+    # 0.1) Ask Flow Parsing (Mini-Agent Style Understanding)
+    # This must run on the streaming path too, otherwise `ask_flow_context`
+    # is referenced later without being defined (NameError).
+    ask_flow_context = ""
+    try:
+        if "<<<SELECTED_TEXT>>>" in message:
+            # Must match the exact template built in:
+            # `Frontend/src/components/chat/ChatInput.tsx`
+            ask_flow_match = re.search(
+                r'The user has selected the following text:\s*<<<SELECTED_TEXT>>>\s*([\s\S]*?)\s*<<<END_SELECTED_TEXT>>>\s*The user\'s instruction is:\s*"([\s\S]*?)"',
+                message,
+                re.DOTALL | re.IGNORECASE
+            )
+
+            if ask_flow_match:
+                selected_text = ask_flow_match.group(1).strip()
+                # Group 2 already comes from inside quotes in the frontend template
+                instruction = ask_flow_match.group(2).strip()
+
+                logger.info(f"🧠 [AskFlow] Detected selection context ({len(selected_text)} chars)")
+
+                # Use only the instruction for behavior/intent + prompt generation
+                message = instruction
+
+                ask_flow_context = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 USER SELECTED TEXT (FOCUS CONTEXT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The user is asking specifically about this text:
+"{selected_text}"
+
+INSTRUCTION: "{instruction}"
+Your goal is to explain/analyze/act on THIS TEXT.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    except Exception as e:
+        logger.error(f"🧠 [AskFlow] Error parsing context: {e}")
+
     # 🧠 SMART MEMORY EXTRACTION - Extract and store user info IMMEDIATELY
     # This ensures "my name is X", age, location, etc. are captured right away
     try:
@@ -1103,7 +1142,22 @@ Enjoy the vibes! 🎧"""
             # Valid Draft -> Ask for Confirmation
             desc = draft_result["description"]
             time_str = draft_result["due_date_display"]
-            yield f"I'll set a reminder to **{desc}** for **{time_str}**.\n\nShall I go ahead? (Say 'Yes' or 'Confirm')"
+            
+            # Enhanced confirmation message with better formatting
+            confirmation_msg = f"""
+📋 **Reminder Summary**
+
+🎯 **Task:** {desc}
+⏰ **Scheduled:** {time_str}
+
+---
+
+**Does this look correct?**
+
+Please confirm by saying **"Yes"** or **"Confirm"** to set this reminder.
+Or say **"No"** to cancel and try again.
+"""
+            yield confirmation_msg.strip()
             return
             
         except Exception as e:
@@ -1318,24 +1372,8 @@ Enjoy the vibes! 🎧"""
         # In a stream, we can't "retry", but we can log for improvement
         
     # 8️⃣ CONVERSATIONAL CONTINUITY (Redis History)
-    if session_id:
-        try:
-             # Add to MongoDB session (Persistent)
-             # Use push updates for atomicity
-             new_messages = [
-                 {"role": "user", "content": message, "timestamp": datetime.now(timezone.utc)},
-                 {"role": "assistant", "content": full_response, "timestamp": datetime.now(timezone.utc)}
-             ]
-             await sessions_collection.update_one(
-                 {"$or": [{"sessionId": session_id}, {"chat_id": session_id}]},
-                 {
-                     "$push": {"messages": {"$each": new_messages}},
-                     "$set": {"last_updated": datetime.now(timezone.utc)}
-                 }
-             )
-        except Exception as e:
-            logger.error(f"Failed to update session history: {e}")
-            
+    # MongoDB persistence is handled by streaming finalize endpoint to avoid duplicates.
+
     # Add to Redis (Fast short-term context)
     await add_message_to_history(user_id, "user", message)
     await add_message_to_history(user_id, "assistant", full_response)

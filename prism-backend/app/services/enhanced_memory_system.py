@@ -701,7 +701,7 @@ class EnhancedMemorySystem:
                     elif memory_type == "occupation":
                         memory_data = {"occupation": memory_data.get("value") or memory_data.get("text")}
                         
-                elif memory_type in ["preference", "interest", "hobby"]:
+                elif memory_type in ["preference", "interest", "hobby", "food_preference", "dislike"]:
                     mem_type = MemoryType.PREFERENCE
                 elif memory_type == "relationship":
                     mem_type = MemoryType.RELATIONSHIP

@@ -304,44 +304,52 @@
     --sidebar-ring: 160 83% 45%;
   }
 
-  /* Pure Black AMOLED Theme */
+  /* Pure Black AMOLED Theme - True black for OLED power savings */
   .black {
-    --background: 0 0% 5.5%;
-    --foreground: 0 0% 95%;
+    --background: 0 0% 0%;
+    --foreground: 0 0% 96%;
 
-    --card: 0 0% 7%;
-    --card-foreground: 0 0% 95%;
+    --card: 0 0% 4%;
+    --card-foreground: 0 0% 96%;
 
-    --popover: 0 0% 7%;
-    --popover-foreground: 0 0% 95%;
+    --popover: 0 0% 4%;
+    --popover-foreground: 0 0% 96%;
 
-    --primary: 160 83% 45%;
+    --primary: 160 84% 39%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 0 0% 95%;
+    --secondary: 0 0% 8%;
+    --secondary-foreground: 0 0% 96%;
 
-    --muted: 0 0% 12%;
-    --muted-foreground: 0 0% 60%;
+    --muted: 0 0% 8%;
+    --muted-foreground: 0 0% 55%;
 
-    --accent: 160 83% 45%;
+    --accent: 160 84% 39%;
     --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 72% 51%;
+    --destructive: 0 72% 55%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 0 0% 15%;
-    --input: 0 0% 15%;
-    --ring: 160 83% 45%;
+    --success: 158 64% 45%;
+    --success-foreground: 0 0% 100%;
 
-    --sidebar-background: 0 0% 5.5%;
-    --sidebar-foreground: 0 0% 95%;
-    --sidebar-primary: 160 83% 45%;
+    --border: 0 0% 12%;
+    --input: 0 0% 10%;
+    --ring: 160 84% 39%;
+
+    --sidebar-background: 0 0% 0%;
+    --sidebar-foreground: 0 0% 96%;
+    --sidebar-primary: 160 84% 39%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 0 0% 12%;
-    --sidebar-accent-foreground: 0 0% 95%;
-    --sidebar-border: 0 0% 15%;
-    --sidebar-ring: 160 83% 45%;
+    --sidebar-accent: 0 0% 8%;
+    --sidebar-accent-foreground: 0 0% 96%;
+    --sidebar-border: 0 0% 12%;
+    --sidebar-ring: 160 84% 39%;
+
+    /* AMOLED-optimized shadows - subtle glow instead of dark shadows */
+    --shadow-soft: 0 0 8px hsl(0 0% 100% / 0.03);
+    --shadow-card: 0 0 16px hsl(0 0% 100% / 0.04);
+    --shadow-glow: 0 0 24px hsl(160 84% 39% / 0.25);
   }
 }
 

@@ -62,6 +62,8 @@ export const authAPI = {
     signup: (data: any) => handleRequest(api.post('/auth/signup', data)),
     verifyOTP: (data: any) => handleRequest(api.post('/auth/verify-otp', data)),
     forgotPassword: (email: string) => handleRequest(api.post('/auth/forgot-password', { email })),
+    verifyResetOTP: (data: { email: string; otp: string }) => handleRequest(api.post('/auth/verify-reset-otp', data)),
+    resetPassword: (data: { email: string; otp: string; new_password: string; confirm_password: string }) => handleRequest(api.post('/auth/reset-password', data)),
     logout: () => handleRequest(api.post('/auth/logout')),
     me: () => handleRequest(api.get('/auth/me')),
 };
@@ -225,7 +227,8 @@ export const chatAPI = {
         onAction?: (action: any) => void,
         onStatus?: (status: string) => void,
         onTitle?: (title: string) => void,
-        onStart?: (messageId: string) => void
+        onStart?: (messageId: string) => void,
+        imageUrls?: string[]
     ) => {
         const MAX_RETRIES = 2;
         const RETRY_DELAY = 1000; // 1 second
@@ -237,7 +240,7 @@ export const chatAPI = {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
-                    body: JSON.stringify({ prompt: content, temperature: 0.7 }),
+                    body: JSON.stringify({ prompt: content, temperature: 0.7, image_urls: imageUrls && imageUrls.length ? imageUrls.slice(0,3) : undefined }),
                 });
 
                 if (!genRes.ok) {
@@ -327,24 +330,35 @@ export const chatAPI = {
                 // 🛡️ Metadata filter (uses shared utility)
                 const filterMetadata = createMetadataFilter();
 
-                // 🎬 ACTION tag extractor (extracts MEDIA_PLAY before filtering)
+                // 🎬 ACTION tag extractor (extracts all action types before filtering)
                 const extractActions = (text: string): string => {
                     // Buffer partial ACTION tags across chunks
                     const combined = actionBuffer + text;
                     actionBuffer = '';
 
-                    // Extract complete ACTION:MEDIA_PLAY tags
-                    const actionRegex = /<!--ACTION:MEDIA_PLAY:(.*?)-->/g;
+                    // Extract complete ACTION tags (all types: MEDIA_PLAY, REFRESH_TASKS, suggestions, etc.)
+                    const actionRegex = /<!--ACTION:([^>]+)-->/g;
                     let match;
                     while ((match = actionRegex.exec(combined)) !== null) {
                         try {
-                            const payload = JSON.parse(match[1]);
-                            console.log('🎬 Extracted MEDIA_PLAY action:', payload);
-                            if (onAction) {
-                                onAction({ type: 'media_play', payload });
+                            const actionContent = match[1];
+                            
+                            // Try to parse as JSON (for structured actions like MEDIA_PLAY)
+                            if (actionContent.startsWith('{')) {
+                                const payload = JSON.parse(actionContent);
+                                console.log('🎬 Extracted action:', payload);
+                                if (onAction) {
+                                    onAction(payload);
+                                }
+                            } else {
+                                // Handle simple action types (REFRESH_TASKS, etc.)
+                                console.log('🎬 Extracted simple action:', actionContent);
+                                if (onAction) {
+                                    onAction({ type: actionContent.trim(), payload: {} });
+                                }
                             }
                         } catch (e) {
-                            console.error('❌ Failed to parse MEDIA_PLAY action:', e);
+                            console.error('❌ Failed to parse action:', e);
                         }
                     }
 
@@ -556,6 +570,45 @@ export const mediaAPI = {
 
 export const healthAPI = {
     check: () => handleRequest(api.get('/health')),
+};
+
+export const uploadsAPI = {
+    uploadImages: async (files: File[]): Promise<{ urls: string[] } | { error: string }> => {
+        const form = new FormData();
+        files.slice(0, 3).forEach((f) => form.append('files', f));
+        try {
+            const res = await fetch(`${API_URL}/api/uploads/images`, {
+                method: 'POST',
+                credentials: 'include',
+                body: form,
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                return { error: data?.detail?.message || data?.detail || 'Upload failed' } as any;
+            }
+            return { urls: data?.urls || [] };
+        } catch (e: any) {
+            return { error: e?.message || 'Network error' } as any;
+        }
+    },
+    uploadFiles: async (files: File[]): Promise<{ urls: string[] } | { error: string }> => {
+        const form = new FormData();
+        files.forEach((f) => form.append('files', f));
+        try {
+            const res = await fetch(`${API_URL}/api/uploads/files`, {
+                method: 'POST',
+                credentials: 'include',
+                body: form,
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                return { error: data?.detail?.message || data?.detail || 'Upload failed' } as any;
+            }
+            return { urls: data?.urls || [] };
+        } catch (e: any) {
+            return { error: e?.message || 'Network error' } as any;
+        }
+    }
 };
 
 export const adminAPI = {
